@@ -509,7 +509,24 @@ scrollable panels. SQLite still stores the full event history.
 
 ## Current Limitations
 
-Atlas works around thClaws APIs that do not exist yet:
+Atlas features fall into three levels:
+
+- **Works today without changing thClaws**: health, capability discovery,
+  `/agent/run`, live SSE streaming, `x_callback`, session continuation,
+  deploy/sync, restart, and the multi-machine dashboard built by Atlas.
+- **Possible as workarounds**: cancel, central approval, live reconnect, team
+  control, and central audit. These can be approximated by Atlas but are not
+  fully native in thClaws yet.
+- **Not native without thClaws changes**: per-tool remote approval, list running
+  jobs, job status, cancel by job id, stream resume cursor, structured remote
+  Team API, and first-class cross-machine tool-decision audit.
+
+The current APIs are enough for a control-plane MVP, but production-grade deep
+orchestration would benefit from native thClaws additions. The highest-value
+requests are `job_id + status + cancel` and a remote approval protocol for
+`/agent/run`.
+
+Current missing native surfaces include:
 
 - No native thClaws remote job id.
 - No native thClaws job status API.
