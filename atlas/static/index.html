@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Atlas Control Plane</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260621-handoff1">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="rail">
+        <div class="brand">
+          <div class="brand-mark">A</div>
+          <div>
+            <h1>Atlas</h1>
+            <span>Control Plane</span>
+          </div>
+        </div>
+
+        <section class="rail-section">
+          <div class="section-head">
+            <h2>Workers</h2>
+            <div class="head-actions">
+              <button id="addWorkerBtn" class="mini-btn" type="button">Add</button>
+              <button id="pollAllBtn" class="icon-btn" title="Poll all workers" type="button">↻</button>
+            </div>
+          </div>
+          <div id="workerList" class="stack-list"></div>
+        </section>
+
+        <section class="rail-section">
+          <div class="section-head">
+            <h2>Workspaces</h2>
+            <button id="addWorkspaceBtn" class="mini-btn" type="button">Add</button>
+          </div>
+          <div id="workspaceList" class="stack-list"></div>
+        </section>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <h2>Command</h2>
+            <p id="routePreview">No route selected</p>
+          </div>
+          <div class="topbar-right">
+            <div class="metrics">
+              <div><span id="metricWorkers">0</span><label>workers</label></div>
+              <div><span id="metricRunning">0</span><label>running</label></div>
+              <div><span id="metricDone">0</span><label>done</label></div>
+            </div>
+            <button id="refreshBtn" class="secondary-btn" type="button">Refresh</button>
+          </div>
+        </header>
+
+        <section class="composer">
+          <div class="composer-grid">
+            <label>
+              Prompt
+              <textarea id="promptInput" rows="6" placeholder="Ask Atlas to route work to the right thClaws worker"></textarea>
+            </label>
+            <div class="control-column">
+              <label>
+                Conversation
+                <select id="conversationSelect"></select>
+              </label>
+              <label>
+                Worker
+                <select id="workerSelect"></select>
+              </label>
+              <label>
+                Workspace
+                <select id="workspaceSelect"></select>
+              </label>
+              <label>
+                Model
+                <input id="modelInput" placeholder="optional">
+              </label>
+              <section class="handoff-box">
+                <label class="toggle-row">
+                  <input id="handoffEnabled" type="checkbox">
+                  <span>After success</span>
+                </label>
+                <label>
+                  Send to worker
+                  <select id="handoffWorkerSelect"></select>
+                </label>
+                <label>
+                  Send to workspace
+                  <select id="handoffWorkspaceSelect"></select>
+                </label>
+                <label>
+                  Handoff prompt
+                  <textarea id="handoffPromptInput" rows="5"></textarea>
+                </label>
+              </section>
+              <button id="submitJobBtn" class="primary-btn">Run</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="split">
+          <div class="panel jobs-panel">
+            <div class="panel-head">
+              <h2>Jobs</h2>
+              <span id="lastRefresh" class="panel-note">Not refreshed yet</span>
+            </div>
+            <div id="jobList" class="job-list"></div>
+          </div>
+
+          <div class="panel stream-panel">
+            <div class="panel-head">
+              <div>
+                <h2 id="streamTitle">Live Stream</h2>
+                <p id="streamMeta">Select a job</p>
+              </div>
+              <button id="cancelJobBtn" class="danger-btn" disabled>Cancel</button>
+            </div>
+            <pre id="streamOutput" class="stream-output"></pre>
+            <div id="eventList" class="event-list"></div>
+          </div>
+        </section>
+
+        <section class="panel audit-panel">
+          <div class="panel-head">
+            <h2>Audit</h2>
+            <span class="panel-note">Latest 30</span>
+          </div>
+          <div id="auditList" class="audit-list"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="workerModal" class="modal-backdrop" hidden>
+      <form id="workerForm" class="modal" autocomplete="off">
+        <div class="modal-head">
+          <h2 id="workerFormTitle">Add Worker</h2>
+          <button class="icon-btn close-modal" type="button" data-close-modal>×</button>
+        </div>
+        <input name="id" type="hidden">
+        <div class="form-grid">
+          <label>Name<input name="name" placeholder="Company Mac"></label>
+          <label>Base URL<input name="base_url" placeholder="http://127.0.0.1:4317" required></label>
+          <label>Token<input name="token" type="password" placeholder="Leave blank to keep existing token"></label>
+          <label>Role<input name="role" placeholder="personal, company-a, finance"></label>
+          <label>Tags<input name="tags" placeholder="personal, coding, finance"></label>
+        </div>
+        <div class="form-actions">
+          <button class="secondary-btn" type="button" data-close-modal>Cancel</button>
+          <button id="workerSubmitBtn" class="primary-btn" type="submit">Save Worker</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="workspaceModal" class="modal-backdrop" hidden>
+      <form id="workspaceForm" class="modal" autocomplete="off">
+        <div class="modal-head">
+          <h2 id="workspaceFormTitle">Add Workspace</h2>
+          <button class="icon-btn close-modal" type="button" data-close-modal>×</button>
+        </div>
+        <input name="id" type="hidden">
+        <div class="form-grid">
+          <label>Worker<select name="worker_id" required></select></label>
+          <label>Key<input name="workspace_key" placeholder="company-a" required></label>
+          <label>Directory<input name="workspace_dir" placeholder="/Users/me/project" required></label>
+          <label>Company<input name="company" placeholder="Company A"></label>
+          <label>Tags<input name="tags" placeholder="backend, ops"></label>
+        </div>
+        <div class="form-actions">
+          <button class="secondary-btn" type="button" data-close-modal>Cancel</button>
+          <button id="workspaceSubmitBtn" class="primary-btn" type="submit">Save Workspace</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="toast" class="toast" aria-live="polite"></div>
+    <script src="/static/app.js?v=20260621-handoff1" type="module"></script>
+  </body>
+</html>
