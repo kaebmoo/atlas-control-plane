@@ -47,6 +47,13 @@ Coder worker    -> Reviewer worker
 For deeper graph workflows, loops, conditions, and manager-directed execution,
 see [docs/workflow-engine-plan.md](docs/workflow-engine-plan.md).
 
+## User Documentation
+
+- [User Guide](docs/user-guide.md)
+- [Workflow Examples](docs/workflow-examples.md)
+- [Demo Script](docs/demo-script.md)
+- [Workflow Engine Coding Plan](docs/workflow-engine-coding-plan.md)
+
 ## Core Concepts
 
 ### Worker
@@ -656,7 +663,11 @@ atlas/
   static/             dashboard HTML/CSS/JS
 docs/
   architecture.md
+  demo-script.md
   thclaws-capability-matrix.md
+  user-guide.md
+  workflow-examples.md
+  workflow-engine-coding-plan.md
   workflow-engine-plan.md
 scripts/
   run.sh
