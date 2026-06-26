@@ -24,6 +24,14 @@ from .workflows import (
 
 
 STATIC_DIR = Path(__file__).parent / "static"
+# ponytail: hard-coded safety caps; move to Config only when deployments need tuning.
+_WORKFLOW_POLICY_LIMITS = {
+    "max_jobs": 100,
+    "max_iterations": 100,
+    "max_attempts_per_node": 25,
+    "max_minutes": 1440,
+    "requires_human_after_iterations": 100,
+}
 
 
 class AtlasRuntime:
@@ -214,7 +222,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 return
             if method == "POST":
                 payload = self._read_json()
-                _validate_workflow_payload(payload)
+                _validate_workflow_payload(runtime, payload)
                 workflow = runtime.db.create_workflow_definition(payload)
                 self._json({"workflow": workflow}, HTTPStatus.CREATED)
                 return
@@ -235,7 +243,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 payload = self._read_json()
                 graph = payload.get("graph", workflow["graph"])
                 policy = payload.get("policy", workflow.get("policy") or {})
-                _validate_workflow_payload({"graph": graph, "policy": policy})
+                _validate_workflow_payload(runtime, {"graph": graph, "policy": policy})
                 updated = runtime.db.update_workflow_definition(workflow_id, payload)
                 self._json({"workflow": updated})
                 return
@@ -252,7 +260,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             graph = payload.get("graph", workflow["graph"])
             policy = payload.get("policy", workflow.get("policy") or {})
-            validate_workflow_graph(graph, policy)
+            _validate_workflow_payload(runtime, {"graph": graph, "policy": policy})
             self._json({"ok": True})
             return
 
@@ -477,10 +485,78 @@ def _public_worker(worker: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
-def _validate_workflow_payload(payload: dict[str, Any]) -> None:
+def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any]) -> None:
     if "graph" not in payload:
         raise ValueError("workflow graph is required")
-    validate_workflow_graph(payload["graph"], payload.get("policy") or {})
+    graph = payload["graph"]
+    policy = payload.get("policy") or {}
+    validate_workflow_graph(graph, policy)
+    _validate_workflow_references(runtime, graph, policy)
+    _validate_workflow_policy(policy)
+    _validate_workflow_draft_triggers(payload.get("triggers") or [])
+
+
+def _validate_workflow_references(runtime: AtlasRuntime, graph: dict[str, Any], policy: dict[str, Any]) -> None:
+    workers = {worker["id"]: worker for worker in runtime.db.list_workers()}
+    workspaces = {workspace["id"]: workspace for workspace in runtime.db.list_workspaces()}
+    allowed_worker_ids = set(_string_list(policy.get("allowed_worker_ids"), "policy.allowed_worker_ids"))
+    allowed_workspace_ids = set(_string_list(policy.get("allowed_workspace_ids"), "policy.allowed_workspace_ids"))
+
+    for node in graph.get("nodes") or []:
+        node_id = node["id"]
+        worker_id = node.get("worker_id")
+        workspace_id = node.get("workspace_id")
+        role = str(node.get("role") or "").strip().lower()
+
+        if worker_id and worker_id not in workers:
+            raise ValueError(f"workflow node {node_id} references unknown worker_id: {worker_id}")
+        if worker_id and allowed_worker_ids and worker_id not in allowed_worker_ids:
+            raise ValueError(f"workflow node {node_id} worker_id is not allowed by policy")
+
+        if workspace_id:
+            workspace = workspaces.get(workspace_id)
+            if not workspace:
+                raise ValueError(f"workflow node {node_id} references unknown workspace_id: {workspace_id}")
+            if worker_id and workspace["worker_id"] != worker_id:
+                raise ValueError(f"workflow node {node_id} workspace_id does not belong to worker_id")
+            if allowed_workspace_ids and workspace_id not in allowed_workspace_ids:
+                raise ValueError(f"workflow node {node_id} workspace_id is not allowed by policy")
+            if allowed_worker_ids and workspace["worker_id"] not in allowed_worker_ids:
+                raise ValueError(f"workflow node {node_id} workspace worker is not allowed by policy")
+
+        if role and not worker_id and not workspace_id and not any(_worker_matches_role(worker, role) for worker in workers.values()):
+            raise ValueError(f"workflow node {node_id} role has no matching worker: {role}")
+
+
+def _validate_workflow_policy(policy: dict[str, Any]) -> None:
+    for key, maximum in _WORKFLOW_POLICY_LIMITS.items():
+        if key not in policy:
+            continue
+        value = policy[key]
+        if not isinstance(value, int) or value <= 0 or value > maximum:
+            raise ValueError(f"workflow policy {key} must be an integer between 1 and {maximum}")
+
+
+def _validate_workflow_draft_triggers(triggers: Any) -> None:
+    if not isinstance(triggers, list):
+        raise ValueError("workflow draft triggers must be a list")
+    for index, trigger in enumerate(triggers):
+        if not isinstance(trigger, dict):
+            raise ValueError(f"workflow draft trigger at index {index} must be an object")
+        validate_workflow_trigger_payload(trigger)
+
+
+def _string_list(value: Any, name: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ValueError(f"{name} must be a list of ids")
+    return value
+
+
+def _worker_matches_role(worker: dict[str, Any], role: str) -> bool:
+    tags = {str(tag).strip().lower() for tag in worker.get("tags") or [] if str(tag).strip()}
+    return str(worker.get("role") or "").lower() == role or role in tags
 
 
 def _prepare_workflow_trigger(runtime: AtlasRuntime, payload: dict[str, Any]) -> None:
@@ -499,7 +575,7 @@ def _build_workflow_draft(runtime: AtlasRuntime, payload: dict[str, Any]) -> dic
     if not plain_prompt:
         raise ValueError("plain_language_prompt is required")
     draft = _run_workflow_builder(runtime, _builder_prompt(runtime, plain_prompt))
-    _validate_workflow_payload(draft)
+    _validate_workflow_payload(runtime, draft)
     draft.setdefault("triggers", [])
     draft.setdefault("warnings", [])
     return draft
@@ -509,7 +585,7 @@ def _repair_workflow(runtime: AtlasRuntime, workflow: dict[str, Any], payload: d
     graph = payload.get("graph", workflow["graph"])
     policy = payload.get("policy", workflow.get("policy") or {})
     try:
-        validate_workflow_graph(graph, policy)
+        _validate_workflow_payload(runtime, {"graph": graph, "policy": policy})
         return {
             "name": workflow.get("name") or "Workflow",
             "description": workflow.get("description") or "",
@@ -521,7 +597,7 @@ def _repair_workflow(runtime: AtlasRuntime, workflow: dict[str, Any], payload: d
     except ValueError as exc:
         prompt = _builder_prompt(runtime, f"Repair this workflow. Error: {exc}\nWorkflow JSON:\n{json.dumps({'graph': graph, 'policy': policy}, ensure_ascii=True)}")
         draft = _run_workflow_builder(runtime, prompt)
-        _validate_workflow_payload(draft)
+        _validate_workflow_payload(runtime, draft)
         return draft
 
 

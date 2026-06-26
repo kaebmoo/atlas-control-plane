@@ -72,10 +72,15 @@ class Router:
         workspace_key = (payload.get("workspace_key") or "").lower()
         company = (payload.get("company") or "").lower()
         prompt = (payload.get("prompt") or "").lower()
+        requested_role = (payload.get("role") or "").lower()
         requested_tags = set(_normalize_tags(payload.get("tags") or []))
 
         candidates: list[tuple[int, str, dict[str, Any], dict[str, Any] | None]] = []
         for worker in workers:
+            worker_tags = set(_normalize_tags(worker.get("tags") or []))
+            role = str(worker.get("role") or "").lower()
+            if requested_role and requested_role not in worker_tags | {role}:
+                continue
             worker_workspaces = [workspace for workspace in workspaces if workspace["worker_id"] == worker["id"]]
             if not worker_workspaces:
                 worker_workspaces = [None]
@@ -93,7 +98,6 @@ class Router:
                     score -= 50
                     reasons.append("offline worker")
 
-                worker_tags = set(_normalize_tags(worker.get("tags") or []))
                 workspace_tags = set(_normalize_tags((workspace or {}).get("tags") or []))
                 all_tags = worker_tags | workspace_tags
                 tag_hits = requested_tags & all_tags
@@ -119,7 +123,9 @@ class Router:
                         score += 5
                         reasons.append("prompt hints")
 
-                role = str(worker.get("role") or "").lower()
+                if requested_role:
+                    score += 50
+                    reasons.append("role match")
                 if role and role in prompt:
                     score += 15
                     reasons.append("role hint")

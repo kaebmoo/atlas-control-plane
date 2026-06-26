@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from atlas.db import Database, now_iso
+from atlas.router import Router
 from atlas.workflows import WorkflowRunner, render_prompt, validate_workflow_graph
 
 
@@ -58,6 +59,7 @@ def main() -> None:
     assert "Prev: old" in prompt
 
     assert_raises("missing prompt variable: {input.missing}", render_prompt, "{input.missing}", input={})
+    check_role_routing()
     check_runner()
     check_condition_runner()
     print("workflow validation/render check ok")
@@ -71,7 +73,7 @@ def check_runner() -> None:
             "start": "reporter",
             "nodes": [
                 {"id": "reporter", "type": "worker", "worker_id": worker["id"], "prompt": "Topic: {input.topic}", "outputs": ["notes"]},
-                {"id": "anchor", "type": "worker", "worker_id": worker["id"], "prompt": "Read: {artifact.notes}", "outputs": ["script"]},
+                {"id": "anchor", "type": "worker", "worker_id": worker["id"], "role": "anchor", "prompt": "Read: {artifact.notes}", "outputs": ["script"]},
             ],
             "edges": [{"from": "reporter", "to": "anchor", "condition": {"type": "always"}}],
         }
@@ -82,12 +84,23 @@ def check_runner() -> None:
         assert run["state"] == "succeeded"
         assert run["current_nodes"] == []
         assert fake_jobs.prompts == ["Topic: weather", "Read: result: Topic: weather"]
+        assert fake_jobs.payloads[1]["role"] == "anchor"
         assert [node["state"] for node in db.list_workflow_nodes(run["id"])] == ["succeeded", "succeeded"]
         assert [edge["to_node"] for edge in db.list_workflow_edges(run["id"])] == ["anchor"]
         assert {artifact["key"]: artifact["content"] for artifact in db.list_artifacts(run_id=run["id"])} == {
             "notes": "result: Topic: weather",
             "script": "result: Read: result: Topic: weather",
         }
+
+
+def check_role_routing() -> None:
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+        db.upsert_worker({"name": "Reporter", "base_url": "http://127.0.0.1:1", "role": "reporter"})
+        anchor = db.upsert_worker({"name": "Anchor", "base_url": "http://127.0.0.1:2", "role": "anchor"})
+        decision = Router(db).resolve({"prompt": "write this", "role": "anchor"})
+        assert decision.worker["id"] == anchor["id"]
+        assert_raises("No routeable worker", Router(db).resolve, {"prompt": "write this", "role": "missing"})
 
 
 def check_condition_runner() -> None:
@@ -161,9 +174,11 @@ class FakeJobService:
         self.worker_id = worker_id
         self.responder = responder
         self.prompts: list[str] = []
+        self.payloads: list[dict] = []
 
     def submit(self, payload: dict) -> dict:
         prompt = payload["prompt"]
+        self.payloads.append(dict(payload))
         self.prompts.append(prompt)
         job = self.db.create_job({"worker_id": self.worker_id, "prompt": prompt, "state": "running"})
         self.db.append_job_text(job["id"], self.responder(prompt) if self.responder else f"result: {prompt}")

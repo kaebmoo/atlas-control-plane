@@ -183,7 +183,7 @@ class WorkflowRunner:
             raise ValueError(f"unsupported workflow node type: {node.get('type')}")
         prompt = render_prompt(node.get("prompt") or "", input=input, artifacts=artifacts, run=run, node=node, job={})
         payload = {"prompt": prompt}
-        for key in ("worker_id", "workspace_id", "workspace_key", "company", "model", "tags"):
+        for key in ("worker_id", "workspace_id", "workspace_key", "company", "model", "tags", "role"):
             if node.get(key):
                 payload[key] = node[key]
         job = self.job_service.submit(payload)

@@ -34,6 +34,27 @@ def main() -> None:
         try:
             invalid = request_error(base_url, "POST", "/api/workflows", {"name": "bad", "graph": {"nodes": []}})
             assert "non-empty list" in invalid["error"]
+            bad_worker = request_error(
+                base_url,
+                "POST",
+                "/api/workflows",
+                {
+                    "name": "bad worker",
+                    "graph": {"start": "only", "nodes": [{"id": "only", "type": "worker", "worker_id": "wrk_missing"}], "edges": []},
+                },
+            )
+            assert "unknown worker_id" in bad_worker["error"]
+            bad_policy = request_error(
+                base_url,
+                "POST",
+                "/api/workflows",
+                {
+                    "name": "bad policy",
+                    "graph": {"start": "only", "nodes": [{"id": "only", "type": "worker"}], "edges": []},
+                    "policy": {"max_jobs": 1000},
+                },
+            )
+            assert "policy max_jobs" in bad_policy["error"]
 
             workflow = request(
                 base_url,
