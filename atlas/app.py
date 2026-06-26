@@ -14,6 +14,7 @@ from .config import Config
 from .db import Database
 from .jobs import JobManager, TERMINAL_STATES
 from .router import Router
+from .workflows import WorkflowRunner, validate_workflow_graph
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -25,6 +26,7 @@ class AtlasRuntime:
         self.db = Database(config.db_path)
         self.jobs = JobManager(self.db, config.request_timeout_seconds)
         self.router = Router(self.db)
+        self.workflows = WorkflowRunner(self.db, self.jobs)
 
 
 class AtlasHttpServer(ThreadingHTTPServer):
@@ -50,6 +52,9 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self._dispatch("POST")
+
+    def do_PUT(self) -> None:
+        self._dispatch("PUT")
 
     def do_DELETE(self) -> None:
         self._dispatch("DELETE")
@@ -195,6 +200,85 @@ class AtlasHandler(BaseHTTPRequestHandler):
             self._stream_job_events(parts[2], after)
             return
 
+        if parts == ["api", "workflows"]:
+            if method == "GET":
+                limit = int(query.get("limit", ["100"])[0])
+                self._json({"workflows": runtime.db.list_workflow_definitions(limit)})
+                return
+            if method == "POST":
+                payload = self._read_json()
+                _validate_workflow_payload(payload)
+                workflow = runtime.db.create_workflow_definition(payload)
+                self._json({"workflow": workflow}, HTTPStatus.CREATED)
+                return
+
+        if len(parts) == 3 and parts[:2] == ["api", "workflows"]:
+            workflow_id = parts[2]
+            workflow = runtime.db.get_workflow_definition(workflow_id)
+            if not workflow:
+                raise FileNotFoundError()
+            if method == "GET":
+                self._json({"workflow": workflow})
+                return
+            if method == "PUT":
+                payload = self._read_json()
+                graph = payload.get("graph", workflow["graph"])
+                policy = payload.get("policy", workflow.get("policy") or {})
+                _validate_workflow_payload({"graph": graph, "policy": policy})
+                updated = runtime.db.update_workflow_definition(workflow_id, payload)
+                self._json({"workflow": updated})
+                return
+            if method == "DELETE":
+                if not runtime.db.delete_workflow_definition(workflow_id):
+                    raise FileNotFoundError()
+                self._json({"deleted": True})
+                return
+
+        if len(parts) == 4 and parts[:2] == ["api", "workflows"] and parts[3] == "validate" and method == "POST":
+            workflow = runtime.db.get_workflow_definition(parts[2])
+            if not workflow:
+                raise FileNotFoundError()
+            payload = self._read_json()
+            graph = payload.get("graph", workflow["graph"])
+            policy = payload.get("policy", workflow.get("policy") or {})
+            validate_workflow_graph(graph, policy)
+            self._json({"ok": True})
+            return
+
+        if parts == ["api", "workflow-runs"]:
+            if method == "GET":
+                limit = int(query.get("limit", ["100"])[0])
+                workflow_definition_id = query.get("workflow_definition_id", [""])[0] or None
+                self._json({"runs": runtime.db.list_workflow_runs(limit, workflow_definition_id)})
+                return
+            if method == "POST":
+                payload = self._read_json()
+                workflow_definition_id = payload.get("workflow_definition_id")
+                if not workflow_definition_id:
+                    raise ValueError("workflow_definition_id is required")
+                run = runtime.workflows.run_workflow(workflow_definition_id, payload.get("input") or {})
+                self._json({"run": run}, HTTPStatus.ACCEPTED)
+                return
+
+        if len(parts) == 3 and parts[:2] == ["api", "workflow-runs"] and method == "GET":
+            run = runtime.db.get_workflow_run(parts[2])
+            if not run:
+                raise FileNotFoundError()
+            self._json(
+                {
+                    "run": run,
+                    "nodes": runtime.db.list_workflow_nodes(parts[2]),
+                    "edges": runtime.db.list_workflow_edges(parts[2]),
+                }
+            )
+            return
+
+        if len(parts) == 4 and parts[:2] == ["api", "workflow-runs"] and parts[3] == "artifacts" and method == "GET":
+            if not runtime.db.get_workflow_run(parts[2]):
+                raise FileNotFoundError()
+            self._json({"artifacts": runtime.db.list_artifacts(run_id=parts[2])})
+            return
+
         if parts == ["api", "audit"] and method == "GET":
             limit = int(query.get("limit", ["100"])[0])
             self._json({"audit": runtime.db.list_audit(limit)})
@@ -283,7 +367,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
     def _cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "authorization, content-type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 
     def _is_authorized(self) -> bool:
         token = self.server.runtime.config.api_token
@@ -310,6 +394,12 @@ def _public_worker(worker: dict[str, Any]) -> dict[str, Any]:
     token = public.pop("token", None)
     public["token_set"] = bool(token)
     return public
+
+
+def _validate_workflow_payload(payload: dict[str, Any]) -> None:
+    if "graph" not in payload:
+        raise ValueError("workflow graph is required")
+    validate_workflow_graph(payload["graph"], payload.get("policy") or {})
 
 
 def main(argv: list[str] | None = None) -> None:

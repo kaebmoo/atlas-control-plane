@@ -389,6 +389,56 @@ curl -sS -X POST http://127.0.0.1:8787/api/jobs \
 curl -N http://127.0.0.1:8787/api/jobs/job_xxx/events?after=0
 ```
 
+### Create A Workflow
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/workflows \
+  -H 'content-type: application/json' \
+  -d '{
+    "name": "Reporter to Anchor",
+    "graph": {
+      "start": "reporter",
+      "nodes": [
+        {
+          "id": "reporter",
+          "type": "worker",
+          "worker_id": "wrk_reporter",
+          "prompt": "Find facts about: {input.topic}",
+          "outputs": ["notes"]
+        },
+        {
+          "id": "anchor",
+          "type": "worker",
+          "worker_id": "wrk_anchor",
+          "prompt": "Turn this into a script: {artifact.notes}",
+          "outputs": ["script"]
+        }
+      ],
+      "edges": [
+        {"from": "reporter", "to": "anchor", "condition": {"type": "always"}}
+      ]
+    },
+    "policy": {"max_jobs": 5}
+  }'
+```
+
+### Run A Workflow
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/workflow-runs \
+  -H 'content-type: application/json' \
+  -d '{
+    "workflow_definition_id": "wfd_xxx",
+    "input": {"topic": "technology news"}
+  }'
+```
+
+Artifacts:
+
+```bash
+curl -sS http://127.0.0.1:8787/api/workflow-runs/wfr_xxx/artifacts
+```
+
 ## API Surface
 
 - `GET /api/health`
@@ -410,6 +460,16 @@ curl -N http://127.0.0.1:8787/api/jobs/job_xxx/events?after=0
 - `GET /api/jobs/{id}`
 - `GET /api/jobs/{id}/events`
 - `POST /api/jobs/{id}/cancel`
+- `GET /api/workflows`
+- `POST /api/workflows`
+- `GET /api/workflows/{id}`
+- `PUT /api/workflows/{id}`
+- `DELETE /api/workflows/{id}`
+- `POST /api/workflows/{id}/validate`
+- `GET /api/workflow-runs`
+- `POST /api/workflow-runs`
+- `GET /api/workflow-runs/{id}`
+- `GET /api/workflow-runs/{id}/artifacts`
 - `GET /api/audit`
 
 ## Configuration
