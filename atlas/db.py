@@ -35,9 +35,22 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     data = dict(row)
-    for key in ("tags", "metadata", "agent_info", "payload", "details"):
+    list_fields = {"tags", "current_nodes", "input_artifacts", "output_artifacts"}
+    json_fields = {
+        "agent_info",
+        "condition_result",
+        "config",
+        "counters",
+        "details",
+        "graph",
+        "input",
+        "metadata",
+        "payload",
+        "policy",
+    }
+    for key in list_fields | json_fields:
         if key in data:
-            data[key] = decode_json(data[key], [] if key == "tags" else {})
+            data[key] = decode_json(data[key], [] if key in list_fields else {})
     return data
 
 
@@ -143,6 +156,111 @@ CREATE TABLE IF NOT EXISTS job_events (
 CREATE INDEX IF NOT EXISTS idx_job_events_job_seq ON job_events(job_id, seq);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
 
+CREATE TABLE IF NOT EXISTS workflow_definitions (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'draft',
+  graph TEXT NOT NULL,
+  policy TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  id TEXT PRIMARY KEY,
+  workflow_definition_id TEXT,
+  name TEXT NOT NULL,
+  state TEXT NOT NULL,
+  input TEXT NOT NULL DEFAULT '{}',
+  current_nodes TEXT NOT NULL DEFAULT '[]',
+  counters TEXT NOT NULL DEFAULT '{}',
+  error TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(workflow_definition_id) REFERENCES workflow_definitions(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS workflow_nodes (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  node_key TEXT NOT NULL,
+  state TEXT NOT NULL,
+  job_id TEXT,
+  attempt INTEGER NOT NULL DEFAULT 0,
+  input_artifacts TEXT NOT NULL DEFAULT '[]',
+  output_artifacts TEXT NOT NULL DEFAULT '[]',
+  error TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE,
+  FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS workflow_edges (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  from_node TEXT NOT NULL,
+  to_node TEXT NOT NULL,
+  condition_result TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+  id TEXT PRIMARY KEY,
+  run_id TEXT,
+  job_id TEXT,
+  key TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  content TEXT NOT NULL,
+  metadata TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE,
+  FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS workflow_triggers (
+  id TEXT PRIMARY KEY,
+  workflow_definition_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  config TEXT NOT NULL DEFAULT '{}',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_fired_at TEXT,
+  next_fire_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(workflow_definition_id) REFERENCES workflow_definitions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS workflow_trigger_events (
+  id TEXT PRIMARY KEY,
+  trigger_id TEXT NOT NULL,
+  run_id TEXT,
+  payload TEXT NOT NULL DEFAULT '{}',
+  state TEXT NOT NULL,
+  error TEXT,
+  dedupe_key TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(trigger_id) REFERENCES workflow_triggers(id) ON DELETE CASCADE,
+  FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_definitions_updated ON workflow_definitions(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_created ON workflow_runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workflow_nodes_run ON workflow_nodes(run_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_edges_run ON workflow_edges(run_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_triggers_definition ON workflow_triggers(workflow_definition_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_trigger_events_trigger ON workflow_trigger_events(trigger_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   action TEXT NOT NULL,
@@ -211,6 +329,278 @@ class Database:
                 "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def create_workflow_definition(self, payload: dict[str, Any]) -> dict[str, Any]:
+        definition_id = payload.get("id") or new_id("wfd")
+        now = now_iso()
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO workflow_definitions(id, name, description, version, status, graph, policy, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    definition_id,
+                    payload.get("name") or "Untitled workflow",
+                    payload.get("description") or "",
+                    int(payload.get("version") or 1),
+                    payload.get("status") or "draft",
+                    encode_json(payload.get("graph") or {}),
+                    encode_json(payload.get("policy") or {}),
+                    now,
+                    now,
+                ),
+            )
+        self.audit("workflow_definition.create", "workflow_definition", definition_id)
+        return self.get_workflow_definition(definition_id) or {}
+
+    def get_workflow_definition(self, definition_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM workflow_definitions WHERE id = ?", (definition_id,)).fetchone()
+        return row_to_dict(row)
+
+    def list_workflow_definitions(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM workflow_definitions ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def update_workflow_definition(self, definition_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        allowed = {
+            "name": "name",
+            "description": "description",
+            "version": "version",
+            "status": "status",
+            "graph": "graph",
+            "policy": "policy",
+        }
+        fields: dict[str, Any] = {}
+        for key, column in allowed.items():
+            if key in payload:
+                fields[column] = encode_json(payload[key]) if key in {"graph", "policy"} else payload[key]
+        if not fields:
+            return self.get_workflow_definition(definition_id)
+        fields["updated_at"] = now_iso()
+        assignments = ", ".join(f"{key} = ?" for key in fields)
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute(f"UPDATE workflow_definitions SET {assignments} WHERE id = ?", list(fields.values()) + [definition_id])
+        if cursor.rowcount:
+            self.audit("workflow_definition.update", "workflow_definition", definition_id)
+        return self.get_workflow_definition(definition_id)
+
+    def delete_workflow_definition(self, definition_id: str) -> bool:
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute("DELETE FROM workflow_definitions WHERE id = ?", (definition_id,))
+        deleted = cursor.rowcount > 0
+        if deleted:
+            self.audit("workflow_definition.delete", "workflow_definition", definition_id)
+        return deleted
+
+    def create_workflow_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        run_id = payload.get("id") or new_id("wfr")
+        now = now_iso()
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO workflow_runs(
+                  id, workflow_definition_id, name, state, input, current_nodes,
+                  counters, error, created_at, started_at, finished_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    payload.get("workflow_definition_id"),
+                    payload.get("name") or "Workflow run",
+                    payload.get("state") or "queued",
+                    encode_json(payload.get("input") or {}),
+                    encode_json(payload.get("current_nodes") or []),
+                    encode_json(payload.get("counters") or {}),
+                    payload.get("error"),
+                    now,
+                    payload.get("started_at"),
+                    payload.get("finished_at"),
+                    now,
+                ),
+            )
+        self.audit("workflow_run.create", "workflow_run", run_id, {"workflow_definition_id": payload.get("workflow_definition_id")})
+        return self.get_workflow_run(run_id) or {}
+
+    def get_workflow_run(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM workflow_runs WHERE id = ?", (run_id,)).fetchone()
+        return row_to_dict(row)
+
+    def list_workflow_runs(self, limit: int = 100, workflow_definition_id: str | None = None) -> list[dict[str, Any]]:
+        if workflow_definition_id:
+            sql = "SELECT * FROM workflow_runs WHERE workflow_definition_id = ? ORDER BY created_at DESC LIMIT ?"
+            params: tuple[Any, ...] = (workflow_definition_id, limit)
+        else:
+            sql = "SELECT * FROM workflow_runs ORDER BY created_at DESC LIMIT ?"
+            params = (limit,)
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def create_workflow_trigger(self, payload: dict[str, Any]) -> dict[str, Any]:
+        trigger_id = payload.get("id") or new_id("wtr")
+        now = now_iso()
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO workflow_triggers(
+                  id, workflow_definition_id, name, type, config, enabled,
+                  last_fired_at, next_fire_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trigger_id,
+                    payload["workflow_definition_id"],
+                    payload.get("name") or "Manual trigger",
+                    payload.get("type") or "manual",
+                    encode_json(payload.get("config") or {}),
+                    1 if payload.get("enabled", True) else 0,
+                    payload.get("last_fired_at"),
+                    payload.get("next_fire_at"),
+                    now,
+                    now,
+                ),
+            )
+        self.audit("workflow_trigger.create", "workflow_trigger", trigger_id, {"workflow_definition_id": payload["workflow_definition_id"]})
+        return self.get_workflow_trigger(trigger_id) or {}
+
+    def get_workflow_trigger(self, trigger_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM workflow_triggers WHERE id = ?", (trigger_id,)).fetchone()
+        return row_to_dict(row)
+
+    def list_workflow_triggers(
+        self,
+        limit: int = 100,
+        workflow_definition_id: str | None = None,
+        enabled: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        where = []
+        params: list[Any] = []
+        if workflow_definition_id:
+            where.append("workflow_definition_id = ?")
+            params.append(workflow_definition_id)
+        if enabled is not None:
+            where.append("enabled = ?")
+            params.append(1 if enabled else 0)
+        sql = "SELECT * FROM workflow_triggers"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def append_workflow_trigger_event(
+        self,
+        trigger_id: str,
+        state: str,
+        payload: Any = None,
+        run_id: str | None = None,
+        error: str | None = None,
+        dedupe_key: str | None = None,
+    ) -> dict[str, Any]:
+        event_id = new_id("wte")
+        created_at = now_iso()
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO workflow_trigger_events(id, trigger_id, run_id, payload, state, error, dedupe_key, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (event_id, trigger_id, run_id, encode_json(payload or {}), state, error, dedupe_key, created_at),
+            )
+        return {
+            "id": event_id,
+            "trigger_id": trigger_id,
+            "run_id": run_id,
+            "payload": payload or {},
+            "state": state,
+            "error": error,
+            "dedupe_key": dedupe_key,
+            "created_at": created_at,
+        }
+
+    def list_workflow_trigger_events(self, trigger_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM workflow_trigger_events
+                WHERE trigger_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (trigger_id, limit),
+            ).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def create_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        artifact_id = payload.get("id") or new_id("art")
+        now = now_iso()
+        content = payload.get("content", "")
+        if not isinstance(content, str):
+            content = encode_json(content)
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO artifacts(id, run_id, job_id, key, kind, content, metadata, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact_id,
+                    payload.get("run_id"),
+                    payload.get("job_id"),
+                    payload["key"],
+                    payload.get("kind") or "text",
+                    content,
+                    encode_json(payload.get("metadata") or {}),
+                    now,
+                    now,
+                ),
+            )
+        self.audit("artifact.create", "artifact", artifact_id, {"run_id": payload.get("run_id"), "key": payload["key"]})
+        return self.get_artifact(artifact_id) or {}
+
+    def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM artifacts WHERE id = ?", (artifact_id,)).fetchone()
+        return row_to_dict(row)
+
+    def list_artifacts(
+        self,
+        limit: int = 100,
+        run_id: str | None = None,
+        job_id: str | None = None,
+        key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where = []
+        params: list[Any] = []
+        if run_id:
+            where.append("run_id = ?")
+            params.append(run_id)
+        if job_id:
+            where.append("job_id = ?")
+            params.append(job_id)
+        if key:
+            where.append("key = ?")
+            params.append(key)
+        sql = "SELECT * FROM artifacts"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
         return [row_to_dict(row) or {} for row in rows]
 
     def upsert_worker(self, payload: dict[str, Any]) -> dict[str, Any]:
