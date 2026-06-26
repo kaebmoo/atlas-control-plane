@@ -22,6 +22,9 @@ coordination.
 - Store intermediate outputs as named artifacts instead of passing long logs
   directly between every worker.
 - Support both human-defined workflows and manager-assisted workflows.
+- Support manual, scheduled, and event-triggered workflow starts.
+- Let an LLM-assisted builder draft, explain, and repair workflows from plain
+  language so non-technical users can start from intent instead of JSON.
 - Keep thClaws unchanged for now. Atlas continues to call existing thClaws APIs.
 - Build incrementally on the existing Atlas worker/job/event model.
 
@@ -31,7 +34,29 @@ coordination.
 - No native thClaws job cancellation beyond current best-effort Atlas cancel.
 - No arbitrary code execution in workflow conditions.
 - No fully autonomous unbounded manager loops.
+- No full cron/timezone engine in the first pass. Start with simple interval
+  and daily local-time schedules.
 - No visual drag-and-drop editor in the first pass.
+
+## Orchestration Notes From GitHub Article
+
+Reference:
+https://github.com/resources/articles/what-is-ai-agent-orchestration
+
+Useful principles for Atlas:
+
+- Treat Atlas as the control layer for state, policy, execution, context, and
+  observability.
+- Start with centralized orchestration because it is easiest to reason about
+  for a small multi-machine setup.
+- Prefer sequential and handoff workflows first. Add fan-out/concurrent paths
+  only where tasks are independent.
+- Keep guardrails explicit: least privilege workers, allowed workspaces, budget
+  caps, retry caps, loop caps, and human gates for high-risk steps.
+- Log every workflow decision, trigger event, node execution, and human
+  approval for auditability and debugging.
+- Move toward federated orchestration later only when multiple Atlas control
+  planes need to share policy across separate domains.
 
 ## Workflow Types
 
@@ -52,6 +77,18 @@ anchor -> done
 
 Atlas executes the graph deterministically.
 
+The UI should support form-based creation, but Atlas should also expose an
+LLM-assisted workflow builder. A user can describe the intent in plain
+language, for example:
+
+```text
+Every morning, ask the reporter worker for headlines, send them to fact check,
+then ask the anchor worker to write the broadcast script if approved.
+```
+
+The builder drafts the graph, maps roles to available workers/workspaces, and
+shows a reviewable JSON preview before saving.
+
 ### 2. Conditional Workflow
 
 Edges have conditions evaluated from structured output or a manager/evaluator
@@ -69,6 +106,11 @@ Example:
 
 First implementation should avoid arbitrary expression engines. Use a small
 condition DSL.
+
+The LLM builder should also help users create conditions. It should translate
+plain language such as "if fact check says needs_more_sources, send it back to
+reporter up to 3 times" into the condition DSL plus loop guard policy. Atlas
+still validates the generated graph before it can run.
 
 ### 3. Manager-Directed Workflow
 
@@ -243,6 +285,100 @@ file_ref
 summary
 decision
 ```
+
+### workflow_triggers
+
+Reusable workflow start rules.
+
+```sql
+CREATE TABLE workflow_triggers (
+  id TEXT PRIMARY KEY,
+  workflow_definition_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  config TEXT NOT NULL DEFAULT '{}',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_fired_at TEXT,
+  next_fire_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+```
+
+Trigger types:
+
+```text
+manual
+schedule
+webhook
+workflow_run_completed
+artifact_created
+worker_status_changed
+```
+
+First implementation should ship `manual` and simple `schedule`. Add `webhook`
+next because it gives external systems a stable integration point without
+changing thClaws.
+
+### workflow_trigger_events
+
+Append-only record of trigger attempts.
+
+```sql
+CREATE TABLE workflow_trigger_events (
+  id TEXT PRIMARY KEY,
+  trigger_id TEXT NOT NULL,
+  run_id TEXT,
+  payload TEXT NOT NULL DEFAULT '{}',
+  state TEXT NOT NULL,
+  error TEXT,
+  dedupe_key TEXT,
+  created_at TEXT NOT NULL
+);
+```
+
+States:
+
+```text
+received
+started
+ignored
+failed
+```
+
+## Event And Schedule Triggers
+
+Triggers turn workflow definitions into reusable automation.
+
+Schedule examples:
+
+- Run the news desk workflow every day at 08:00.
+- Check unpaid invoices every weekday morning.
+- Ask the sales worker to summarize new leads every 2 hours.
+
+Event examples:
+
+- Start an anchor workflow after the reporter workflow succeeds.
+- Start an accounting review when an artifact named `invoice_batch` is created.
+- Notify a manager workflow when a worker changes from offline to online.
+- Accept a webhook from an external CRM, accounting system, or Telegram bridge.
+
+Implementation rule:
+
+```text
+Trigger receives payload -> Atlas validates trigger -> Atlas creates workflow_run
+with input payload -> workflow runner executes the graph.
+```
+
+Start small:
+
+- `manual`: existing "run workflow" button/API.
+- `schedule`: Atlas poller checks enabled triggers every 30-60 seconds.
+- `webhook`: `POST /api/workflow-triggers/{id}/fire` with optional
+  `dedupe_key`.
+
+Use `dedupe_key`, `last_fired_at`, and `workflow_trigger_events` to avoid
+double-firing when a poll or webhook retry happens.
 
 ## Prompt Rendering
 
@@ -478,6 +614,60 @@ Atlas validates:
 If JSON is invalid, Atlas records a manager error and either retries or asks for
 human input.
 
+## AI-Assisted Workflow Builder
+
+The builder is a design-time helper, not the runtime manager. It helps users
+create and maintain deterministic workflows without writing JSON by hand.
+
+Inputs to the builder:
+
+- user intent in plain language
+- available workers, workspaces, capabilities, and worker health
+- existing workflow templates
+- allowed node types, condition DSL, trigger types, and policy defaults
+
+Builder output:
+
+```json
+{
+  "name": "Morning News Desk",
+  "description": "Daily reporter -> fact check -> anchor workflow.",
+  "graph": {},
+  "policy": {},
+  "triggers": [],
+  "explanation": [
+    "Reporter gathers headlines.",
+    "Fact checker must return approved before anchor runs."
+  ],
+  "warnings": []
+}
+```
+
+Atlas must validate the generated graph before saving:
+
+- all referenced workers/workspaces exist
+- every edge target exists
+- every condition uses the supported DSL
+- loop guards are present for cycles
+- schedules are valid
+- policy limits are inside Atlas defaults
+
+Builder tools should be available from the UI and API:
+
+- draft workflow from plain language
+- explain an existing workflow in plain language
+- repair invalid graph/condition JSON
+- suggest workers for missing roles
+- suggest trigger and schedule settings
+
+This gives non-IT users a practical path:
+
+```text
+Describe workflow -> AI drafts -> Atlas validates -> user reviews -> save/run
+```
+
+IT staff can still edit JSON directly when precision is needed.
+
 ## API Plan
 
 ### Workflow Definitions
@@ -488,6 +678,22 @@ human input.
 - `PUT /api/workflows/{id}`
 - `DELETE /api/workflows/{id}`
 - `POST /api/workflows/{id}/validate`
+
+### Workflow Builder
+
+- `POST /api/workflows/draft`
+- `POST /api/workflows/{id}/explain`
+- `POST /api/workflows/{id}/repair`
+- `POST /api/workflows/{id}/suggest-triggers`
+
+### Workflow Triggers
+
+- `GET /api/workflow-triggers`
+- `POST /api/workflow-triggers`
+- `PUT /api/workflow-triggers/{id}`
+- `DELETE /api/workflow-triggers/{id}`
+- `POST /api/workflow-triggers/{id}/fire`
+- `GET /api/workflow-triggers/{id}/events`
 
 ### Workflow Runs
 
@@ -521,6 +727,7 @@ Views:
    - list definitions
    - create/edit JSON graph
    - validate graph
+   - draft from plain language with AI assistance
 
 2. **Workflow Run Detail**
    - status timeline
@@ -534,12 +741,19 @@ Views:
    - add node form
    - add edge form
    - policy form
+   - trigger form
+   - plain-language draft/repair panel
    - JSON preview
 
 4. **Manager Decision Panel**
    - manager proposals
    - accepted/rejected reason
    - policy validation failures
+
+5. **Workflow Triggers**
+   - list schedules and webhooks
+   - enable/disable triggers
+   - inspect last fire, next fire, and errors
 
 ## Implementation Phases
 
@@ -550,9 +764,12 @@ Deliver:
 - SQLite tables and migrations.
 - Workflow definition CRUD.
 - Workflow run creation.
+- Manual trigger.
+- Simple schedule trigger with `interval_minutes` and daily local time.
 - Execute linear graph and fan-out.
 - Store artifacts.
 - Dashboard list/detail.
+- LLM-assisted draft from plain language using available workers and templates.
 
 No manager yet.
 
@@ -565,6 +782,9 @@ Deliver:
 - joins
 - loop guards
 - pause on guard trip
+- condition builder UI plus LLM-assisted condition drafting
+- trigger event history
+- webhook trigger endpoint
 
 ### Phase 3: Manager Worker
 
