@@ -31,6 +31,10 @@ Atlas currently supports:
 - Best-effort cancellation at the Atlas layer.
 - Single-step handoff: when job A succeeds, Atlas can automatically start job B
   on another worker and pass job A's result into job B's prompt.
+- Workflow definitions, synchronous workflow runs, artifacts, JSON artifacts,
+  condition edges, loop guards, manual triggers, and schedule triggers.
+- A workflow builder entry point that routes plain-language draft requests to a
+  worker with role or tag `workflow_builder`.
 
 This is enough to run simple real workflows such as:
 
@@ -439,6 +443,37 @@ Artifacts:
 curl -sS http://127.0.0.1:8787/api/workflow-runs/wfr_xxx/artifacts
 ```
 
+### Draft A Workflow
+
+Configure a worker with role or tag `workflow_builder`, then:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/workflows/draft \
+  -H 'content-type: application/json' \
+  -d '{"plain_language_prompt":"Build a reporter -> fact checker -> anchor workflow"}'
+```
+
+### Create And Fire A Trigger
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/workflow-triggers \
+  -H 'content-type: application/json' \
+  -d '{
+    "workflow_definition_id": "wfd_xxx",
+    "name": "Manual publish",
+    "type": "manual"
+  }'
+```
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/workflow-triggers/wtr_xxx/fire \
+  -H 'content-type: application/json' \
+  -d '{"payload":{"topic":"technology news"},"dedupe_key":"manual-001"}'
+```
+
+Interval schedules use `{"interval_minutes": 15}`. Daily local schedules use
+`{"daily_time": "09:30"}`.
+
 ## API Surface
 
 - `GET /api/health`
@@ -462,14 +497,24 @@ curl -sS http://127.0.0.1:8787/api/workflow-runs/wfr_xxx/artifacts
 - `POST /api/jobs/{id}/cancel`
 - `GET /api/workflows`
 - `POST /api/workflows`
+- `POST /api/workflows/draft`
 - `GET /api/workflows/{id}`
 - `PUT /api/workflows/{id}`
 - `DELETE /api/workflows/{id}`
 - `POST /api/workflows/{id}/validate`
+- `POST /api/workflows/{id}/explain`
+- `POST /api/workflows/{id}/repair`
 - `GET /api/workflow-runs`
 - `POST /api/workflow-runs`
 - `GET /api/workflow-runs/{id}`
 - `GET /api/workflow-runs/{id}/artifacts`
+- `GET /api/workflow-triggers`
+- `POST /api/workflow-triggers`
+- `GET /api/workflow-triggers/{id}`
+- `PUT /api/workflow-triggers/{id}`
+- `DELETE /api/workflow-triggers/{id}`
+- `POST /api/workflow-triggers/{id}/fire`
+- `GET /api/workflow-triggers/{id}/events`
 - `GET /api/audit`
 
 ## Configuration

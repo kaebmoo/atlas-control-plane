@@ -128,6 +128,7 @@ p {
 
 .stack-list,
 .job-list,
+.workflow-list,
 .event-list,
 .audit-list {
   display: grid;
@@ -143,6 +144,9 @@ p {
 .worker-item,
 .workspace-item,
 .job-item,
+.workflow-item,
+.workflow-run-item,
+.trigger-item,
 .audit-item,
 .event-item {
   border: 1px solid var(--line);
@@ -422,6 +426,86 @@ textarea:focus {
   background: #eef3f1;
 }
 
+.workflow-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.workflow-grid {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.8fr) minmax(360px, 1.4fr) minmax(240px, 0.9fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.workflow-column,
+.workflow-editor {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.workflow-list {
+  max-height: 310px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.short-list {
+  max-height: 190px;
+}
+
+.workflow-item,
+.workflow-run-item,
+.trigger-item {
+  padding: 10px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.workflow-item:hover,
+.workflow-item.selected,
+.workflow-run-item:hover,
+.workflow-run-item.selected,
+.trigger-item:hover,
+.trigger-item.selected {
+  border-color: var(--teal);
+  background: #f3faf8;
+}
+
+.subhead {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.two-col {
+  grid-template-columns: 1fr 1fr;
+}
+
+.workflow-actions {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.compact-pre {
+  min-height: 82px;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+  padding: 10px;
+  background: #f6f8f7;
+  color: #3d4b48;
+  border: 1px solid #d8e1de;
+  border-radius: 8px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+}
+
 .split {
   display: grid;
   grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
@@ -619,6 +703,7 @@ textarea:focus {
     grid-column: 1 / -1;
   }
 
+  .workflow-grid,
   .split,
   .audit-panel {
     grid-template-columns: 1fr;
@@ -632,6 +717,7 @@ textarea:focus {
   }
 
   .composer-grid,
+  .two-col,
   .topbar {
     grid-template-columns: 1fr;
     display: grid;

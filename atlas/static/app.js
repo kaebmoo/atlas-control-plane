@@ -4,7 +4,16 @@ const state = {
   conversations: [],
   jobs: [],
   audit: [],
+  workflows: [],
+  workflowRuns: [],
+  workflowTriggers: [],
   selectedJobId: null,
+  selectedWorkflowId: null,
+  selectedWorkflowRunId: null,
+  selectedWorkflowTriggerId: null,
+  workflowRunDetail: null,
+  workflowArtifacts: [],
+  workflowTriggerEvents: [],
   eventSource: null,
   streamText: "",
   events: [],
@@ -74,18 +83,45 @@ function tagsToText(tags) {
   return String(tags || "");
 }
 
+function prettyJson(value) {
+  return JSON.stringify(value ?? {}, null, 2);
+}
+
+function parseJsonField(selector, fallback = {}) {
+  const raw = $(selector).value.trim();
+  if (!raw) return fallback;
+  return JSON.parse(raw);
+}
+
+function defaultWorkflowGraph() {
+  return {
+    start: "reporter",
+    nodes: [
+      { id: "reporter", type: "worker", prompt: "Research {input.topic}", outputs: ["notes"] },
+      { id: "anchor", type: "worker", prompt: "Write from {artifact.notes}", outputs: ["script"] },
+    ],
+    edges: [{ from: "reporter", to: "anchor", condition: { type: "always" } }],
+  };
+}
+
 async function loadAll() {
-  const [workers, workspaces, conversations, jobs, audit] = await Promise.all([
+  const [workers, workspaces, conversations, jobs, workflows, workflowRuns, workflowTriggers, audit] = await Promise.all([
     api("/api/workers"),
     api("/api/workspaces"),
     api("/api/conversations"),
     api("/api/jobs"),
+    api("/api/workflows"),
+    api("/api/workflow-runs"),
+    api("/api/workflow-triggers"),
     api("/api/audit?limit=30"),
   ]);
   state.workers = workers.workers || [];
   state.workspaces = workspaces.workspaces || [];
   state.conversations = conversations.conversations || [];
   state.jobs = jobs.jobs || [];
+  state.workflows = workflows.workflows || [];
+  state.workflowRuns = workflowRuns.runs || [];
+  state.workflowTriggers = workflowTriggers.triggers || [];
   state.audit = audit.audit || [];
   render();
   $("#lastRefresh").textContent = `Refreshed ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
@@ -105,6 +141,7 @@ function render() {
   renderWorkspaces();
   renderSelects();
   renderJobs();
+  renderWorkflows();
   renderAudit();
   updateComposerRoutePreview();
 }
@@ -232,6 +269,96 @@ function renderJobs() {
       <div class="job-prompt">${escapeHtml(job.prompt)}</div>
     </article>
   `).join("");
+}
+
+function renderWorkflows() {
+  if (state.selectedWorkflowId && !state.workflows.some((workflow) => workflow.id === state.selectedWorkflowId)) {
+    state.selectedWorkflowId = null;
+  }
+  renderWorkflowList();
+  renderWorkflowEditor();
+  renderWorkflowRuns();
+  renderWorkflowTriggers();
+}
+
+function renderWorkflowList() {
+  const list = $("#workflowList");
+  if (!state.workflows.length) {
+    list.innerHTML = '<div class="empty">No workflow definitions</div>';
+    return;
+  }
+  list.innerHTML = state.workflows.map((workflow) => `
+    <article class="workflow-item ${workflow.id === state.selectedWorkflowId ? "selected" : ""}" data-workflow-id="${escapeHtml(workflow.id)}">
+      <div class="item-title">
+        <span>${escapeHtml(workflow.name)}</span>
+        <span class="status ${statusClass(workflow.status)}">${escapeHtml(workflow.status)}</span>
+      </div>
+      <div class="item-sub">${escapeHtml(workflow.description || "no description")} · v${escapeHtml(workflow.version)} · ${shortId(workflow.id)}</div>
+    </article>
+  `).join("");
+}
+
+function renderWorkflowEditor(force = false) {
+  const workflow = state.workflows.find((item) => item.id === state.selectedWorkflowId);
+  const editorIds = new Set(["workflowNameInput", "workflowDescriptionInput", "workflowGraphInput", "workflowPolicyInput", "workflowRunInput"]);
+  if (!force && workflow && $("#workflowNameInput").dataset.workflowId === workflow.id && editorIds.has(document.activeElement?.id)) {
+    return;
+  }
+  $("#workflowMeta").textContent = workflow ? `${workflow.status} · ${shortId(workflow.id)} · updated ${formatTime(workflow.updated_at)}` : "New workflow";
+  $("#workflowNameInput").dataset.workflowId = workflow?.id || "";
+  $("#workflowNameInput").value = workflow?.name || "Untitled workflow";
+  $("#workflowDescriptionInput").value = workflow?.description || "";
+  $("#workflowGraphInput").value = prettyJson(workflow?.graph || defaultWorkflowGraph());
+  $("#workflowPolicyInput").value = prettyJson(workflow?.policy || { max_jobs: 5, max_iterations: 10 });
+  if (!$("#workflowRunInput").value.trim()) $("#workflowRunInput").value = "{}";
+}
+
+function renderWorkflowRuns() {
+  const runs = state.selectedWorkflowId ? state.workflowRuns.filter((run) => run.workflow_definition_id === state.selectedWorkflowId) : state.workflowRuns;
+  const list = $("#workflowRunList");
+  if (!runs.length) {
+    list.innerHTML = '<div class="empty">No workflow runs</div>';
+  } else {
+    list.innerHTML = runs.slice(0, 20).map((run) => `
+      <article class="workflow-run-item ${run.id === state.selectedWorkflowRunId ? "selected" : ""}" data-run-id="${escapeHtml(run.id)}">
+        <div class="item-title">
+          <span>${escapeHtml(run.name)}</span>
+          <span class="status ${statusClass(run.state)}">${escapeHtml(run.state)}</span>
+        </div>
+        <div class="item-sub">${formatTime(run.created_at)} · ${shortId(run.id)}</div>
+      </article>
+    `).join("");
+  }
+  $("#workflowRunDetail").textContent = state.workflowRunDetail ? prettyJson(state.workflowRunDetail) : "";
+  $("#workflowArtifactList").textContent = state.workflowArtifacts.length ? prettyJson(state.workflowArtifacts) : "";
+}
+
+function renderWorkflowTriggers() {
+  const list = $("#triggerList");
+  const triggers = state.selectedWorkflowId ? state.workflowTriggers.filter((trigger) => trigger.workflow_definition_id === state.selectedWorkflowId) : state.workflowTriggers;
+  if (state.selectedWorkflowTriggerId && !triggers.some((trigger) => trigger.id === state.selectedWorkflowTriggerId)) {
+    state.selectedWorkflowTriggerId = null;
+    state.workflowTriggerEvents = [];
+  }
+  if (!triggers.length) {
+    list.innerHTML = '<div class="empty">No triggers</div>';
+    $("#triggerEventList").textContent = "";
+    return;
+  }
+  list.innerHTML = triggers.map((trigger) => `
+    <article class="trigger-item ${trigger.id === state.selectedWorkflowTriggerId ? "selected" : ""}" data-trigger-id="${escapeHtml(trigger.id)}">
+      <div class="item-title">
+        <span>${escapeHtml(trigger.name)}</span>
+        <span>${escapeHtml(trigger.type)}</span>
+      </div>
+      <div class="item-sub">${trigger.enabled ? "enabled" : "disabled"} · next ${escapeHtml(formatTime(trigger.next_fire_at) || "manual")} · ${shortId(trigger.id)}</div>
+      <div class="item-actions">
+        <button class="secondary-btn fire-trigger" data-trigger-id="${escapeHtml(trigger.id)}">Fire</button>
+        <button class="danger-btn delete-trigger" data-trigger-id="${escapeHtml(trigger.id)}">Delete</button>
+      </div>
+    </article>
+  `).join("");
+  $("#triggerEventList").textContent = state.workflowTriggerEvents.length ? prettyJson(state.workflowTriggerEvents.slice(0, 10)) : "";
 }
 
 function renderAudit() {
@@ -402,6 +529,161 @@ async function cancelSelectedJob() {
   await loadAll();
 }
 
+function newWorkflow() {
+  state.selectedWorkflowId = null;
+  state.selectedWorkflowRunId = null;
+  state.selectedWorkflowTriggerId = null;
+  state.workflowRunDetail = null;
+  state.workflowArtifacts = [];
+  state.workflowTriggerEvents = [];
+  $("#draftResult").textContent = "";
+  $("#workflowRunInput").value = "{}";
+  renderWorkflowEditor(true);
+  renderWorkflowList();
+  renderWorkflowRuns();
+}
+
+function selectWorkflow(workflowId) {
+  state.selectedWorkflowId = workflowId;
+  state.selectedWorkflowRunId = null;
+  state.selectedWorkflowTriggerId = null;
+  state.workflowRunDetail = null;
+  state.workflowArtifacts = [];
+  state.workflowTriggerEvents = [];
+  $("#draftResult").textContent = "";
+  renderWorkflowEditor(true);
+  renderWorkflows();
+}
+
+async function saveWorkflow() {
+  const workflowId = $("#workflowNameInput").dataset.workflowId;
+  const payload = {
+    name: $("#workflowNameInput").value.trim() || "Untitled workflow",
+    description: $("#workflowDescriptionInput").value.trim(),
+    graph: parseJsonField("#workflowGraphInput"),
+    policy: parseJsonField("#workflowPolicyInput"),
+  };
+  const path = workflowId ? `/api/workflows/${workflowId}` : "/api/workflows";
+  const method = workflowId ? "PUT" : "POST";
+  const data = await api(path, { method, body: JSON.stringify(payload) });
+  state.selectedWorkflowId = data.workflow.id;
+  toast("Workflow saved");
+  await loadAll();
+}
+
+async function validateWorkflow() {
+  const workflowId = $("#workflowNameInput").dataset.workflowId;
+  if (!workflowId) {
+    toast("Save before validating");
+    return;
+  }
+  await api(`/api/workflows/${workflowId}/validate`, {
+    method: "POST",
+    body: JSON.stringify({ graph: parseJsonField("#workflowGraphInput"), policy: parseJsonField("#workflowPolicyInput") }),
+  });
+  toast("Workflow valid");
+}
+
+async function draftWorkflow() {
+  const plain = $("#draftPromptInput").value.trim();
+  if (!plain) {
+    toast("Draft prompt is required");
+    return;
+  }
+  const data = await api("/api/workflows/draft", { method: "POST", body: JSON.stringify({ plain_language_prompt: plain }) });
+  const draft = data.draft || {};
+  state.selectedWorkflowId = null;
+  $("#workflowNameInput").dataset.workflowId = "";
+  $("#workflowNameInput").value = draft.name || "Draft workflow";
+  $("#workflowDescriptionInput").value = draft.description || "";
+  $("#workflowGraphInput").value = prettyJson(draft.graph || defaultWorkflowGraph());
+  $("#workflowPolicyInput").value = prettyJson(draft.policy || {});
+  $("#draftResult").textContent = prettyJson({
+    explanation: draft.explanation || "",
+    warnings: draft.warnings || [],
+    triggers: draft.triggers || [],
+  });
+  renderWorkflowList();
+  toast("Draft ready");
+}
+
+async function runWorkflow() {
+  const workflowId = $("#workflowNameInput").dataset.workflowId;
+  if (!workflowId) {
+    toast("Save before running");
+    return;
+  }
+  const data = await api("/api/workflow-runs", {
+    method: "POST",
+    body: JSON.stringify({ workflow_definition_id: workflowId, input: parseJsonField("#workflowRunInput") }),
+  });
+  state.selectedWorkflowRunId = data.run.id;
+  await loadAll();
+  await selectWorkflowRun(data.run.id);
+  toast(`Workflow ${data.run.state}`);
+}
+
+async function selectWorkflowRun(runId) {
+  state.selectedWorkflowRunId = runId;
+  const [detail, artifacts] = await Promise.all([
+    api(`/api/workflow-runs/${runId}`),
+    api(`/api/workflow-runs/${runId}/artifacts`),
+  ]);
+  state.workflowRunDetail = detail;
+  state.workflowArtifacts = artifacts.artifacts || [];
+  renderWorkflowRuns();
+}
+
+async function saveTrigger() {
+  if (!state.selectedWorkflowId) {
+    toast("Select a workflow first");
+    return;
+  }
+  await api("/api/workflow-triggers", {
+    method: "POST",
+    body: JSON.stringify({
+      workflow_definition_id: state.selectedWorkflowId,
+      name: $("#triggerNameInput").value.trim() || "Manual",
+      type: $("#triggerTypeSelect").value,
+      config: parseJsonField("#triggerConfigInput"),
+      enabled: $("#triggerEnabledInput").checked,
+    }),
+  });
+  toast("Trigger created");
+  await loadAll();
+}
+
+async function fireTrigger(triggerId) {
+  const data = await api(`/api/workflow-triggers/${triggerId}/fire`, {
+    method: "POST",
+    body: JSON.stringify({ payload: parseJsonField("#workflowRunInput") }),
+  });
+  state.selectedWorkflowTriggerId = triggerId;
+  if (data.run?.id) state.selectedWorkflowRunId = data.run.id;
+  await loadAll();
+  await selectWorkflowTrigger(triggerId);
+  if (data.run?.id) await selectWorkflowRun(data.run.id);
+  toast(data.event?.state === "ignored" ? "Trigger ignored" : "Trigger fired");
+}
+
+async function selectWorkflowTrigger(triggerId) {
+  state.selectedWorkflowTriggerId = triggerId;
+  const data = await api(`/api/workflow-triggers/${triggerId}/events`);
+  state.workflowTriggerEvents = data.events || [];
+  renderWorkflowTriggers();
+}
+
+async function deleteTrigger(triggerId) {
+  if (!confirm(`Delete trigger ${shortId(triggerId)}?`)) return;
+  await api(`/api/workflow-triggers/${triggerId}`, { method: "DELETE" });
+  if (state.selectedWorkflowTriggerId === triggerId) {
+    state.selectedWorkflowTriggerId = null;
+    state.workflowTriggerEvents = [];
+  }
+  toast("Trigger deleted");
+  await loadAll();
+}
+
 function openWorkerModal(worker = null) {
   const form = $("#workerForm");
   form.reset();
@@ -490,6 +772,31 @@ document.addEventListener("click", async (event) => {
     await pollWorker(pollButton.dataset.workerId).catch((error) => toast(error.message));
     return;
   }
+  const workflowItem = event.target.closest(".workflow-item");
+  if (workflowItem) {
+    selectWorkflow(workflowItem.dataset.workflowId);
+    return;
+  }
+  const workflowRunItem = event.target.closest(".workflow-run-item");
+  if (workflowRunItem) {
+    await selectWorkflowRun(workflowRunItem.dataset.runId).catch((error) => toast(error.message));
+    return;
+  }
+  const fireTriggerButton = event.target.closest(".fire-trigger");
+  if (fireTriggerButton) {
+    await fireTrigger(fireTriggerButton.dataset.triggerId).catch((error) => toast(error.message));
+    return;
+  }
+  const deleteTriggerButton = event.target.closest(".delete-trigger");
+  if (deleteTriggerButton) {
+    await deleteTrigger(deleteTriggerButton.dataset.triggerId).catch((error) => toast(error.message));
+    return;
+  }
+  const triggerItem = event.target.closest(".trigger-item");
+  if (triggerItem) {
+    await selectWorkflowTrigger(triggerItem.dataset.triggerId).catch((error) => toast(error.message));
+    return;
+  }
   const jobItem = event.target.closest(".job-item");
   if (jobItem) {
     openJobStream(jobItem.dataset.jobId);
@@ -502,6 +809,12 @@ $("#pollAllBtn").addEventListener("click", async () => {
   await refreshAll({ poll: true, notice: true }).catch((error) => toast(error.message));
 });
 $("#cancelJobBtn").addEventListener("click", () => cancelSelectedJob().catch((error) => toast(error.message)));
+$("#newWorkflowBtn").addEventListener("click", () => newWorkflow());
+$("#saveWorkflowBtn").addEventListener("click", () => saveWorkflow().catch((error) => toast(error.message)));
+$("#validateWorkflowBtn").addEventListener("click", () => validateWorkflow().catch((error) => toast(error.message)));
+$("#draftWorkflowBtn").addEventListener("click", () => draftWorkflow().catch((error) => toast(error.message)));
+$("#runWorkflowBtn").addEventListener("click", () => runWorkflow().catch((error) => toast(error.message)));
+$("#saveTriggerBtn").addEventListener("click", () => saveTrigger().catch((error) => toast(error.message)));
 $("#addWorkerBtn").addEventListener("click", () => openWorkerModal());
 $("#addWorkspaceBtn").addEventListener("click", () => openWorkspaceModal());
 $("#conversationSelect").addEventListener("change", () => {

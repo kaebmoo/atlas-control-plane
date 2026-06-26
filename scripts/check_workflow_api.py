@@ -55,6 +55,8 @@ def main() -> None:
 
             updated = request(base_url, "PUT", f"/api/workflows/{workflow_id}", {"description": "updated"})["workflow"]
             assert updated["description"] == "updated"
+            assert "starts at only" in request(base_url, "POST", f"/api/workflows/{workflow_id}/explain")["explanation"]
+            assert request(base_url, "POST", f"/api/workflows/{workflow_id}/repair")["draft"]["explanation"] == "Workflow already validates."
 
             run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id, "input": {"topic": "x"}})["run"]
             assert run["state"] == "failed"
@@ -62,6 +64,45 @@ def main() -> None:
             assert detail["run"]["id"] == run["id"]
             assert detail["nodes"][0]["state"] == "failed"
             assert request(base_url, "GET", f"/api/workflow-runs/{run['id']}/artifacts")["artifacts"] == []
+
+            draft_error = request_error(base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "make a news workflow"})
+            assert "workflow_builder" in draft_error["error"]
+
+            trigger = request(
+                base_url,
+                "POST",
+                "/api/workflow-triggers",
+                {"workflow_definition_id": workflow_id, "name": "Manual", "type": "manual"},
+            )["trigger"]
+            assert request(base_url, "GET", "/api/workflow-triggers")["triggers"][0]["id"] == trigger["id"]
+            fired = request(
+                base_url,
+                "POST",
+                f"/api/workflow-triggers/{trigger['id']}/fire",
+                {"payload": {"topic": "manual"}, "dedupe_key": "once"},
+            )
+            assert fired["run"]["state"] == "failed"
+            ignored = request(
+                base_url,
+                "POST",
+                f"/api/workflow-triggers/{trigger['id']}/fire",
+                {"payload": {"topic": "manual"}, "dedupe_key": "once"},
+            )
+            assert ignored["event"]["state"] == "ignored"
+            events = request(base_url, "GET", f"/api/workflow-triggers/{trigger['id']}/events")["events"]
+            assert {event["state"] for event in events} >= {"received", "started", "ignored"}
+
+            schedule = request(
+                base_url,
+                "POST",
+                "/api/workflow-triggers",
+                {"workflow_definition_id": workflow_id, "name": "Interval", "type": "schedule", "config": {"interval_minutes": 5}},
+            )["trigger"]
+            assert schedule["next_fire_at"]
+            disabled = request(base_url, "PUT", f"/api/workflow-triggers/{schedule['id']}", {"enabled": False})["trigger"]
+            assert not disabled["enabled"]
+            assert request(base_url, "DELETE", f"/api/workflow-triggers/{schedule['id']}")["deleted"]
+            assert request(base_url, "DELETE", f"/api/workflow-triggers/{trigger['id']}")["deleted"]
             assert request(base_url, "DELETE", f"/api/workflows/{workflow_id}")["deleted"]
 
             bad = request_error(base_url, "POST", f"/api/workflows/{workflow_id}/validate")

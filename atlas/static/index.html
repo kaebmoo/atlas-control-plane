@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Atlas Control Plane</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260621-handoff1">
+    <link rel="stylesheet" href="/static/styles.css?v=20260626-workflows">
   </head>
   <body>
     <div class="app-shell">
@@ -99,6 +99,64 @@
           </div>
         </section>
 
+        <section class="panel workflow-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Workflows</h2>
+              <p id="workflowMeta">No workflow selected</p>
+            </div>
+            <div class="head-actions">
+              <button id="newWorkflowBtn" class="secondary-btn" type="button">New</button>
+              <button id="validateWorkflowBtn" class="secondary-btn" type="button">Validate</button>
+              <button id="saveWorkflowBtn" class="primary-btn" type="button">Save</button>
+            </div>
+          </div>
+          <div class="workflow-grid">
+            <div class="workflow-column">
+              <div class="subhead">Definitions</div>
+              <div id="workflowList" class="workflow-list"></div>
+            </div>
+
+            <div class="workflow-editor">
+              <div class="form-grid two-col">
+                <label>Name<input id="workflowNameInput" placeholder="News workflow"></label>
+                <label>Description<input id="workflowDescriptionInput" placeholder="optional"></label>
+              </div>
+              <label>Graph JSON<textarea id="workflowGraphInput" rows="12"></textarea></label>
+              <label>Policy JSON<textarea id="workflowPolicyInput" rows="4"></textarea></label>
+              <div class="form-grid two-col">
+                <label>Run Input JSON<textarea id="workflowRunInput" rows="4">{}</textarea></label>
+                <div class="workflow-actions">
+                  <button id="runWorkflowBtn" class="primary-btn" type="button">Run Workflow</button>
+                  <pre id="workflowArtifactList" class="compact-pre"></pre>
+                </div>
+              </div>
+            </div>
+
+            <div class="workflow-column">
+              <div class="subhead">Draft</div>
+              <label>Prompt<textarea id="draftPromptInput" rows="4"></textarea></label>
+              <button id="draftWorkflowBtn" class="secondary-btn" type="button">Draft</button>
+              <pre id="draftResult" class="compact-pre"></pre>
+
+              <div class="subhead">Runs</div>
+              <div id="workflowRunList" class="workflow-list short-list"></div>
+              <pre id="workflowRunDetail" class="compact-pre"></pre>
+
+              <div class="subhead">Triggers</div>
+              <div class="form-grid">
+                <label>Name<input id="triggerNameInput" placeholder="Manual"></label>
+                <label>Type<select id="triggerTypeSelect"><option value="manual">manual</option><option value="schedule">schedule</option></select></label>
+                <label>Config JSON<textarea id="triggerConfigInput" rows="3">{}</textarea></label>
+                <label class="toggle-row"><input id="triggerEnabledInput" type="checkbox" checked><span>Enabled</span></label>
+                <button id="saveTriggerBtn" class="secondary-btn" type="button">Create Trigger</button>
+              </div>
+              <div id="triggerList" class="workflow-list short-list"></div>
+              <pre id="triggerEventList" class="compact-pre"></pre>
+            </div>
+          </div>
+        </section>
+
         <section class="split">
           <div class="panel jobs-panel">
             <div class="panel-head">
@@ -174,6 +232,6 @@
     </div>
 
     <div id="toast" class="toast" aria-live="polite"></div>
-    <script src="/static/app.js?v=20260621-handoff1" type="module"></script>
+    <script src="/static/app.js?v=20260626-workflows" type="module"></script>
   </body>
 </html>

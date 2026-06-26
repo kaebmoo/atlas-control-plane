@@ -571,6 +571,42 @@ class Database:
             row = conn.execute("SELECT * FROM workflow_triggers WHERE id = ?", (trigger_id,)).fetchone()
         return row_to_dict(row)
 
+    def update_workflow_trigger(self, trigger_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        allowed = {
+            "name": "name",
+            "type": "type",
+            "config": "config",
+            "enabled": "enabled",
+            "last_fired_at": "last_fired_at",
+            "next_fire_at": "next_fire_at",
+        }
+        fields: dict[str, Any] = {}
+        for key, column in allowed.items():
+            if key in payload:
+                value = payload[key]
+                if key == "config":
+                    value = encode_json(value or {})
+                elif key == "enabled":
+                    value = 1 if value else 0
+                fields[column] = value
+        if not fields:
+            return self.get_workflow_trigger(trigger_id)
+        fields["updated_at"] = now_iso()
+        assignments = ", ".join(f"{key} = ?" for key in fields)
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute(f"UPDATE workflow_triggers SET {assignments} WHERE id = ?", list(fields.values()) + [trigger_id])
+        if cursor.rowcount:
+            self.audit("workflow_trigger.update", "workflow_trigger", trigger_id)
+        return self.get_workflow_trigger(trigger_id)
+
+    def delete_workflow_trigger(self, trigger_id: str) -> bool:
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute("DELETE FROM workflow_triggers WHERE id = ?", (trigger_id,))
+        deleted = cursor.rowcount > 0
+        if deleted:
+            self.audit("workflow_trigger.delete", "workflow_trigger", trigger_id)
+        return deleted
+
     def list_workflow_triggers(
         self,
         limit: int = 100,
