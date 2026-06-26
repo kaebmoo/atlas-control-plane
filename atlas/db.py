@@ -445,6 +445,99 @@ class Database:
             rows = conn.execute(sql, params).fetchall()
         return [row_to_dict(row) or {} for row in rows]
 
+    def update_workflow_run(self, run_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        for key in ("input", "current_nodes", "counters"):
+            if key in fields:
+                fields[key] = encode_json(fields[key])
+        fields["updated_at"] = now_iso()
+        assignments = ", ".join(f"{key} = ?" for key in fields)
+        with self._lock, self.connect() as conn:
+            conn.execute(f"UPDATE workflow_runs SET {assignments} WHERE id = ?", list(fields.values()) + [run_id])
+
+    def create_workflow_node(self, payload: dict[str, Any]) -> dict[str, Any]:
+        node_id = payload.get("id") or new_id("wfn")
+        now = now_iso()
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO workflow_nodes(
+                  id, run_id, node_key, state, job_id, attempt, input_artifacts,
+                  output_artifacts, error, created_at, started_at, finished_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    node_id,
+                    payload["run_id"],
+                    payload["node_key"],
+                    payload.get("state") or "queued",
+                    payload.get("job_id"),
+                    int(payload.get("attempt") or 0),
+                    encode_json(payload.get("input_artifacts") or []),
+                    encode_json(payload.get("output_artifacts") or []),
+                    payload.get("error"),
+                    now,
+                    payload.get("started_at"),
+                    payload.get("finished_at"),
+                    now,
+                ),
+            )
+        return self.get_workflow_node(node_id) or {}
+
+    def get_workflow_node(self, node_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM workflow_nodes WHERE id = ?", (node_id,)).fetchone()
+        return row_to_dict(row)
+
+    def list_workflow_nodes(self, run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM workflow_nodes WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def update_workflow_node(self, node_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        for key in ("input_artifacts", "output_artifacts"):
+            if key in fields:
+                fields[key] = encode_json(fields[key])
+        fields["updated_at"] = now_iso()
+        assignments = ", ".join(f"{key} = ?" for key in fields)
+        with self._lock, self.connect() as conn:
+            conn.execute(f"UPDATE workflow_nodes SET {assignments} WHERE id = ?", list(fields.values()) + [node_id])
+
+    def append_workflow_edge(self, run_id: str, from_node: str, to_node: str, condition_result: Any = None) -> dict[str, Any]:
+        edge_id = new_id("wfe")
+        created_at = now_iso()
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO workflow_edges(id, run_id, from_node, to_node, condition_result, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (edge_id, run_id, from_node, to_node, encode_json(condition_result or {}), created_at),
+            )
+        return {
+            "id": edge_id,
+            "run_id": run_id,
+            "from_node": from_node,
+            "to_node": to_node,
+            "condition_result": condition_result or {},
+            "created_at": created_at,
+        }
+
+    def list_workflow_edges(self, run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM workflow_edges WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
     def create_workflow_trigger(self, payload: dict[str, Any]) -> dict[str, Any]:
         trigger_id = payload.get("id") or new_id("wtr")
         now = now_iso()

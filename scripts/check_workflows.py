@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from atlas.workflows import render_prompt, validate_workflow_graph
+from atlas.db import Database, now_iso
+from atlas.workflows import WorkflowRunner, render_prompt, validate_workflow_graph
 
 
 def main() -> None:
@@ -48,7 +50,50 @@ def main() -> None:
     assert "Prev: old" in prompt
 
     assert_raises("missing prompt variable: {input.missing}", render_prompt, "{input.missing}", input={})
+    check_runner()
     print("workflow validation/render check ok")
+
+
+def check_runner() -> None:
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+        worker = db.upsert_worker({"name": "Fake", "base_url": "http://127.0.0.1:1"})
+        graph = {
+            "start": "reporter",
+            "nodes": [
+                {"id": "reporter", "type": "worker", "worker_id": worker["id"], "prompt": "Topic: {input.topic}", "outputs": ["notes"]},
+                {"id": "anchor", "type": "worker", "worker_id": worker["id"], "prompt": "Read: {artifact.notes}", "outputs": ["script"]},
+            ],
+            "edges": [{"from": "reporter", "to": "anchor", "condition": {"type": "always"}}],
+        }
+        definition = db.create_workflow_definition({"name": "Linear", "graph": graph, "policy": {"max_jobs": 5}})
+        fake_jobs = FakeJobService(db, worker["id"])
+        run = WorkflowRunner(db, fake_jobs, poll_interval_seconds=0).run_workflow(definition["id"], {"topic": "weather"})
+
+        assert run["state"] == "succeeded"
+        assert run["current_nodes"] == []
+        assert fake_jobs.prompts == ["Topic: weather", "Read: result: Topic: weather"]
+        assert [node["state"] for node in db.list_workflow_nodes(run["id"])] == ["succeeded", "succeeded"]
+        assert [edge["to_node"] for edge in db.list_workflow_edges(run["id"])] == ["anchor"]
+        assert {artifact["key"]: artifact["content"] for artifact in db.list_artifacts(run_id=run["id"])} == {
+            "notes": "result: Topic: weather",
+            "script": "result: Read: result: Topic: weather",
+        }
+
+
+class FakeJobService:
+    def __init__(self, db: Database, worker_id: str):
+        self.db = db
+        self.worker_id = worker_id
+        self.prompts: list[str] = []
+
+    def submit(self, payload: dict) -> dict:
+        prompt = payload["prompt"]
+        self.prompts.append(prompt)
+        job = self.db.create_job({"worker_id": self.worker_id, "prompt": prompt, "state": "running"})
+        self.db.append_job_text(job["id"], f"result: {prompt}")
+        self.db.update_job(job["id"], state="succeeded", finished_at=now_iso())
+        return self.db.get_job(job["id"]) or job
 
 
 def assert_raises(message: str, func, *args, **kwargs) -> None:
