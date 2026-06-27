@@ -41,8 +41,9 @@ Atlas currently supports:
   policy enforcement without creating worker jobs for gates.
 - Bounded manager nodes that propose next actions as strict JSON while Atlas
   validates edges, artifacts, routes, workspaces, and execution guards.
-- A workflow builder entry point that routes plain-language draft requests to a
-  worker with role or tag `workflow_builder`.
+- A validated workflow builder for draft, explain, repair, and trigger
+  suggestions, with simple node/condition/trigger forms and raw JSON editing.
+- Four built-in workflow templates that copy into the editor without saving.
 
 This is enough to run simple real workflows such as:
 
@@ -52,8 +53,8 @@ Research worker -> Writer worker
 Coder worker    -> Reviewer worker
 ```
 
-For the remaining builder and template milestones, see
-[docs/workflow-engine-plan.md](docs/workflow-engine-plan.md).
+The workflow implementation checklist is in
+[docs/workflow-engine-coding-plan.md](docs/workflow-engine-coding-plan.md).
 
 ## User Documentation
 
@@ -584,6 +585,8 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 - `POST /api/workflows/{id}/validate`
 - `POST /api/workflows/{id}/explain`
 - `POST /api/workflows/{id}/repair`
+- `POST /api/workflows/{id}/suggest-triggers`
+- `GET /api/workflow-templates`
 - `GET /api/workflow-runs`
 - `POST /api/workflow-runs`
 - `GET /api/workflow-runs/{id}`
@@ -780,10 +783,5 @@ python3 -B -m atlas --host 127.0.0.1 --port 8787
 
 The deterministic workflow engine now includes graph execution, conditions,
 fan-out, joins, loop/time/job guards, artifacts, lifecycle controls, event
-triggers, human approvals, and bounded manager-directed routing. The remaining
-coding milestones, in order, are:
-
-- **Milestone 7**: builder completion for the full node/trigger surface
-- **Milestone 8**: built-in workflow templates
-
-See [docs/workflow-engine-plan.md](docs/workflow-engine-plan.md).
+triggers, human approvals, bounded manager-directed routing, the validated
+builder surface, and built-in templates. Milestones 1–8 are complete.

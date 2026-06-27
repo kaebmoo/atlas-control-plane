@@ -20,8 +20,7 @@ Already implemented:
 - workflow lifecycle events, joins, event triggers, artifact APIs, human
   approvals, and bounded manager routing from Milestones 1–6 below
 
-Milestones 1–6 are complete. Milestones 7 and 8 remain dependent follow-up
-work.
+Milestones 1–8 are complete.
 
 ## Milestone 1: Hardening And Observability
 
@@ -229,21 +228,21 @@ Files:
 
 Work:
 
-- Add `POST /api/workflows/{id}/suggest-triggers`.
-- Add builder context for joins, manager nodes, human gates, artifacts, and
+- [x] Add `POST /api/workflows/{id}/suggest-triggers`.
+- [x] Add builder context for joins, manager nodes, human gates, artifacts, and
   policy defaults.
-- Make explain use `workflow_builder` when available, with deterministic local
+- [x] Make explain use `workflow_builder` when available, with deterministic local
   fallback.
-- Make repair validate returned triggers and policy limits.
-- Add simple condition/trigger forms that update JSON preview.
+- [x] Make repair validate returned triggers and policy limits.
+- [x] Add simple condition/trigger forms that update JSON preview.
 
 Checks:
 
-- draft validates graph and trigger schedule
-- missing builder gives clear error
-- explain returns local fallback without builder
-- repair rejects invalid returned JSON
-- suggest-triggers returns validated trigger drafts
+- [x] draft validates graph and trigger schedule
+- [x] missing builder gives clear error
+- [x] explain returns local fallback without builder
+- [x] repair rejects invalid returned JSON
+- [x] suggest-triggers returns validated trigger drafts
 
 ## Milestone 8: Templates
 
@@ -258,19 +257,19 @@ Files:
 
 Work:
 
-- Add built-in templates:
-  - News Desk
-  - Researcher -> Writer -> Reviewer
-  - Coder -> Tester -> Reviewer
-  - Manager-directed loop with max 3 iterations
-- Add `GET /api/workflow-templates`.
-- Add dashboard template picker that copies JSON into the editor.
+- [x] Add built-in templates:
+  - [x] News Desk
+  - [x] Researcher -> Writer -> Reviewer
+  - [x] Coder -> Tester -> Reviewer
+  - [x] Manager-directed loop with max 3 iterations
+- [x] Add `GET /api/workflow-templates`.
+- [x] Add dashboard template picker that copies JSON into the editor.
 
 Checks:
 
-- every built-in template validates
-- create workflow from template
-- template picker fills editor JSON
+- [x] every built-in template validates
+- [x] create workflow from template
+- [x] template picker fills editor JSON
 
 ## Completion Gate
 

@@ -111,6 +111,8 @@ def main() -> None:
 
             draft_error = request_error(base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "make a news workflow"})
             assert "workflow_builder" in draft_error["error"]
+            check_milestone_7(runtime, base_url, workflow_id)
+            check_milestone_8(base_url)
 
             trigger = request(
                 base_url,
@@ -329,6 +331,132 @@ def check_milestone_5(base_url: str) -> None:
     assert {"approval_created", "approval_rejected", "node_failed", "run_finished"} <= event_types
 
 
+def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) -> None:
+    builder = runtime.db.upsert_worker(
+        {"name": "Workflow Builder", "base_url": "http://127.0.0.1:2", "role": "workflow_builder"}
+    )
+    original_submit = runtime.jobs.submit
+    response = {"text": ""}
+    prompts: list[str] = []
+
+    def submit(payload: dict) -> dict:
+        prompts.append(payload["prompt"])
+        job = runtime.db.create_job(
+            {"worker_id": builder["id"], "prompt": payload["prompt"], "state": "running"}
+        )
+        runtime.db.append_job_text(job["id"], response["text"])
+        runtime.db.update_job(job["id"], state="succeeded", finished_at=now_iso())
+        return runtime.db.get_job(job["id"]) or job
+
+    runtime.jobs.submit = submit
+    valid_draft = {
+        "name": "Builder draft",
+        "description": "validated",
+        "graph": {
+            "start": "gate",
+            "nodes": [
+                {"id": "gate", "type": "human_gate", "label": "Approve"},
+                {"id": "join", "type": "join", "mode": "all"},
+            ],
+            "edges": [{"from": "gate", "to": "join", "condition": {"type": "always"}}],
+        },
+        "policy": {"max_jobs": 2},
+        "triggers": [{"name": "Every 15", "type": "schedule", "config": {"interval_minutes": 15}}],
+        "explanation": "A bounded draft.",
+        "warnings": [],
+    }
+    try:
+        response["text"] = json.dumps(valid_draft)
+        draft = request(
+            base_url,
+            "POST",
+            "/api/workflows/draft",
+            {"plain_language_prompt": "gate then join every 15 minutes"},
+        )["draft"]
+        assert draft["triggers"][0]["config"]["interval_minutes"] == 15
+        assert all(value in prompts[-1] for value in ["human_gate", "manager", "join", "artifact_kinds", "policy_defaults"])
+
+        invalid_schedule = dict(valid_draft, triggers=[{"type": "schedule", "config": {"interval_minutes": 0}}])
+        response["text"] = json.dumps(invalid_schedule)
+        assert "interval_minutes must be positive" in request_error(
+            base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "bad schedule"}
+        )["error"]
+
+        outside_dsl = dict(
+            valid_draft,
+            graph={"start": "x", "nodes": [{"id": "x", "type": "tool"}], "edges": []},
+            triggers=[],
+        )
+        response["text"] = json.dumps(outside_dsl)
+        assert "unsupported type" in request_error(
+            base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "outside DSL"}
+        )["error"]
+
+        response["text"] = json.dumps({"explanation": "Builder explanation."})
+        assert request(base_url, "POST", f"/api/workflows/{workflow_id}/explain")["explanation"] == "Builder explanation."
+
+        response["text"] = "not JSON"
+        bad_repair = request_error(
+            base_url,
+            "POST",
+            f"/api/workflows/{workflow_id}/repair",
+            {"graph": {"start": "x", "nodes": [{"id": "x", "type": "tool"}], "edges": []}},
+        )
+        assert "must be one JSON object" in bad_repair["error"]
+
+        response["text"] = json.dumps(
+            {"triggers": [{"name": "Morning", "type": "schedule", "config": {"daily_time": "09:30"}}]}
+        )
+        suggestions = request(
+            base_url,
+            "POST",
+            f"/api/workflows/{workflow_id}/suggest-triggers",
+            {"plain_language_prompt": "run each morning"},
+        )["triggers"]
+        assert suggestions == [{"name": "Morning", "type": "schedule", "config": {"daily_time": "09:30"}}]
+    finally:
+        runtime.jobs.submit = original_submit
+
+
+def check_milestone_8(base_url: str) -> None:
+    for index, role in enumerate(["reporter", "fact_checker", "editor", "anchor", "researcher", "writer", "reviewer", "coder", "tester", "manager"], 10):
+        request(
+            base_url,
+            "POST",
+            "/api/workers",
+            {"name": role, "base_url": f"http://127.0.0.1:{index}", "role": role},
+        )
+
+    templates = request(base_url, "GET", "/api/workflow-templates")["templates"]
+    assert [template["name"] for template in templates] == [
+        "News Desk",
+        "Researcher -> Writer -> Reviewer",
+        "Coder -> Tester -> Reviewer",
+        "Manager-directed loop with max 3 iterations",
+    ]
+    manager = templates[-1]
+    assert manager["policy"]["max_iterations"] == 3
+    assert all(
+        edge["condition"]["type"] == "manager_selected"
+        for edge in manager["graph"]["edges"]
+        if edge["from"] == "manager"
+    )
+    for template in templates:
+        created = request(
+            base_url,
+            "POST",
+            "/api/workflows",
+            {key: template[key] for key in ["name", "description", "graph", "policy"]},
+        )["workflow"]
+        assert created["graph"] == template["graph"]
+        assert created["policy"] == template["policy"]
+
+    html = request_text(base_url, "/")
+    javascript = request_text(base_url, "/static/app.js")
+    assert 'id="workflowTemplateSelect"' in html
+    assert "template.graph" in javascript and "template.policy" in javascript
+
+
 def request(base_url: str, method: str, path: str, payload: dict | None = None) -> dict:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(base_url + path, data=body, method=method, headers={"content-type": "application/json"})
@@ -342,6 +470,11 @@ def request_error(base_url: str, method: str, path: str, payload: dict | None = 
     except urllib.error.HTTPError as exc:
         return json.loads(exc.read().decode("utf-8"))
     raise AssertionError("expected HTTPError")
+
+
+def request_text(base_url: str, path: str) -> str:
+    with urllib.request.urlopen(base_url + path, timeout=5) as response:
+        return response.read().decode("utf-8")
 
 
 def wait_for_api_run(base_url: str, run_id: str, state: str) -> dict:

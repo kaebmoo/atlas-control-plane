@@ -5,6 +5,7 @@ const state = {
   jobs: [],
   audit: [],
   workflows: [],
+  workflowTemplates: [],
   workflowRuns: [],
   workflowTriggers: [],
   approvals: [],
@@ -17,6 +18,7 @@ const state = {
   workflowEvents: [],
   workflowTriggerEvents: [],
   eventSource: null,
+  workflowEditorDirty: false,
   streamText: "",
   events: [],
 };
@@ -106,13 +108,86 @@ function defaultWorkflowGraph() {
   };
 }
 
+function addBuilderNode() {
+  const graph = parseJsonField("#workflowGraphInput");
+  const id = $("#builderNodeIdInput").value.trim();
+  const type = $("#builderNodeTypeSelect").value;
+  if (!id) throw new Error("Node ID is required");
+  if ((graph.nodes || []).some((node) => node.id === id)) throw new Error(`Duplicate node ID: ${id}`);
+  const role = $("#builderNodeRoleInput").value.trim();
+  const prompt = $("#builderNodePromptInput").value.trim();
+  let node;
+  if (type === "manager") {
+    node = { id, type, schema: "manager_decision_v1", prompt: prompt || "Choose the next bounded workflow action." };
+    if (role) node.role = role;
+  } else if (type === "join") {
+    node = { id, type, mode: $("#builderJoinModeSelect").value };
+  } else if (type === "human_gate") {
+    node = { id, type, label: role || id, reason: prompt };
+  } else {
+    node = { id, type, prompt };
+    if (role) node.role = role;
+    const outputs = $("#builderNodeOutputsInput").value.split(",").map((value) => value.trim()).filter(Boolean);
+    if (outputs.length) node.outputs = outputs;
+  }
+  graph.nodes = [...(graph.nodes || []), node];
+  graph.edges ||= [];
+  graph.start ||= id;
+  $("#workflowGraphInput").value = prettyJson(graph);
+  state.workflowEditorDirty = true;
+  toast(`${type} node added to JSON preview`);
+}
+
+function addBuilderEdge() {
+  const graph = parseJsonField("#workflowGraphInput");
+  const from = $("#builderEdgeFromInput").value.trim();
+  const to = $("#builderEdgeToInput").value.trim();
+  const type = $("#builderConditionTypeSelect").value;
+  const subject = $("#builderConditionSubjectInput").value.trim();
+  const value = $("#builderConditionValueInput").value.trim();
+  if (!from || !to) throw new Error("Edge From and To are required");
+  let condition = { type };
+  if (type === "artifact_equals") {
+    condition = { type, artifact: subject, path: $("#builderConditionPathInput").value.trim(), value };
+  } else if (type === "artifact_in") {
+    condition = { type, artifact: subject, path: $("#builderConditionPathInput").value.trim(), values: value.split(",").map((item) => item.trim()).filter(Boolean) };
+  } else if (type === "manager_selected") {
+    condition = { type, target: to };
+  } else if (type === "max_iterations_below") {
+    condition = { type, node: subject, max: Number.parseInt(value, 10) };
+  }
+  graph.edges = [...(graph.edges || []), { from, to, condition }];
+  $("#workflowGraphInput").value = prettyJson(graph);
+  state.workflowEditorDirty = true;
+  toast(`${type} edge added to JSON preview`);
+}
+
+function applyQuickTrigger() {
+  const quickType = $("#triggerQuickTypeSelect").value;
+  const value = $("#triggerQuickValueInput").value.trim();
+  if (quickType === "interval") {
+    const minutes = Number(value);
+    if (!Number.isFinite(minutes) || minutes <= 0) throw new Error("Interval minutes must be positive");
+    $("#triggerTypeSelect").value = "schedule";
+    $("#triggerConfigInput").value = prettyJson({ interval_minutes: minutes });
+  } else if (quickType === "daily") {
+    $("#triggerTypeSelect").value = "schedule";
+    $("#triggerConfigInput").value = prettyJson({ daily_time: value || "09:30" });
+  } else {
+    $("#triggerTypeSelect").value = quickType;
+    $("#triggerConfigInput").value = "{}";
+  }
+  toast("Trigger JSON preview updated");
+}
+
 async function loadAll() {
-  const [workers, workspaces, conversations, jobs, workflows, workflowRuns, workflowTriggers, approvals, audit] = await Promise.all([
+  const [workers, workspaces, conversations, jobs, workflows, workflowTemplates, workflowRuns, workflowTriggers, approvals, audit] = await Promise.all([
     api("/api/workers"),
     api("/api/workspaces"),
     api("/api/conversations"),
     api("/api/jobs"),
     api("/api/workflows"),
+    api("/api/workflow-templates"),
     api("/api/workflow-runs"),
     api("/api/workflow-triggers"),
     api("/api/approvals?state=pending"),
@@ -123,6 +198,7 @@ async function loadAll() {
   state.conversations = conversations.conversations || [];
   state.jobs = jobs.jobs || [];
   state.workflows = workflows.workflows || [];
+  state.workflowTemplates = workflowTemplates.templates || [];
   state.workflowRuns = workflowRuns.runs || [];
   state.workflowTriggers = workflowTriggers.triggers || [];
   state.approvals = approvals.approvals || [];
@@ -283,10 +359,20 @@ function renderWorkflows() {
     state.selectedWorkflowId = null;
   }
   renderWorkflowList();
+  renderWorkflowTemplatePicker();
   renderWorkflowEditor();
   renderWorkflowRuns();
   renderApprovals();
   renderWorkflowTriggers();
+}
+
+function renderWorkflowTemplatePicker() {
+  const select = $("#workflowTemplateSelect");
+  const selected = select.value;
+  select.innerHTML = '<option value="">Choose a template</option>' + state.workflowTemplates.map((template) => (
+    `<option value="${escapeHtml(template.id)}">${escapeHtml(template.name)}</option>`
+  )).join("");
+  setSelectValue(select, selected);
 }
 
 function renderWorkflowList() {
@@ -308,7 +394,13 @@ function renderWorkflowList() {
 
 function renderWorkflowEditor(force = false) {
   const workflow = state.workflows.find((item) => item.id === state.selectedWorkflowId);
-  const editorIds = new Set(["workflowNameInput", "workflowDescriptionInput", "workflowGraphInput", "workflowPolicyInput", "workflowRunInput"]);
+  if (!force && state.workflowEditorDirty) return;
+  const editorIds = new Set([
+    "workflowNameInput", "workflowDescriptionInput", "workflowGraphInput", "workflowPolicyInput", "workflowRunInput",
+    "builderNodeIdInput", "builderNodeTypeSelect", "builderNodeRoleInput", "builderNodePromptInput", "builderNodeOutputsInput",
+    "builderJoinModeSelect", "builderAddNodeBtn", "builderEdgeFromInput", "builderEdgeToInput", "builderConditionTypeSelect",
+    "builderConditionSubjectInput", "builderConditionPathInput", "builderConditionValueInput", "builderAddEdgeBtn",
+  ]);
   if (!force && workflow && $("#workflowNameInput").dataset.workflowId === workflow.id && editorIds.has(document.activeElement?.id)) {
     return;
   }
@@ -600,6 +692,7 @@ function newWorkflow() {
   state.workflowArtifacts = [];
   state.workflowEvents = [];
   state.workflowTriggerEvents = [];
+  state.workflowEditorDirty = false;
   $("#draftResult").textContent = "";
   $("#workflowRunInput").value = "{}";
   renderWorkflowEditor(true);
@@ -615,6 +708,7 @@ function selectWorkflow(workflowId) {
   state.workflowArtifacts = [];
   state.workflowEvents = [];
   state.workflowTriggerEvents = [];
+  state.workflowEditorDirty = false;
   $("#draftResult").textContent = "";
   renderWorkflowEditor(true);
   renderWorkflows();
@@ -632,6 +726,7 @@ async function saveWorkflow() {
   const method = workflowId ? "PUT" : "POST";
   const data = await api(path, { method, body: JSON.stringify(payload) });
   state.selectedWorkflowId = data.workflow.id;
+  state.workflowEditorDirty = false;
   toast("Workflow saved");
   await loadAll();
 }
@@ -663,6 +758,7 @@ async function draftWorkflow() {
   $("#workflowDescriptionInput").value = draft.description || "";
   $("#workflowGraphInput").value = prettyJson(draft.graph || defaultWorkflowGraph());
   $("#workflowPolicyInput").value = prettyJson(draft.policy || {});
+  state.workflowEditorDirty = true;
   $("#draftResult").textContent = prettyJson({
     explanation: draft.explanation || "",
     warnings: draft.warnings || [],
@@ -670,6 +766,21 @@ async function draftWorkflow() {
   });
   renderWorkflowList();
   toast("Draft ready");
+}
+
+function applyWorkflowTemplate() {
+  const template = state.workflowTemplates.find((item) => item.id === $("#workflowTemplateSelect").value);
+  if (!template) throw new Error("Choose a template first");
+  state.selectedWorkflowId = null;
+  state.workflowEditorDirty = true;
+  $("#workflowNameInput").dataset.workflowId = "";
+  $("#workflowNameInput").value = template.name;
+  $("#workflowDescriptionInput").value = template.description || "";
+  $("#workflowGraphInput").value = prettyJson(template.graph);
+  $("#workflowPolicyInput").value = prettyJson(template.policy);
+  $("#workflowMeta").textContent = "Template copied · not saved";
+  renderWorkflowList();
+  toast("Template copied to editor; save when ready");
 }
 
 async function runWorkflow() {
@@ -742,6 +853,25 @@ async function saveTrigger() {
   });
   toast("Trigger created");
   await loadAll();
+}
+
+async function suggestTriggers() {
+  if (!state.selectedWorkflowId) {
+    toast("Select a saved workflow first");
+    return;
+  }
+  const data = await api(`/api/workflows/${state.selectedWorkflowId}/suggest-triggers`, {
+    method: "POST",
+    body: JSON.stringify({ plain_language_prompt: $("#draftPromptInput").value.trim() || undefined }),
+  });
+  const triggers = data.triggers || [];
+  $("#draftResult").textContent = prettyJson({ triggers });
+  if (triggers[0]) {
+    $("#triggerNameInput").value = triggers[0].name || "Suggested trigger";
+    $("#triggerTypeSelect").value = triggers[0].type || "manual";
+    $("#triggerConfigInput").value = prettyJson(triggers[0].config || {});
+  }
+  toast("Validated trigger drafts ready");
 }
 
 async function fireTrigger(triggerId) {
@@ -916,11 +1046,24 @@ $("#newWorkflowBtn").addEventListener("click", () => newWorkflow());
 $("#saveWorkflowBtn").addEventListener("click", () => saveWorkflow().catch((error) => toast(error.message)));
 $("#validateWorkflowBtn").addEventListener("click", () => validateWorkflow().catch((error) => toast(error.message)));
 $("#draftWorkflowBtn").addEventListener("click", () => draftWorkflow().catch((error) => toast(error.message)));
+$("#applyWorkflowTemplateBtn").addEventListener("click", () => {
+  try { applyWorkflowTemplate(); } catch (error) { toast(error.message); }
+});
+$("#builderAddNodeBtn").addEventListener("click", () => {
+  try { addBuilderNode(); } catch (error) { toast(error.message); }
+});
+$("#builderAddEdgeBtn").addEventListener("click", () => {
+  try { addBuilderEdge(); } catch (error) { toast(error.message); }
+});
 $("#runWorkflowBtn").addEventListener("click", () => runWorkflow().catch((error) => toast(error.message)));
 $("#pauseWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("pause").catch((error) => toast(error.message)));
 $("#resumeWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("resume").catch((error) => toast(error.message)));
 $("#cancelWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("cancel").catch((error) => toast(error.message)));
 $("#saveTriggerBtn").addEventListener("click", () => saveTrigger().catch((error) => toast(error.message)));
+$("#applyTriggerQuickBtn").addEventListener("click", () => {
+  try { applyQuickTrigger(); } catch (error) { toast(error.message); }
+});
+$("#suggestTriggersBtn").addEventListener("click", () => suggestTriggers().catch((error) => toast(error.message)));
 $("#addWorkerBtn").addEventListener("click", () => openWorkerModal());
 $("#addWorkspaceBtn").addEventListener("click", () => openWorkspaceModal());
 $("#conversationSelect").addEventListener("change", () => {
@@ -937,6 +1080,9 @@ $("#workspaceSelect").addEventListener("change", () => {
 });
 $("#workerForm").addEventListener("submit", (event) => saveWorker(event).catch((error) => toast(error.message)));
 $("#workspaceForm").addEventListener("submit", (event) => saveWorkspace(event).catch((error) => toast(error.message)));
+for (const selector of ["#workflowNameInput", "#workflowDescriptionInput", "#workflowGraphInput", "#workflowPolicyInput"]) {
+  $(selector).addEventListener("input", () => { state.workflowEditorDirty = true; });
+}
 
 loadAll()
   .then(() => {

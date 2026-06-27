@@ -480,3 +480,22 @@ curl -sS -X POST http://127.0.0.1:8787/api/workflows/draft \
     "plain_language_prompt": "Build a reporter to fact checker to anchor workflow. If fact checker says needs_more_sources, send it back to reporter up to 2 times."
   }'
 ```
+
+Builder output is accepted only after graph, worker/workspace reference, policy,
+and trigger validation. Other builder endpoints for a saved workflow are:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/workflows/wfd_xxx/explain
+curl -sS -X POST http://127.0.0.1:8787/api/workflows/wfd_xxx/repair \
+  -H 'content-type: application/json' \
+  -d '{"graph":{},"policy":{},"triggers":[]}'
+curl -sS -X POST http://127.0.0.1:8787/api/workflows/wfd_xxx/suggest-triggers \
+  -H 'content-type: application/json' \
+  -d '{"plain_language_prompt":"Run every morning at 09:30"}'
+```
+
+List built-in templates without saving them:
+
+```bash
+curl -sS http://127.0.0.1:8787/api/workflow-templates
+```

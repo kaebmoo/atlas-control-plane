@@ -14,6 +14,7 @@ from .config import Config
 from .db import ARTIFACT_KINDS, Database
 from .jobs import JobManager, TERMINAL_STATES
 from .router import Router
+from .workflow_templates import workflow_templates
 from .workflows import (
     WorkflowRunner,
     WorkflowTriggerService,
@@ -31,6 +32,12 @@ _WORKFLOW_POLICY_LIMITS = {
     "max_attempts_per_node": 25,
     "max_minutes": 1440,
     "requires_human_after_iterations": 100,
+}
+_WORKFLOW_POLICY_DEFAULTS = {
+    "max_jobs": 20,
+    "max_iterations": 5,
+    "max_attempts_per_node": 3,
+    "max_minutes": 30,
 }
 
 
@@ -227,6 +234,10 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 self._json({"workflow": workflow}, HTTPStatus.CREATED)
                 return
 
+        if parts == ["api", "workflow-templates"] and method == "GET":
+            self._json({"templates": workflow_templates()})
+            return
+
         if parts == ["api", "workflows", "draft"] and method == "POST":
             self._json({"draft": _build_workflow_draft(runtime, self._read_json())}, HTTPStatus.CREATED)
             return
@@ -268,7 +279,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
             workflow = runtime.db.get_workflow_definition(parts[2])
             if not workflow:
                 raise FileNotFoundError()
-            self._json({"explanation": _explain_workflow(workflow)})
+            self._json({"explanation": _explain_workflow(runtime, workflow)})
             return
 
         if len(parts) == 4 and parts[:2] == ["api", "workflows"] and parts[3] == "repair" and method == "POST":
@@ -276,6 +287,13 @@ class AtlasHandler(BaseHTTPRequestHandler):
             if not workflow:
                 raise FileNotFoundError()
             self._json({"draft": _repair_workflow(runtime, workflow, self._read_json())})
+            return
+
+        if len(parts) == 4 and parts[:2] == ["api", "workflows"] and parts[3] == "suggest-triggers" and method == "POST":
+            workflow = runtime.db.get_workflow_definition(parts[2])
+            if not workflow:
+                raise FileNotFoundError()
+            self._json({"triggers": _suggest_workflow_triggers(runtime, workflow, self._read_json())})
             return
 
         if parts == ["api", "workflow-runs"]:
@@ -656,21 +674,46 @@ def _build_workflow_draft(runtime: AtlasRuntime, payload: dict[str, Any]) -> dic
 def _repair_workflow(runtime: AtlasRuntime, workflow: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     graph = payload.get("graph", workflow["graph"])
     policy = payload.get("policy", workflow.get("policy") or {})
+    triggers = payload.get("triggers") or []
     try:
-        _validate_workflow_payload(runtime, {"graph": graph, "policy": policy})
+        _validate_workflow_payload(runtime, {"graph": graph, "policy": policy, "triggers": triggers})
         return {
             "name": workflow.get("name") or "Workflow",
             "description": workflow.get("description") or "",
             "graph": graph,
             "policy": policy,
+            "triggers": triggers,
             "explanation": "Workflow already validates.",
             "warnings": [],
         }
     except ValueError as exc:
-        prompt = _builder_prompt(runtime, f"Repair this workflow. Error: {exc}\nWorkflow JSON:\n{json.dumps({'graph': graph, 'policy': policy}, ensure_ascii=True)}")
+        prompt = _builder_prompt(
+            runtime,
+            f"Repair this workflow. Error: {exc}\nWorkflow JSON:\n"
+            f"{json.dumps({'graph': graph, 'policy': policy, 'triggers': triggers}, ensure_ascii=True)}",
+        )
         draft = _run_workflow_builder(runtime, prompt)
         _validate_workflow_payload(runtime, draft)
         return draft
+
+
+def _suggest_workflow_triggers(
+    runtime: AtlasRuntime,
+    workflow: dict[str, Any],
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    intent = str(payload.get("plain_language_prompt") or "Suggest suitable triggers for this workflow.").strip()
+    result = _run_workflow_builder(
+        runtime,
+        "Return only a JSON object with one key, triggers, containing trigger drafts. "
+        "Each draft may use only type, name, config, and enabled.\n\n"
+        f"Builder context JSON:\n{json.dumps(_builder_context(runtime), ensure_ascii=True)}\n\n"
+        f"Workflow JSON:\n{json.dumps(workflow, ensure_ascii=True)}\n\n"
+        f"User request:\n{intent}",
+    )
+    triggers = result.get("triggers")
+    _validate_workflow_draft_triggers(triggers)
+    return triggers
 
 
 def _run_workflow_builder(runtime: AtlasRuntime, prompt: str) -> dict[str, Any]:
@@ -685,33 +728,34 @@ def _run_workflow_builder(runtime: AtlasRuntime, prompt: str) -> dict[str, Any]:
 
 
 def _builder_prompt(runtime: AtlasRuntime, plain_prompt: str) -> str:
-    context = {
-        "workers": [_public_worker(worker) for worker in runtime.db.list_workers()],
-        "workspaces": runtime.db.list_workspaces(),
-        "node_types": ["worker"],
-        "condition_types": ["always", "artifact_equals", "artifact_in", "max_iterations_below"],
-        "trigger_types": ["manual", "schedule"],
-        "templates": [
-            {
-                "name": "reporter_anchor",
-                "graph": {
-                    "start": "reporter",
-                    "nodes": [
-                        {"id": "reporter", "type": "worker", "prompt": "Research {input.topic}", "outputs": ["notes"]},
-                        {"id": "anchor", "type": "worker", "prompt": "Write from {artifact.notes}", "outputs": ["script"]},
-                    ],
-                    "edges": [{"from": "reporter", "to": "anchor", "condition": {"type": "always"}}],
-                },
-            }
-        ],
-    }
     return (
         "Return only a JSON object with keys name, description, graph, policy, triggers, explanation, warnings.\n"
-        "Use graph nodes with id, type=worker, prompt, optional worker_id/workspace_id, outputs, output_format.\n"
-        "Use edge conditions from the provided condition_types only.\n\n"
-        f"Context JSON:\n{json.dumps(context, ensure_ascii=True)}\n\n"
+        "Use only the node, condition, trigger, artifact, and policy contracts in the context.\n"
+        "Manager nodes must use schema=manager_decision_v1 and manager_selected outgoing edges.\n"
+        "Cycles must be bounded by policy.max_iterations or max_iterations_below.\n\n"
+        f"Context JSON:\n{json.dumps(_builder_context(runtime), ensure_ascii=True)}\n\n"
         f"User request:\n{plain_prompt}"
     )
+
+
+def _builder_context(runtime: AtlasRuntime) -> dict[str, Any]:
+    return {
+        "workers": [_public_worker(worker) for worker in runtime.db.list_workers()],
+        "workspaces": runtime.db.list_workspaces(),
+        "node_types": {
+            "worker": {"fields": ["id", "prompt", "worker_id", "workspace_id", "role", "outputs", "output_format"]},
+            "manager": {"fields": ["id", "prompt", "worker_id", "workspace_id", "role", "schema"], "schema": "manager_decision_v1"},
+            "join": {"fields": ["id", "mode"], "modes": ["all", "any"]},
+            "human_gate": {"fields": ["id", "label", "reason"]},
+        },
+        "condition_types": ["always", "artifact_equals", "artifact_in", "manager_selected", "max_iterations_below"],
+        "trigger_types": ["manual", "schedule", "webhook", "workflow_run_completed", "artifact_created", "worker_status_changed"],
+        "schedule_configs": [{"interval_minutes": 15}, {"daily_time": "09:30"}],
+        "artifact_kinds": sorted(ARTIFACT_KINDS),
+        "policy_defaults": _WORKFLOW_POLICY_DEFAULTS,
+        "policy_limits": _WORKFLOW_POLICY_LIMITS,
+        "templates": workflow_templates(),
+    }
 
 
 def _workflow_builder_worker(workers: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -724,21 +768,30 @@ def _workflow_builder_worker(workers: list[dict[str, Any]]) -> dict[str, Any] | 
 
 def _json_from_text(text: str) -> dict[str, Any]:
     stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = stripped.strip("`")
-        if stripped.startswith("json"):
-            stripped = stripped[4:]
-    start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start < 0 or end < start:
-        raise ValueError("workflow_builder response did not contain JSON")
-    data = json.loads(stripped[start : end + 1])
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"workflow_builder response must be one JSON object: {exc.msg}") from exc
     if not isinstance(data, dict):
         raise ValueError("workflow_builder response must be a JSON object")
     return data
 
 
-def _explain_workflow(workflow: dict[str, Any]) -> str:
+def _explain_workflow(runtime: AtlasRuntime, workflow: dict[str, Any]) -> str:
+    if _workflow_builder_worker(runtime.db.list_workers()):
+        result = _run_workflow_builder(
+            runtime,
+            "Return only a JSON object with one string key named explanation. Explain this validated workflow plainly.\n\n"
+            f"Workflow JSON:\n{json.dumps(workflow, ensure_ascii=True)}",
+        )
+        explanation = result.get("explanation")
+        if not isinstance(explanation, str) or not explanation.strip():
+            raise ValueError("workflow_builder explanation must be a non-empty string")
+        return explanation.strip()
+    return _local_workflow_explanation(workflow)
+
+
+def _local_workflow_explanation(workflow: dict[str, Any]) -> str:
     graph = workflow.get("graph") or {}
     nodes = graph.get("nodes") or []
     edges = graph.get("edges") or []

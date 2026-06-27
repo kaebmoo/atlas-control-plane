@@ -16,11 +16,11 @@ coordination.
 
 ## Implementation Status
 
-Coding-plan Milestones 1–6 are implemented: workflow lifecycle controls and
+Coding-plan Milestones 1–8 are implemented: workflow lifecycle controls and
 events, fan-out with `all`/`any` joins, duplicate-schedule prevention,
-webhook/internal event triggers, first-class artifact APIs, and human gates with
-approvals, plus bounded manager nodes with proposal validation and audit. Full
-builder forms and built-in templates remain planned.
+webhook/internal event triggers, first-class artifact APIs, human gates with
+approvals, bounded manager nodes with proposal validation and audit, validated
+builder tools/forms, and built-in templates.
 
 ## Goals
 
@@ -795,7 +795,7 @@ Views:
 
 ## Implementation Phases
 
-### Phase 1: Static Workflow Graph
+### Phase 1: Static Workflow Graph (implemented)
 
 Deliver:
 
@@ -811,7 +811,7 @@ Deliver:
 
 No manager yet.
 
-### Phase 2: Conditions And Joins
+### Phase 2: Conditions And Joins (implemented)
 
 Deliver:
 
@@ -843,7 +843,7 @@ Deliver:
 - approval UI
 - resume workflow after approval
 
-### Phase 5: Workflow Templates (planned)
+### Phase 5: Workflow Templates (implemented)
 
 Deliver built-in templates:
 

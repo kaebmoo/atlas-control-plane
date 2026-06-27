@@ -119,8 +119,42 @@
 
             <div class="workflow-editor">
               <div class="form-grid two-col">
+                <label>Template<select id="workflowTemplateSelect"><option value="">Choose a template</option></select></label>
+                <button id="applyWorkflowTemplateBtn" class="secondary-btn" type="button">Copy Template To Editor</button>
+              </div>
+              <div class="form-grid two-col">
                 <label>Name<input id="workflowNameInput" placeholder="News workflow"></label>
                 <label>Description<input id="workflowDescriptionInput" placeholder="optional"></label>
+              </div>
+              <div class="subhead">Builder Lite</div>
+              <div class="form-grid two-col">
+                <label>Node ID<input id="builderNodeIdInput" placeholder="reviewer"></label>
+                <label>Node type<select id="builderNodeTypeSelect">
+                  <option value="worker">worker</option>
+                  <option value="manager">manager</option>
+                  <option value="join">join</option>
+                  <option value="human_gate">human_gate</option>
+                </select></label>
+                <label>Role / label<input id="builderNodeRoleInput" placeholder="reviewer"></label>
+                <label>Prompt / reason<input id="builderNodePromptInput" placeholder="Review {artifact.draft}"></label>
+                <label>Outputs<input id="builderNodeOutputsInput" placeholder="review"></label>
+                <label>Join mode<select id="builderJoinModeSelect"><option value="all">all</option><option value="any">any</option></select></label>
+                <button id="builderAddNodeBtn" class="secondary-btn" type="button">Add Node</button>
+              </div>
+              <div class="form-grid two-col">
+                <label>From<input id="builderEdgeFromInput" placeholder="writer"></label>
+                <label>To<input id="builderEdgeToInput" placeholder="reviewer"></label>
+                <label>Condition<select id="builderConditionTypeSelect">
+                  <option value="always">always</option>
+                  <option value="artifact_equals">artifact_equals</option>
+                  <option value="artifact_in">artifact_in</option>
+                  <option value="manager_selected">manager_selected</option>
+                  <option value="max_iterations_below">max_iterations_below</option>
+                </select></label>
+                <label>Artifact / node<input id="builderConditionSubjectInput" placeholder="fact_check"></label>
+                <label>Path<input id="builderConditionPathInput" placeholder="verdict"></label>
+                <label>Value(s) / max<input id="builderConditionValueInput" placeholder="approved or approved,rewrite"></label>
+                <button id="builderAddEdgeBtn" class="secondary-btn" type="button">Add Edge</button>
               </div>
               <label>Graph JSON<textarea id="workflowGraphInput" rows="12"></textarea></label>
               <label>Policy JSON<textarea id="workflowPolicyInput" rows="4"></textarea></label>
@@ -157,6 +191,14 @@
 
               <div class="subhead">Triggers</div>
               <div class="form-grid">
+                <label>Quick trigger<select id="triggerQuickTypeSelect">
+                  <option value="manual">manual</option>
+                  <option value="webhook">webhook</option>
+                  <option value="interval">schedule interval</option>
+                  <option value="daily">schedule daily</option>
+                </select></label>
+                <label>Quick value<input id="triggerQuickValueInput" placeholder="15 or 09:30"></label>
+                <button id="applyTriggerQuickBtn" class="secondary-btn" type="button">Apply To JSON</button>
                 <label>Name<input id="triggerNameInput" placeholder="Manual"></label>
                 <label>Type<select id="triggerTypeSelect">
                   <option value="manual">manual</option>
@@ -169,6 +211,7 @@
                 <label>Config JSON<textarea id="triggerConfigInput" rows="3">{}</textarea></label>
                 <label class="toggle-row"><input id="triggerEnabledInput" type="checkbox" checked><span>Enabled</span></label>
                 <button id="saveTriggerBtn" class="secondary-btn" type="button">Create Trigger</button>
+                <button id="suggestTriggersBtn" class="secondary-btn" type="button">Suggest Triggers</button>
               </div>
               <div id="triggerList" class="workflow-list short-list"></div>
               <pre id="triggerEventList" class="compact-pre"></pre>

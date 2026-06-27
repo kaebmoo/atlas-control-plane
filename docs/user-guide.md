@@ -285,8 +285,25 @@ Create a reporter -> fact_checker -> anchor workflow. If fact check says
 needs_more_sources, send it back to reporter up to 2 times.
 ```
 
-Atlas sends available workers, workspaces, condition types, trigger types, and
-templates to the builder worker. The returned JSON is validated before display.
+Atlas sends available workers, workspaces, worker/manager/join/human-gate node
+contracts, condition types, artifact kinds, trigger types, policy defaults, and
+templates to the builder worker. Builder output must be one JSON object. Atlas
+validates its graph, worker/workspace references, policy limits, and trigger
+schedules before display.
+
+Builder Lite can add supported nodes and conditions directly to the Graph JSON
+preview. The quick trigger form updates the Config JSON preview; raw JSON fields
+remain available. Explain uses the builder when configured and a deterministic
+local summary otherwise. Repair and trigger suggestions require a
+`workflow_builder` worker and are validated before display.
+
+### Built-In Templates
+
+Choose a template and click `Copy Template To Editor`. Atlas copies its name,
+description, graph, and policy into the editor but does not save it. The four
+templates are News Desk, Researcher -> Writer -> Reviewer, Coder -> Tester ->
+Reviewer, and a manager-directed loop bounded to 3 iterations. Register workers
+matching the template roles before saving.
 
 ## 10. Create And Fire A Trigger
 
