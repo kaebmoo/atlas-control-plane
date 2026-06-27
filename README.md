@@ -37,6 +37,8 @@ Atlas currently supports:
   trigger dedupe, and trigger event history.
 - Workflow run lifecycle events, pause/resume/cancel controls, and runtime
   worker/time policy enforcement. Resume skips completed nodes.
+- Human approval gates, approval audit events, and iteration-based approval
+  policy enforcement without creating worker jobs for gates.
 - A workflow builder entry point that routes plain-language draft requests to a
   worker with role or tag `workflow_builder`.
 
@@ -48,7 +50,7 @@ Research worker -> Writer worker
 Coder worker    -> Reviewer worker
 ```
 
-For human gates, manager-directed execution, and remaining milestones, see
+For manager-directed execution and remaining milestones, see
 [docs/workflow-engine-plan.md](docs/workflow-engine-plan.md).
 
 ## User Documentation
@@ -462,6 +464,33 @@ curl -sS -X POST http://127.0.0.1:8787/api/artifacts \
   -d '{"run_id":"wfr_xxx","key":"invoice","kind":"json","content":{"total":3}}'
 ```
 
+### Approve Or Reject A Human Gate
+
+Add a control-plane node to the workflow graph:
+
+```json
+{
+  "id": "publish_approval",
+  "type": "human_gate",
+  "label": "Approve publication",
+  "reason": "Review the final artifact before publishing"
+}
+```
+
+When execution reaches the gate, Atlas creates no worker job. The run changes
+to `waiting_for_human` and the dashboard shows `Approve` and `Reject` controls.
+The same actions are available through the API:
+
+```bash
+curl -sS 'http://127.0.0.1:8787/api/approvals?state=pending'
+
+curl -sS -X POST http://127.0.0.1:8787/api/approvals/apr_xxx/approve
+curl -sS -X POST http://127.0.0.1:8787/api/approvals/apr_xxx/reject
+```
+
+Approval resumes the staged outgoing edges. Rejection fails the run. Repeated
+decisions return an error and do not schedule downstream nodes again.
+
 ### Draft A Workflow
 
 Configure a worker with role or tag `workflow_builder`, then:
@@ -536,6 +565,9 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 - `POST /api/workflow-runs/{id}/pause`
 - `POST /api/workflow-runs/{id}/resume`
 - `POST /api/workflow-runs/{id}/cancel`
+- `GET /api/approvals`
+- `POST /api/approvals/{id}/approve`
+- `POST /api/approvals/{id}/reject`
 - `GET /api/artifacts/{id}`
 - `POST /api/artifacts`
 - `GET /api/workflow-triggers`
@@ -648,10 +680,10 @@ Atlas features fall into three levels:
 
 - **Works today without changing thClaws**: health, capability discovery,
   `/agent/run`, live SSE streaming, `x_callback`, session continuation,
-  deploy/sync, restart, and the multi-machine dashboard built by Atlas.
-- **Possible as workarounds**: cancel, central approval, live reconnect, team
-  control, and central audit. These can be approximated by Atlas but are not
-  fully native in thClaws yet.
+  deploy/sync, restart, workflow-level human approval gates, central workflow
+  audit, and the multi-machine dashboard built by Atlas.
+- **Possible as workarounds**: cancel, live reconnect, and team control. These
+  can be approximated by Atlas but are not fully native in thClaws yet.
 - **Not native without thClaws changes**: per-tool remote approval, list running
   jobs, job status, cancel by job id, stream resume cursor, structured remote
   Team API, and first-class cross-machine tool-decision audit.
@@ -720,12 +752,11 @@ python3 -B -m atlas --host 127.0.0.1 --port 8787
 ## Roadmap
 
 The deterministic workflow engine now includes graph execution, conditions,
-fan-out, joins, loop/time/job guards, artifacts, lifecycle controls, and event
-triggers. The next milestones are:
+fan-out, joins, loop/time/job guards, artifacts, lifecycle controls, event
+triggers, and human approvals. The remaining coding milestones, in order, are:
 
-- human approval gates
-- bounded manager-directed next-step proposals
-- builder completion for the full node/trigger surface
-- built-in workflow templates
+- **Milestone 6**: bounded manager-directed next-step proposals
+- **Milestone 7**: builder completion for the full node/trigger surface
+- **Milestone 8**: built-in workflow templates
 
 See [docs/workflow-engine-plan.md](docs/workflow-engine-plan.md).

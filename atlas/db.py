@@ -227,6 +227,23 @@ CREATE TABLE IF NOT EXISTS workflow_events (
   FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS approvals (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  workflow_node_id TEXT,
+  node_key TEXT NOT NULL,
+  approval_key TEXT NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  updated_at TEXT NOT NULL,
+  UNIQUE(run_id, approval_key),
+  FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE,
+  FOREIGN KEY(workflow_node_id) REFERENCES workflow_nodes(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS artifacts (
   id TEXT PRIMARY KEY,
   run_id TEXT,
@@ -273,6 +290,8 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_created ON workflow_runs(created_at
 CREATE INDEX IF NOT EXISTS idx_workflow_nodes_run ON workflow_nodes(run_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_edges_run ON workflow_edges(run_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_events_run_seq ON workflow_events(run_id, seq);
+CREATE INDEX IF NOT EXISTS idx_approvals_state_created ON approvals(state, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_triggers_definition ON workflow_triggers(workflow_definition_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_trigger_events_trigger ON workflow_trigger_events(trigger_id, created_at DESC);
@@ -597,6 +616,93 @@ class Database:
                 (run_id, limit),
             ).fetchall()
         return [row_to_dict(row) or {} for row in rows]
+
+    def create_approval(self, payload: dict[str, Any]) -> dict[str, Any]:
+        approval_id = payload.get("id") or new_id("apr")
+        now = now_iso()
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO approvals(
+                  id, run_id, workflow_node_id, node_key, approval_key, label,
+                  reason, state, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    approval_id,
+                    payload["run_id"],
+                    payload.get("workflow_node_id"),
+                    payload["node_key"],
+                    payload["approval_key"],
+                    payload.get("label") or "Human approval required",
+                    payload.get("reason") or "",
+                    now,
+                    now,
+                ),
+            )
+            if not cursor.rowcount:
+                row = conn.execute(
+                    "SELECT * FROM approvals WHERE run_id = ? AND approval_key = ?",
+                    (payload["run_id"], payload["approval_key"]),
+                ).fetchone()
+                return row_to_dict(row) or {}
+        self.audit("approval.create", "approval", approval_id, {"run_id": payload["run_id"], "node_key": payload["node_key"]})
+        return self.get_approval(approval_id) or {}
+
+    def get_approval(self, approval_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+        return row_to_dict(row)
+
+    def list_approvals(
+        self,
+        limit: int = 100,
+        state: str | None = None,
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where = []
+        params: list[Any] = []
+        if state:
+            where.append("state = ?")
+            params.append(state)
+        if run_id:
+            where.append("run_id = ?")
+            params.append(run_id)
+        sql = "SELECT * FROM approvals"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def decide_approval(self, approval_id: str, decision: str) -> dict[str, Any]:
+        if decision not in {"approved", "rejected"}:
+            raise ValueError(f"unsupported approval decision: {decision}")
+        now = now_iso()
+        with self._lock, self.connect() as conn:
+            approval = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+            if not approval:
+                raise ValueError(f"Unknown approval_id: {approval_id}")
+            if approval["state"] != "pending":
+                raise ValueError(f"approval {approval_id} already {approval['state']}")
+            conn.execute(
+                "UPDATE approvals SET state = ?, decided_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'",
+                (decision, now, now, approval_id),
+            )
+        self.audit(f"approval.{decision}", "approval", approval_id, {"run_id": approval["run_id"], "node_key": approval["node_key"]})
+        return self.get_approval(approval_id) or {}
+
+    def cancel_pending_approvals(self, run_id: str) -> int:
+        now = now_iso()
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE approvals SET state = 'cancelled', decided_at = ?, updated_at = ? WHERE run_id = ? AND state = 'pending'",
+                (now, now, run_id),
+            )
+        return cursor.rowcount
 
     def create_workflow_trigger(self, payload: dict[str, Any]) -> dict[str, Any]:
         trigger_id = payload.get("id") or new_id("wtr")

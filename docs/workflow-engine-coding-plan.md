@@ -17,6 +17,11 @@ Already implemented:
 - trigger event history
 - workflow draft/explain/repair endpoints
 - dashboard workflow editor, runs, artifacts, triggers
+- workflow lifecycle events, joins, event triggers, artifact APIs, and human
+  approvals from Milestones 1–5 below
+
+Milestones 1–5 are complete. The next implementation target is Milestone 6;
+Milestones 7 and 8 remain dependent follow-up work.
 
 ## Milestone 1: Hardening And Observability
 
@@ -148,28 +153,31 @@ Files:
 - `atlas/workflows.py`
 - `atlas/app.py`
 - `atlas/static/app.js`
+- `atlas/static/index.html`
+- `scripts/check_workflow_db.py`
 - `scripts/check_workflows.py`
 - `scripts/check_workflow_api.py`
 
 Work:
 
-- Add `approvals` table.
-- Add `human_gate` node type.
-- When reached, create approval and set run `waiting_for_human`.
-- Add:
-  - `GET /api/approvals`
-  - `POST /api/approvals/{id}/approve`
-  - `POST /api/approvals/{id}/reject`
-- Resume approved run from the gate's outgoing edges.
-- Fail or branch on rejection.
-- Enforce `requires_human_after_iterations`.
+- [x] Add `approvals` table.
+- [x] Add `human_gate` node type.
+- [x] When reached, create approval and set run `waiting_for_human`.
+- [x] Add:
+  - [x] `GET /api/approvals`
+  - [x] `POST /api/approvals/{id}/approve`
+  - [x] `POST /api/approvals/{id}/reject`
+- [x] Resume approved run from the gate's outgoing edges.
+- [x] Fail the run on rejection without adding a reject-branch DSL.
+- [x] Enforce `requires_human_after_iterations`.
 
 Checks:
 
-- human_gate pauses run
-- approve resumes run
-- reject fails or follows reject branch
-- loop requiring human approval pauses after configured count
+- [x] human_gate pauses run without creating a worker job
+- [x] approve resumes run and does not execute downstream twice
+- [x] reject fails the run
+- [x] duplicate approvals and decisions do not create duplicate execution
+- [x] loop requiring human approval pauses after configured count
 
 ## Milestone 6: Manager Worker
 

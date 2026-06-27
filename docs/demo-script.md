@@ -163,6 +163,25 @@ curl -sS -X POST http://127.0.0.1:8787/api/artifacts \
 
 Select the run again. The Artifacts panel shows decoded content and metadata.
 
+## Demo 7: Human Approval Gate
+
+1. Create a workflow from `Human Gate Before Publish` in
+   `docs/workflow-examples.md`.
+2. Run it with `{"topic":"technology news"}`.
+3. After the reporter succeeds, select the run.
+4. Confirm the run is `waiting_for_human`, the approval is pending, and no
+   anchor job exists yet.
+5. Click `Approve`.
+6. Confirm the run succeeds and the anchor runs once.
+7. Start it again and click `Reject`.
+
+Expected result:
+
+- the gate itself creates no worker job
+- approve continues from the gate without duplicate execution
+- reject fails the run
+- the timeline records approval creation and the final decision
+
 ## Close Demo
 
 Stop Atlas with `Ctrl+C`.

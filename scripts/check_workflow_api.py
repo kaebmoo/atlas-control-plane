@@ -146,6 +146,7 @@ def main() -> None:
             disabled = request(base_url, "PUT", f"/api/workflow-triggers/{schedule['id']}", {"enabled": False})["trigger"]
             assert not disabled["enabled"]
             check_milestones_3_and_4(base_url, workflow_id)
+            check_milestone_5(base_url)
             assert request(base_url, "DELETE", f"/api/workflow-triggers/{schedule['id']}")["deleted"]
             assert request(base_url, "DELETE", f"/api/workflow-triggers/{trigger['id']}")["deleted"]
             assert request(base_url, "DELETE", f"/api/workflows/{workflow_id}")["deleted"]
@@ -284,6 +285,48 @@ def check_milestones_3_and_4(base_url: str, workflow_id: str) -> None:
     started_count = sum(event["state"] == "started" for event in request(base_url, "GET", f"/api/workflow-triggers/{worker_trigger['id']}/events")["events"])
     request(base_url, "POST", f"/api/workers/{worker['id']}/poll")
     assert sum(event["state"] == "started" for event in request(base_url, "GET", f"/api/workflow-triggers/{worker_trigger['id']}/events")["events"]) == started_count == 1
+
+
+def check_milestone_5(base_url: str) -> None:
+    workflow = request(
+        base_url,
+        "POST",
+        "/api/workflows",
+        {
+            "name": "Human gate API",
+            "graph": {
+                "start": "gate",
+                "nodes": [{"id": "gate", "type": "human_gate", "label": "Approve API run"}],
+                "edges": [],
+            },
+        },
+    )["workflow"]
+
+    run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow["id"]})["run"]
+    run = wait_for_api_run(base_url, run["id"], "waiting_for_human")
+    pending = request(base_url, "GET", f"/api/approvals?state=pending&run_id={run['id']}")["approvals"]
+    assert len(pending) == 1 and pending[0]["node_key"] == "gate"
+    detail = request(base_url, "GET", f"/api/workflow-runs/{run['id']}")
+    assert detail["nodes"][0]["state"] == "waiting_for_human"
+    assert detail["nodes"][0]["job_id"] is None
+    assert detail["approvals"][0]["id"] == pending[0]["id"]
+
+    approved = request(base_url, "POST", f"/api/approvals/{pending[0]['id']}/approve")
+    assert approved["approval"]["state"] == "approved"
+    assert wait_for_api_run(base_url, run["id"], "succeeded")["state"] == "succeeded"
+    duplicate = request_error(base_url, "POST", f"/api/approvals/{pending[0]['id']}/approve")
+    assert "already approved" in duplicate["error"]
+
+    rejected_run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow["id"]})["run"]
+    wait_for_api_run(base_url, rejected_run["id"], "waiting_for_human")
+    rejected_approval = request(base_url, "GET", f"/api/approvals?state=pending&run_id={rejected_run['id']}")["approvals"][0]
+    rejected = request(base_url, "POST", f"/api/approvals/{rejected_approval['id']}/reject")
+    assert rejected["approval"]["state"] == "rejected"
+    assert rejected["run"]["state"] == "failed"
+    duplicate = request_error(base_url, "POST", f"/api/approvals/{rejected_approval['id']}/reject")
+    assert "already rejected" in duplicate["error"]
+    event_types = {event["event_type"] for event in request(base_url, "GET", f"/api/workflow-runs/{rejected_run['id']}/events")["events"]}
+    assert {"approval_created", "approval_rejected", "node_failed", "run_finished"} <= event_types
 
 
 def request(base_url: str, method: str, path: str, payload: dict | None = None) -> dict:

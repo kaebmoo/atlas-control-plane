@@ -21,6 +21,7 @@ def main() -> None:
             "workflow_nodes",
             "workflow_edges",
             "workflow_events",
+            "approvals",
             "artifacts",
             "workflow_triggers",
             "workflow_trigger_events",
@@ -45,6 +46,31 @@ def main() -> None:
         assert [item["seq"] for item in events] == [1, 2]
         assert [item["event_type"] for item in events] == ["created", "node_started"]
         assert event["node_key"] == "a"
+
+        approval = db.create_approval(
+            {
+                "run_id": run["id"],
+                "node_key": "a",
+                "approval_key": "human_gate:a:1",
+                "label": "Approve A",
+            }
+        )
+        duplicate = db.create_approval(
+            {
+                "run_id": run["id"],
+                "node_key": "a",
+                "approval_key": "human_gate:a:1",
+            }
+        )
+        assert duplicate["id"] == approval["id"]
+        assert db.list_approvals(state="pending")[0]["id"] == approval["id"]
+        assert db.decide_approval(approval["id"], "approved")["state"] == "approved"
+        try:
+            db.decide_approval(approval["id"], "rejected")
+        except ValueError as exc:
+            assert "already approved" in str(exc)
+        else:
+            raise AssertionError("deciding an approval twice must fail")
 
         trigger = db.create_workflow_trigger({"workflow_definition_id": definition["id"], "name": "Manual", "type": "manual"})
         event = db.append_workflow_trigger_event(trigger["id"], "received", {"topic": "x"}, run_id=run["id"], dedupe_key="one")

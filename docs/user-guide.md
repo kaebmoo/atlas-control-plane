@@ -209,6 +209,37 @@ curl -sS -X POST http://127.0.0.1:8787/api/artifacts \
 Read it with `GET /api/artifacts/{id}`. Supported kinds are `text`, `json`,
 `markdown`, `file_ref`, `summary`, and `decision`.
 
+### Human Gates And Approvals
+
+Place a `human_gate` between worker nodes when a person must decide whether the
+workflow may continue:
+
+```json
+{
+  "id": "publish_approval",
+  "type": "human_gate",
+  "label": "Approve publication",
+  "reason": "Review the final artifact before publishing"
+}
+```
+
+The gate creates no worker job. The run changes to `waiting_for_human`, and its
+pending approval appears beside the run detail. `Approve` resumes from the
+gate's outgoing edges; `Reject` fails the run. A second decision is rejected and
+does not execute downstream nodes again.
+
+API equivalents:
+
+```bash
+curl -sS 'http://127.0.0.1:8787/api/approvals?state=pending&run_id=wfr_xxx'
+curl -sS -X POST http://127.0.0.1:8787/api/approvals/apr_xxx/approve
+curl -sS -X POST http://127.0.0.1:8787/api/approvals/apr_xxx/reject
+```
+
+Set `policy.requires_human_after_iterations` to pause once before the next
+worker job after that many worker jobs have completed. Approval clears this
+policy gate for the rest of the run; `max_iterations` remains the hard limit.
+
 ## 9. Draft A Workflow With A Builder Worker
 
 Add a worker with role or tag `workflow_builder`.

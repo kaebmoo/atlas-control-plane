@@ -16,11 +16,11 @@ coordination.
 
 ## Implementation Status
 
-Coding-plan Milestones 1–4 are implemented: workflow lifecycle controls and
+Coding-plan Milestones 1–5 are implemented: workflow lifecycle controls and
 events, fan-out with `all`/`any` joins, duplicate-schedule prevention,
-webhook/internal event triggers, and first-class artifact APIs. The next coding
-milestone is human gates and approvals. Manager nodes, full builder forms, and
-built-in templates remain planned.
+webhook/internal event triggers, first-class artifact APIs, and human gates with
+approvals. Manager nodes, full builder forms, and built-in templates remain
+planned.
 
 ## Goals
 
@@ -741,6 +741,18 @@ IT staff can still edit JSON directly when precision is needed.
 - `POST /api/approvals/{id}/approve`
 - `POST /api/approvals/{id}/reject`
 
+`GET /api/approvals` accepts optional `state` and `run_id` filters. A
+`human_gate` creates no worker job; it creates one pending approval and changes
+the run to `waiting_for_human`. Approval resumes the gate's staged outgoing
+edges, while rejection fails the run. Approval creation and decisions are
+recorded in both workflow events and the audit log. Duplicate creation or a
+second decision cannot schedule downstream execution twice.
+
+`policy.requires_human_after_iterations` creates one policy approval before the
+next worker job after the configured number of worker jobs completes. Approval
+clears that policy gate for the rest of the run; normal job, attempt, runtime,
+and iteration limits continue to apply.
+
 ## Dashboard Plan
 
 First version should be form/table based, not drag-and-drop.
@@ -759,6 +771,7 @@ Views:
    - jobs per node
    - artifacts
    - loop counters
+   - pending approvals with approve/reject controls
    - pause/cancel controls
 
 3. **Workflow Builder Lite**
@@ -810,7 +823,7 @@ Deliver:
 - trigger event history
 - webhook trigger endpoint
 
-### Phase 3: Manager Worker
+### Phase 3: Manager Worker (planned; next coding milestone)
 
 Deliver:
 
@@ -820,7 +833,7 @@ Deliver:
 - manager decision event log
 - dashboard review of decisions
 
-### Phase 4: Human Gates And Approvals
+### Phase 4: Human Gates And Approvals (implemented)
 
 Deliver:
 
@@ -829,7 +842,7 @@ Deliver:
 - approval UI
 - resume workflow after approval
 
-### Phase 5: Workflow Templates
+### Phase 5: Workflow Templates (planned)
 
 Deliver built-in templates:
 

@@ -302,6 +302,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     "run": run,
                     "nodes": runtime.db.list_workflow_nodes(parts[2]),
                     "edges": runtime.db.list_workflow_edges(parts[2]),
+                    "approvals": runtime.db.list_approvals(run_id=parts[2]),
                 }
             )
             return
@@ -344,6 +345,21 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 return
             if action == "cancel":
                 self._json({"run": runtime.workflows.cancel_run(parts[2])})
+                return
+
+        if parts == ["api", "approvals"] and method == "GET":
+            limit = int(query.get("limit", ["100"])[0])
+            state = query.get("state", [""])[0] or None
+            run_id = query.get("run_id", [""])[0] or None
+            self._json({"approvals": runtime.db.list_approvals(limit, state, run_id)})
+            return
+
+        if len(parts) == 4 and parts[:2] == ["api", "approvals"] and method == "POST":
+            if parts[3] == "approve":
+                self._json(runtime.workflows.approve_approval(parts[2]), HTTPStatus.ACCEPTED)
+                return
+            if parts[3] == "reject":
+                self._json(runtime.workflows.reject_approval(parts[2]))
                 return
 
         if parts == ["api", "workflow-triggers"]:

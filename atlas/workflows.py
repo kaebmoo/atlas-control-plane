@@ -43,6 +43,8 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
         node_ids.add(node_id)
         if not isinstance(node.get("type"), str) or not node["type"].strip():
             raise ValueError(f"workflow node {node_id} requires a non-empty type")
+        if node["type"] not in {"worker", "join", "human_gate"}:
+            raise ValueError(f"workflow node {node_id} uses unsupported type: {node['type']}")
         if node["type"] == "join":
             mode = node.get("mode", "all")
             if not isinstance(mode, str) or mode not in {"all", "any"}:
@@ -162,6 +164,7 @@ class WorkflowRunner:
             if run["state"] in {"succeeded", "failed", "cancelled"}:
                 return run
             self.db.update_workflow_run(run_id, state="cancelled", current_nodes=[], finished_at=now_iso())
+            self.db.cancel_pending_approvals(run_id)
             self.db.append_workflow_event(run_id, "run_cancelled")
             self.db.append_workflow_event(run_id, "run_finished", {"state": "cancelled"})
         for node in self.db.list_workflow_nodes(run_id):
@@ -169,6 +172,74 @@ class WorkflowRunner:
                 self._cancel_job(node["job_id"])
         self._notify_run_completed(run_id)
         return self.db.get_workflow_run(run_id) or run
+
+    def approve_approval(self, approval_id: str) -> dict[str, Any]:
+        with self._thread_lock:
+            approval, run = self._pending_approval_context(approval_id)
+            definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
+            if not definition:
+                raise ValueError("workflow definition is unavailable; approval cannot resume the run")
+            runtime_node = None
+            if approval.get("workflow_node_id"):
+                runtime_node = self.db.get_workflow_node(approval["workflow_node_id"])
+                if not runtime_node or runtime_node["state"] != "waiting_for_human":
+                    raise ValueError("approval workflow node is unavailable")
+            approval = self.db.decide_approval(approval_id, "approved")
+            counters = run.get("counters") or {}
+            self.db.append_workflow_event(
+                run["id"],
+                "approval_approved",
+                {"approval_id": approval_id},
+                node_key=approval["node_key"],
+            )
+            if runtime_node:
+                self.db.update_workflow_node(runtime_node["id"], state="succeeded", finished_at=now_iso())
+                completed_nodes = counters.setdefault("completed_nodes", [])
+                if approval["node_key"] not in completed_nodes:
+                    completed_nodes.append(approval["node_key"])
+                self.db.append_workflow_event(
+                    run["id"],
+                    "node_succeeded",
+                    {"approval_id": approval_id},
+                    node_key=approval["node_key"],
+                )
+            else:
+                counters["requires_human_after_iterations_approved"] = True
+            self.db.update_workflow_run(run["id"], state="running", counters=counters, error=None, finished_at=None)
+            active = self._threads.get(run["id"])
+            if not active or not active.is_alive():
+                self._spawn_thread(run["id"], definition["graph"], definition.get("policy") or {}, run.get("input") or {})
+        return {"approval": approval, "run": self.db.get_workflow_run(run["id"]) or run}
+
+    def reject_approval(self, approval_id: str) -> dict[str, Any]:
+        with self._thread_lock:
+            approval, run = self._pending_approval_context(approval_id)
+            approval = self.db.decide_approval(approval_id, "rejected")
+            error = f"human approval rejected at {approval['node_key']}"
+            self.db.append_workflow_event(
+                run["id"],
+                "approval_rejected",
+                {"approval_id": approval_id, "error": error},
+                node_key=approval["node_key"],
+            )
+            if approval.get("workflow_node_id"):
+                runtime_node = self.db.get_workflow_node(approval["workflow_node_id"])
+                if runtime_node:
+                    self.db.update_workflow_node(runtime_node["id"], state="failed", error=error, finished_at=now_iso())
+                    self.db.append_workflow_event(run["id"], "node_failed", {"error": error}, node_key=approval["node_key"])
+            self._finish_run(run["id"], "failed", run.get("counters") or {}, error)
+        return {"approval": approval, "run": self.db.get_workflow_run(run["id"]) or run}
+
+    def _pending_approval_context(self, approval_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        approval = self.db.get_approval(approval_id)
+        if not approval:
+            raise ValueError(f"Unknown approval_id: {approval_id}")
+        if approval["state"] != "pending":
+            raise ValueError(f"approval {approval_id} already {approval['state']}")
+        run = self.db.get_workflow_run(approval["run_id"])
+        if not run or run["state"] != "waiting_for_human":
+            raise ValueError("approval run is not waiting_for_human")
+        return approval, run
 
     def run_graph(
         self,
@@ -274,6 +345,38 @@ class WorkflowRunner:
             join_states.setdefault(node_key, state)
         deadline = _workflow_deadline(run, policy)
 
+        def schedule_outgoing(node_key: str, node: dict[str, Any]) -> None:
+            for edge in outgoing.get(node_key, []):
+                condition = edge.get("condition", {"type": "always"})
+                condition_result = _evaluate_condition(condition, artifacts, counters)
+                if condition_result["matched"]:
+                    self.db.append_workflow_edge(run_id, edge["from"], edge["to"], condition_result)
+                    self.db.append_workflow_event(
+                        run_id,
+                        "edge_taken",
+                        {"to": edge["to"], "condition_result": condition_result},
+                        node_key=node_key,
+                    )
+                    _schedule_node(
+                        edge,
+                        ready,
+                        completed,
+                        completed_nodes,
+                        node_map,
+                        join_states,
+                        cycle_edges,
+                        prioritize=node.get("type") == "join",
+                    )
+                else:
+                    if condition.get("type") == "max_iterations_below":
+                        self.db.append_workflow_event(run_id, "guard_tripped", condition_result, node_key=node_key)
+                    self.db.append_workflow_event(
+                        run_id,
+                        "condition_skipped",
+                        {"to": edge["to"], "condition_result": condition_result},
+                        node_key=node_key,
+                    )
+
         try:
             while ready:
                 runtime_node = None
@@ -287,7 +390,21 @@ class WorkflowRunner:
                             self.db.update_workflow_run(run_id, current_nodes=ready, counters=counters)
                             continue
                         node = node_map[node_key]
-                        if node.get("type") != "join":
+                        node_type = node.get("type")
+                        if node_type == "worker":
+                            if _requires_human_after_iterations(policy, counters):
+                                ready.insert(0, node_key)
+                                approval = self.db.create_approval(
+                                    {
+                                        "run_id": run_id,
+                                        "node_key": node_key,
+                                        "approval_key": "policy:requires_human_after_iterations",
+                                        "label": "Continue workflow",
+                                        "reason": f"Workflow reached {counters['jobs_started']} iterations",
+                                    }
+                                )
+                                self._wait_for_human(run_id, ready, counters, approval)
+                                return self.db.get_workflow_run(run_id) or run
                             _check_limit(policy, "max_jobs", counters["jobs_started"])
                             _check_limit(policy, "max_iterations", counters["jobs_started"])
                         node_counts = counters["node_counts"]
@@ -311,7 +428,22 @@ class WorkflowRunner:
                             node_key=node_key,
                         )
                         job = None
-                        if node.get("type") != "join":
+                        if node_type == "human_gate":
+                            approval = self.db.create_approval(
+                                {
+                                    "run_id": run_id,
+                                    "workflow_node_id": runtime_node["id"],
+                                    "node_key": node_key,
+                                    "approval_key": f"human_gate:{node_key}:{node_counts[node_key]}",
+                                    "label": node.get("label") or f"Approve {node_key}",
+                                    "reason": node.get("reason") or "Workflow reached a human gate",
+                                }
+                            )
+                            self.db.update_workflow_node(runtime_node["id"], state="waiting_for_human")
+                            schedule_outgoing(node_key, node)
+                            self._wait_for_human(run_id, ready, counters, approval)
+                            return self.db.get_workflow_run(run_id) or run
+                        if node_type == "worker":
                             job = self._submit_worker_node(run, node, input, artifacts, policy)
                             self.db.update_workflow_node(runtime_node["id"], job_id=job["id"])
                     output_artifacts: list[str] = []
@@ -354,36 +486,7 @@ class WorkflowRunner:
                         self.db.append_workflow_event(run_id, "node_failed", {"error": str(exc)}, node_key=node_key)
                     raise
 
-                for edge in outgoing.get(node_key, []):
-                    condition = edge.get("condition", {"type": "always"})
-                    condition_result = _evaluate_condition(condition, artifacts, counters)
-                    if condition_result["matched"]:
-                        self.db.append_workflow_edge(run_id, edge["from"], edge["to"], condition_result)
-                        self.db.append_workflow_event(
-                            run_id,
-                            "edge_taken",
-                            {"to": edge["to"], "condition_result": condition_result},
-                            node_key=node_key,
-                        )
-                        _schedule_node(
-                            edge,
-                            ready,
-                            completed,
-                            completed_nodes,
-                            node_map,
-                            join_states,
-                            cycle_edges,
-                            prioritize=node.get("type") == "join",
-                        )
-                    else:
-                        if condition.get("type") == "max_iterations_below":
-                            self.db.append_workflow_event(run_id, "guard_tripped", condition_result, node_key=node_key)
-                        self.db.append_workflow_event(
-                            run_id,
-                            "condition_skipped",
-                            {"to": edge["to"], "condition_result": condition_result},
-                            node_key=node_key,
-                        )
+                schedule_outgoing(node_key, node)
                 self.db.update_workflow_run(run_id, current_nodes=ready, counters=counters)
 
             if (self.db.get_workflow_run(run_id) or {}).get("state") == "cancelled":
@@ -403,16 +506,35 @@ class WorkflowRunner:
         run = self.db.get_workflow_run(run_id)
         if not run or run["state"] == "cancelled":
             return True
-        if run["state"] != "paused":
+        if run["state"] not in {"paused", "waiting_for_human"}:
             return False
         with self._thread_lock:
             run = self.db.get_workflow_run(run_id)
-            if run and run["state"] == "paused":
+            if run and run["state"] in {"paused", "waiting_for_human"}:
                 self.db.update_workflow_run(run_id, current_nodes=ready, counters=counters)
                 if self._threads.get(run_id) is threading.current_thread():
                     self._threads.pop(run_id, None)
                 return True
         return False
+
+    def _wait_for_human(
+        self,
+        run_id: str,
+        ready: list[str],
+        counters: dict[str, Any],
+        approval: dict[str, Any],
+    ) -> None:
+        if approval.get("state") != "pending":
+            raise ValueError(f"approval {approval.get('id')} already {approval.get('state')}")
+        self.db.update_workflow_run(run_id, state="waiting_for_human", current_nodes=ready, counters=counters)
+        self.db.append_workflow_event(
+            run_id,
+            "approval_created",
+            {"approval_id": approval["id"], "label": approval["label"], "reason": approval["reason"]},
+            node_key=approval["node_key"],
+        )
+        if self._threads.get(run_id) is threading.current_thread():
+            self._threads.pop(run_id, None)
 
     def _finish_run(self, run_id: str, state: str, counters: dict[str, Any], error: str | None = None) -> None:
         self.db.update_workflow_run(
@@ -847,6 +969,16 @@ def _check_limit(policy: dict[str, Any], key: str, count: int) -> None:
     value = policy.get(key)
     if isinstance(value, int) and value > 0 and count >= value:
         raise _WorkflowGuardTripped(f"workflow policy {key} exceeded")
+
+
+def _requires_human_after_iterations(policy: dict[str, Any], counters: dict[str, Any]) -> bool:
+    value = policy.get("requires_human_after_iterations")
+    return (
+        isinstance(value, int)
+        and value > 0
+        and int(counters.get("jobs_started") or 0) >= value
+        and not counters.get("requires_human_after_iterations_approved")
+    )
 
 
 def _workflow_deadline(run: dict[str, Any], policy: dict[str, Any]) -> datetime | None:

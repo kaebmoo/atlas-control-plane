@@ -181,6 +181,53 @@ Note: current edge conditions are independent. Do not model `verdict ==
 needs_more_sources AND reporter_count < 2` as two separate edges; that would be
 two OR branches.
 
+## Human Gate Before Publish
+
+The gate pauses after the reporter finishes and creates no worker job. Approve
+to run the anchor once, or reject to fail the run.
+
+```json
+{
+  "start": "reporter",
+  "nodes": [
+    {
+      "id": "reporter",
+      "type": "worker",
+      "role": "reporter",
+      "prompt": "Find concise facts about: {input.topic}",
+      "outputs": ["notes"]
+    },
+    {
+      "id": "publish_approval",
+      "type": "human_gate",
+      "label": "Approve publication",
+      "reason": "Review reporter notes before creating the final script"
+    },
+    {
+      "id": "anchor",
+      "type": "worker",
+      "role": "anchor",
+      "prompt": "Write a short broadcast script from: {artifact.notes}",
+      "outputs": ["script"]
+    }
+  ],
+  "edges": [
+    {"from": "reporter", "to": "publish_approval", "condition": {"type": "always"}},
+    {"from": "publish_approval", "to": "anchor", "condition": {"type": "always"}}
+  ]
+}
+```
+
+Policy:
+
+```json
+{"max_jobs": 5, "max_iterations": 5}
+```
+
+For guarded loops, add `"requires_human_after_iterations": 2`. Atlas pauses
+once before the next worker job after two worker jobs complete; the normal
+`max_iterations` guard still applies.
+
 ## Fan-Out With Join All
 
 The fact checker and editor both run after the reporter. The anchor starts only

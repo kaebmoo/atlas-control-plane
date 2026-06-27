@@ -7,6 +7,7 @@ const state = {
   workflows: [],
   workflowRuns: [],
   workflowTriggers: [],
+  approvals: [],
   selectedJobId: null,
   selectedWorkflowId: null,
   selectedWorkflowRunId: null,
@@ -106,7 +107,7 @@ function defaultWorkflowGraph() {
 }
 
 async function loadAll() {
-  const [workers, workspaces, conversations, jobs, workflows, workflowRuns, workflowTriggers, audit] = await Promise.all([
+  const [workers, workspaces, conversations, jobs, workflows, workflowRuns, workflowTriggers, approvals, audit] = await Promise.all([
     api("/api/workers"),
     api("/api/workspaces"),
     api("/api/conversations"),
@@ -114,6 +115,7 @@ async function loadAll() {
     api("/api/workflows"),
     api("/api/workflow-runs"),
     api("/api/workflow-triggers"),
+    api("/api/approvals?state=pending"),
     api("/api/audit?limit=30"),
   ]);
   state.workers = workers.workers || [];
@@ -123,6 +125,7 @@ async function loadAll() {
   state.workflows = workflows.workflows || [];
   state.workflowRuns = workflowRuns.runs || [];
   state.workflowTriggers = workflowTriggers.triggers || [];
+  state.approvals = approvals.approvals || [];
   state.audit = audit.audit || [];
   if (state.selectedWorkflowRunId && state.workflowRuns.some((run) => run.id === state.selectedWorkflowRunId)) {
     await loadWorkflowRunDetail(state.selectedWorkflowRunId);
@@ -282,6 +285,7 @@ function renderWorkflows() {
   renderWorkflowList();
   renderWorkflowEditor();
   renderWorkflowRuns();
+  renderApprovals();
   renderWorkflowTriggers();
 }
 
@@ -354,6 +358,30 @@ function renderWorkflowRuns() {
       <pre class="event-payload">${escapeHtml(JSON.stringify(event.payload || {}, null, 2))}</pre>
     </article>
   `).join("") : '<div class="empty">Select a run</div>';
+}
+
+function renderApprovals() {
+  let approvals = state.approvals;
+  if (state.selectedWorkflowRunId) {
+    approvals = approvals.filter((approval) => approval.run_id === state.selectedWorkflowRunId);
+  } else if (state.selectedWorkflowId) {
+    const runIds = new Set(state.workflowRuns.filter((run) => run.workflow_definition_id === state.selectedWorkflowId).map((run) => run.id));
+    approvals = approvals.filter((approval) => runIds.has(approval.run_id));
+  }
+  $("#approvalList").innerHTML = approvals.length ? approvals.map((approval) => `
+    <article class="workflow-run-item">
+      <div class="item-title">
+        <span>${escapeHtml(approval.label)}</span>
+        <span class="status waiting-for-human">pending</span>
+      </div>
+      <div class="item-sub">${escapeHtml(approval.node_key)} · run ${shortId(approval.run_id)} · ${formatTime(approval.created_at)}</div>
+      <div class="item-sub">${escapeHtml(approval.reason)}</div>
+      <div class="item-actions">
+        <button class="primary-btn approve-approval" type="button" data-approval-id="${escapeHtml(approval.id)}">Approve</button>
+        <button class="danger-btn reject-approval" type="button" data-approval-id="${escapeHtml(approval.id)}">Reject</button>
+      </div>
+    </article>
+  `).join("") : '<div class="empty">No pending approvals</div>';
 }
 
 function renderWorkflowTriggers() {
@@ -662,8 +690,13 @@ async function loadWorkflowRunDetail(runId) {
     api(`/api/workflow-runs/${runId}/events`),
   ]);
   state.workflowRunDetail = detail;
+  state.workflowRuns = state.workflowRuns.map((run) => run.id === runId ? detail.run : run);
   state.workflowArtifacts = artifacts.artifacts || [];
   state.workflowEvents = events.events || [];
+  state.approvals = [
+    ...state.approvals.filter((approval) => approval.run_id !== runId),
+    ...(detail.approvals || []).filter((approval) => approval.state === "pending"),
+  ];
 }
 
 async function controlWorkflowRun(action) {
@@ -671,6 +704,14 @@ async function controlWorkflowRun(action) {
   await api(`/api/workflow-runs/${state.selectedWorkflowRunId}/${action}`, { method: "POST" });
   await loadAll();
   toast(`Workflow ${action} requested`);
+}
+
+async function decideApproval(approvalId, action) {
+  const approval = state.approvals.find((item) => item.id === approvalId);
+  if (approval) state.selectedWorkflowRunId = approval.run_id;
+  const data = await api(`/api/approvals/${approvalId}/${action}`, { method: "POST" });
+  await loadAll();
+  toast(`Approval ${data.approval.state}`);
 }
 
 async function saveTrigger() {
@@ -818,7 +859,19 @@ document.addEventListener("click", async (event) => {
   }
   const workflowRunItem = event.target.closest(".workflow-run-item");
   if (workflowRunItem) {
-    await selectWorkflowRun(workflowRunItem.dataset.runId).catch((error) => toast(error.message));
+    if (workflowRunItem.dataset.runId) {
+      await selectWorkflowRun(workflowRunItem.dataset.runId).catch((error) => toast(error.message));
+      return;
+    }
+  }
+  const approveButton = event.target.closest(".approve-approval");
+  if (approveButton) {
+    await decideApproval(approveButton.dataset.approvalId, "approve").catch((error) => toast(error.message));
+    return;
+  }
+  const rejectButton = event.target.closest(".reject-approval");
+  if (rejectButton) {
+    await decideApproval(rejectButton.dataset.approvalId, "reject").catch((error) => toast(error.message));
     return;
   }
   const fireTriggerButton = event.target.closest(".fire-trigger");

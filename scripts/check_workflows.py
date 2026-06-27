@@ -37,6 +37,9 @@ def main() -> None:
     bad_join = dict(graph, nodes=graph["nodes"] + [{"id": "join", "type": "join", "mode": "quorum"}])
     assert_raises("mode must be all or any", validate_workflow_graph, bad_join, {})
 
+    human_gate = {"start": "gate", "nodes": [{"id": "gate", "type": "human_gate", "label": "Approve"}], "edges": []}
+    assert validate_workflow_graph(human_gate, {}) is human_gate
+
     bad_artifact_condition = dict(graph, edges=[{"from": "reporter", "to": "anchor", "condition": {"type": "artifact_equals"}}])
     assert_raises("artifact_equals requires artifact", validate_workflow_graph, bad_artifact_condition, {})
 
@@ -68,6 +71,7 @@ def main() -> None:
     check_runner()
     check_joins_and_fan_out()
     check_condition_runner()
+    check_human_gates()
     check_hardening()
     print("workflow validation/render check ok")
 
@@ -349,6 +353,75 @@ def check_hardening() -> None:
         assert "not allowed by policy" in run["error"]
         assert not jobs.prompts
         assert not db.list_jobs()
+
+
+def check_human_gates() -> None:
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+        worker = db.upsert_worker({"name": "Fake", "base_url": "http://127.0.0.1:1"})
+        graph = {
+            "start": "gate",
+            "nodes": [
+                {"id": "gate", "type": "human_gate", "label": "Approve publish"},
+                {"id": "publish", "type": "worker", "worker_id": worker["id"], "prompt": "publish"},
+            ],
+            "edges": [{"from": "gate", "to": "publish"}],
+        }
+        definition = db.create_workflow_definition({"name": "Approval", "graph": graph})
+        jobs = FakeJobService(db, worker["id"])
+        runner = WorkflowRunner(db, jobs, poll_interval_seconds=0)
+
+        waiting = runner.run_workflow(definition["id"])
+        assert waiting["state"] == "waiting_for_human"
+        assert waiting["current_nodes"] == ["publish"]
+        assert not jobs.prompts and not db.list_jobs()
+        approval = db.list_approvals(state="pending", run_id=waiting["id"])[0]
+        gate_node = db.list_workflow_nodes(waiting["id"])[0]
+        assert gate_node["state"] == "waiting_for_human" and gate_node["job_id"] is None
+
+        runner.approve_approval(approval["id"])
+        approved = wait_for_run(db, waiting["id"], "succeeded")
+        wait_for_runner_stopped(runner, waiting["id"])
+        assert jobs.prompts == ["publish"]
+        assert approved["counters"]["completed_nodes"] == ["gate", "publish"]
+        assert db.get_approval(approval["id"])["state"] == "approved"
+        assert_raises("already approved", runner.approve_approval, approval["id"])
+        assert jobs.prompts == ["publish"]
+
+        rejected_run = runner.run_workflow(definition["id"])
+        rejected_approval = db.list_approvals(state="pending", run_id=rejected_run["id"])[0]
+        rejected = runner.reject_approval(rejected_approval["id"])["run"]
+        assert rejected["state"] == "failed"
+        assert "human approval rejected" in rejected["error"]
+        assert jobs.prompts == ["publish"]
+        assert_raises("already rejected", runner.reject_approval, rejected_approval["id"])
+        event_types = {event["event_type"] for event in db.list_workflow_events(rejected_run["id"])}
+        assert {"approval_created", "approval_rejected", "node_failed", "run_finished"} <= event_types
+
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+        worker = db.upsert_worker({"name": "Fake", "base_url": "http://127.0.0.1:1"})
+        graph = {
+            "start": "loop",
+            "nodes": [{"id": "loop", "type": "worker", "worker_id": worker["id"], "prompt": "loop"}],
+            "edges": [{"from": "loop", "to": "loop", "condition": {"type": "max_iterations_below", "node": "loop", "max": 3}}],
+        }
+        definition = db.create_workflow_definition(
+            {"name": "Guarded approval loop", "graph": graph, "policy": {"requires_human_after_iterations": 2}}
+        )
+        jobs = FakeJobService(db, worker["id"])
+        runner = WorkflowRunner(db, jobs, poll_interval_seconds=0)
+        waiting = runner.run_workflow(definition["id"])
+        assert waiting["state"] == "waiting_for_human"
+        assert jobs.prompts == ["loop", "loop"]
+        approvals = db.list_approvals(state="pending", run_id=waiting["id"])
+        assert len(approvals) == 1 and approvals[0]["approval_key"] == "policy:requires_human_after_iterations"
+        runner.approve_approval(approvals[0]["id"])
+        resumed = wait_for_run(db, waiting["id"], "succeeded")
+        wait_for_runner_stopped(runner, waiting["id"])
+        assert jobs.prompts == ["loop", "loop", "loop"]
+        assert resumed["counters"]["node_counts"]["loop"] == 3
+        assert len(db.list_approvals(run_id=waiting["id"])) == 1
 
 
 class FakeJobService:
