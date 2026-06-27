@@ -31,10 +31,12 @@ Atlas currently supports:
 - Best-effort cancellation at the Atlas layer.
 - Single-step handoff: when job A succeeds, Atlas can automatically start job B
   on another worker and pass job A's result into job B's prompt.
-- Workflow definitions, workflow runs, artifacts, JSON artifacts,
-  condition edges, loop guards, manual triggers, and schedule triggers.
+- Workflow definitions, workflow runs, condition edges, guarded loops,
+  fan-out, and `all`/`any` joins without worker jobs for join nodes.
+- Text/JSON artifacts, manual artifact APIs, webhook and internal event triggers,
+  trigger dedupe, and trigger event history.
 - Workflow run lifecycle events, pause/resume/cancel controls, and runtime
-  worker/time policy enforcement.
+  worker/time policy enforcement. Resume skips completed nodes.
 - A workflow builder entry point that routes plain-language draft requests to a
   worker with role or tag `workflow_builder`.
 
@@ -46,8 +48,8 @@ Research worker -> Writer worker
 Coder worker    -> Reviewer worker
 ```
 
-For deeper graph workflows, loops, conditions, and manager-directed execution,
-see [docs/workflow-engine-plan.md](docs/workflow-engine-plan.md).
+For human gates, manager-directed execution, and remaining milestones, see
+[docs/workflow-engine-plan.md](docs/workflow-engine-plan.md).
 
 ## User Documentation
 
@@ -452,6 +454,14 @@ Artifacts:
 curl -sS http://127.0.0.1:8787/api/workflow-runs/wfr_xxx/artifacts
 ```
 
+Create a manual JSON artifact:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/artifacts \
+  -H 'content-type: application/json' \
+  -d '{"run_id":"wfr_xxx","key":"invoice","kind":"json","content":{"total":3}}'
+```
+
 ### Draft A Workflow
 
 Configure a worker with role or tag `workflow_builder`, then:
@@ -482,6 +492,11 @@ curl -sS -X POST http://127.0.0.1:8787/api/workflow-triggers/wtr_xxx/fire \
 
 Interval schedules use `{"interval_minutes": 15}`. Daily local schedules use
 `{"daily_time": "09:30"}`.
+
+Trigger types are `manual`, `schedule`, `webhook`,
+`workflow_run_completed`, `artifact_created`, and `worker_status_changed`.
+Webhook callers use the same `/fire` endpoint with a stable `dedupe_key`.
+Internal event triggers are fired by Atlas and cannot be fired manually.
 
 ## API Surface
 
@@ -521,6 +536,8 @@ Interval schedules use `{"interval_minutes": 15}`. Daily local schedules use
 - `POST /api/workflow-runs/{id}/pause`
 - `POST /api/workflow-runs/{id}/resume`
 - `POST /api/workflow-runs/{id}/cancel`
+- `GET /api/artifacts/{id}`
+- `POST /api/artifacts`
 - `GET /api/workflow-triggers`
 - `POST /api/workflow-triggers`
 - `GET /api/workflow-triggers/{id}`
@@ -702,16 +719,13 @@ python3 -B -m atlas --host 127.0.0.1 --port 8787
 
 ## Roadmap
 
-The next major step is the workflow engine:
+The deterministic workflow engine now includes graph execution, conditions,
+fan-out, joins, loop/time/job guards, artifacts, lifecycle controls, and event
+triggers. The next milestones are:
 
-- predefined workflow graphs
-- multiple downstream edges
-- conditional transitions
-- fan-out and join
-- loop guards
-- run-level budgets
-- artifact blackboard
 - human approval gates
-- LLM manager-directed next-step proposals inside Atlas policy limits
+- bounded manager-directed next-step proposals
+- builder completion for the full node/trigger surface
+- built-in workflow templates
 
 See [docs/workflow-engine-plan.md](docs/workflow-engine-plan.md).

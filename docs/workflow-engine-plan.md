@@ -14,6 +14,14 @@ An LLM manager may recommend next steps, but Atlas validates and enforces them.
 This avoids unbounded autonomous loops while still allowing practical agent
 coordination.
 
+## Implementation Status
+
+Coding-plan Milestones 1–4 are implemented: workflow lifecycle controls and
+events, fan-out with `all`/`any` joins, duplicate-schedule prevention,
+webhook/internal event triggers, and first-class artifact APIs. The next coding
+milestone is human gates and approvals. Manager nodes, full builder forms, and
+built-in templates remain planned.
+
 ## Goals
 
 - Let users define flows across many workers.
@@ -316,9 +324,8 @@ artifact_created
 worker_status_changed
 ```
 
-First implementation should ship `manual` and simple `schedule`. Add `webhook`
-next because it gives external systems a stable integration point without
-changing thClaws.
+All listed trigger types are implemented. `manual`, `schedule`, and `webhook`
+can use the `/fire` endpoint. The three internal event types are fired by Atlas.
 
 ### workflow_trigger_events
 
@@ -379,6 +386,15 @@ Start small:
 
 Use `dedupe_key`, `last_fired_at`, and `workflow_trigger_events` to avoid
 double-firing when a poll or webhook retry happens.
+
+Internal trigger config supports these optional filters:
+
+- `workflow_run_completed`: `source_workflow_definition_id`, `state`
+- `artifact_created`: `source_workflow_definition_id`, `key`, `kind`
+- `worker_status_changed`: `worker_id`, `status`
+
+Atlas blocks an internal trigger from starting its own source workflow because
+unguarded self-triggering would loop forever.
 
 ## Prompt Rendering
 
@@ -459,6 +475,9 @@ Modes:
 - `any`: first successful upstream continues.
 - `quorum`: future.
 
+Join nodes execute in Atlas and do not create worker jobs. Run counters expose
+upstream completion and join state to the dashboard.
+
 ## Edge Conditions
 
 Use a small JSON condition DSL.
@@ -535,10 +554,12 @@ while run is active:
 Important:
 
 - Jobs remain the unit of worker execution.
-- Workflow nodes wrap jobs.
+- Worker nodes wrap jobs; join nodes remain control-plane state only.
+- Completed node keys and the ready queue prevent duplicate downstream runs.
+- Fan-out queues every matching branch. Execution is currently centralized and
+  queue-based rather than parallel.
 - Existing `/api/jobs` can continue to work independently.
-- Workflow events should reuse `job_events` style append-only logs or add
-  `workflow_events`.
+- Workflow lifecycle decisions are stored in append-only `workflow_events`.
 
 ## Artifact Extraction
 
@@ -548,6 +569,9 @@ First version:
 - Optional JSON extraction:
   - If node declares `output_format: json`, parse assistant text as JSON.
   - If parsing fails, mark node failed.
+- Manual artifacts can be created with `POST /api/artifacts` and read with
+  `GET /api/artifacts/{id}`. Supported kinds are `text`, `json`, `markdown`,
+  `file_ref`, `summary`, and `decision`.
 
 Example node:
 

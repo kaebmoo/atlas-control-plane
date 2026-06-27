@@ -34,6 +34,9 @@ def main() -> None:
     bad_condition = dict(graph, edges=[{"from": "reporter", "to": "anchor", "condition": {"type": "unsupported"}}])
     assert_raises("unsupported condition", validate_workflow_graph, bad_condition, {})
 
+    bad_join = dict(graph, nodes=graph["nodes"] + [{"id": "join", "type": "join", "mode": "quorum"}])
+    assert_raises("mode must be all or any", validate_workflow_graph, bad_join, {})
+
     bad_artifact_condition = dict(graph, edges=[{"from": "reporter", "to": "anchor", "condition": {"type": "artifact_equals"}}])
     assert_raises("artifact_equals requires artifact", validate_workflow_graph, bad_artifact_condition, {})
 
@@ -63,6 +66,7 @@ def main() -> None:
     assert_raises("missing prompt variable: {input.missing}", render_prompt, "{input.missing}", input={})
     check_role_routing()
     check_runner()
+    check_joins_and_fan_out()
     check_condition_runner()
     check_hardening()
     print("workflow validation/render check ok")
@@ -103,6 +107,86 @@ def check_runner() -> None:
             "edge_taken",
             "run_finished",
         }
+
+
+def check_joins_and_fan_out() -> None:
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+        worker = db.upsert_worker({"name": "Fake", "base_url": "http://127.0.0.1:1"})
+        nodes = [
+            {"id": "root", "type": "worker", "prompt": "root"},
+            {"id": "left", "type": "worker", "prompt": "left"},
+            {"id": "right", "type": "worker", "prompt": "right"},
+            {"id": "join", "type": "join", "mode": "all"},
+            {"id": "done", "type": "worker", "prompt": "done"},
+        ]
+        edges = [
+            {"from": "root", "to": "left"},
+            {"from": "root", "to": "right"},
+            {"from": "left", "to": "join"},
+            {"from": "right", "to": "join"},
+            {"from": "join", "to": "done"},
+        ]
+
+        all_jobs = FakeJobService(db, worker["id"])
+        all_run = WorkflowRunner(db, all_jobs, poll_interval_seconds=0).run_graph(
+            {"start": "root", "nodes": nodes, "edges": edges}
+        )
+        assert all_jobs.prompts == ["root", "left", "right", "done"]
+        assert all_run["counters"]["completed_nodes"] == ["root", "left", "right", "join", "done"]
+        assert all_run["counters"]["join_states"]["join"] == {
+            "mode": "all",
+            "state": "succeeded",
+            "upstream_nodes": ["left", "right"],
+            "completed_upstreams": ["left", "right"],
+        }
+        join_nodes = [node for node in db.list_workflow_nodes(all_run["id"]) if node["node_key"] == "join"]
+        assert len(join_nodes) == 1 and join_nodes[0]["state"] == "succeeded" and join_nodes[0]["job_id"] is None
+        all_events = [(event["event_type"], event["node_key"]) for event in db.list_workflow_events(all_run["id"])]
+        assert all_events.index(("node_succeeded", "right")) < all_events.index(("node_started", "join"))
+
+        any_jobs = FakeJobService(db, worker["id"])
+        any_run = WorkflowRunner(db, any_jobs, poll_interval_seconds=0).run_graph(
+            {"start": "root", "nodes": [dict(node, mode="any") if node["id"] == "join" else node for node in nodes], "edges": edges}
+        )
+        assert any_jobs.prompts == ["root", "left", "done", "right"]
+        any_events = [(event["event_type"], event["node_key"]) for event in db.list_workflow_events(any_run["id"])]
+        assert any_events.index(("node_started", "done")) < any_events.index(("node_started", "right"))
+        assert any_run["counters"]["join_states"]["join"]["state"] == "succeeded"
+
+        duplicate_jobs = FakeJobService(db, worker["id"])
+        duplicate_run = WorkflowRunner(db, duplicate_jobs, poll_interval_seconds=0).run_graph(
+            {
+                "start": "root",
+                "nodes": [node for node in nodes if node["id"] != "join"],
+                "edges": [edges[0], edges[1], {"from": "left", "to": "done"}, {"from": "right", "to": "done"}, {"from": "right", "to": "done"}],
+            }
+        )
+        assert duplicate_jobs.prompts == ["root", "left", "right", "done"]
+        assert duplicate_run["counters"]["node_counts"]["done"] == 1
+
+        resume_graph = {
+            "start": "first",
+            "nodes": [{"id": "first", "type": "worker", "prompt": "first"}, {"id": "second", "type": "worker", "prompt": "second"}],
+            "edges": [{"from": "first", "to": "second"}],
+        }
+        definition = db.create_workflow_definition({"name": "Resume completed", "graph": resume_graph})
+        paused = db.create_workflow_run(
+            {
+                "workflow_definition_id": definition["id"],
+                "state": "paused",
+                "current_nodes": ["first", "second"],
+                "counters": {"jobs_started": 1, "node_counts": {"first": 1}, "completed_nodes": ["first"]},
+                "started_at": now_iso(),
+            }
+        )
+        resume_jobs = FakeJobService(db, worker["id"])
+        resume_runner = WorkflowRunner(db, resume_jobs, poll_interval_seconds=0)
+        resume_runner.resume_run(paused["id"])
+        resumed = wait_for_run(db, paused["id"], "succeeded")
+        wait_for_runner_stopped(resume_runner, paused["id"])
+        assert resume_jobs.prompts == ["second"]
+        assert resumed["counters"]["completed_nodes"] == ["first", "second"]
 
 
 def check_role_routing() -> None:

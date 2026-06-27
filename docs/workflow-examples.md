@@ -181,6 +181,70 @@ Note: current edge conditions are independent. Do not model `verdict ==
 needs_more_sources AND reporter_count < 2` as two separate edges; that would be
 two OR branches.
 
+## Fan-Out With Join All
+
+The fact checker and editor both run after the reporter. The anchor starts only
+after both branches succeed. The join itself does not create a worker job.
+
+```json
+{
+  "start": "reporter",
+  "nodes": [
+    {
+      "id": "reporter",
+      "type": "worker",
+      "role": "reporter",
+      "prompt": "Find facts about: {input.topic}",
+      "outputs": ["notes"]
+    },
+    {
+      "id": "fact_checker",
+      "type": "worker",
+      "role": "fact_checker",
+      "output_format": "json",
+      "prompt": "Return JSON with verdict and corrections for: {artifact.notes}",
+      "outputs": ["fact_check"]
+    },
+    {
+      "id": "editor",
+      "type": "worker",
+      "role": "editor",
+      "prompt": "Return concise editing notes for: {artifact.notes}",
+      "outputs": ["edit_notes"]
+    },
+    {
+      "id": "reviews_join",
+      "type": "join",
+      "mode": "all"
+    },
+    {
+      "id": "anchor",
+      "type": "worker",
+      "role": "anchor",
+      "prompt": "Write the final script from {artifact.notes}. Fact check: {artifact.fact_check}. Editing notes: {artifact.edit_notes}",
+      "outputs": ["script"]
+    }
+  ],
+  "edges": [
+    {"from": "reporter", "to": "fact_checker", "condition": {"type": "always"}},
+    {"from": "reporter", "to": "editor", "condition": {"type": "always"}},
+    {"from": "fact_checker", "to": "reviews_join", "condition": {"type": "always"}},
+    {"from": "editor", "to": "reviews_join", "condition": {"type": "always"}},
+    {"from": "reviews_join", "to": "anchor", "condition": {"type": "always"}}
+  ]
+}
+```
+
+Policy:
+
+```json
+{"max_jobs": 5, "max_iterations": 10}
+```
+
+Use `"mode":"any"` when the first successful review may continue downstream.
+Other queued branches still run; Atlas prevents the join or its downstream node
+from being scheduled twice.
+
 ## Manual Trigger API
 
 ```bash
@@ -227,6 +291,59 @@ curl -sS -X POST http://127.0.0.1:8787/api/workflow-triggers \
     "config": {"daily_time": "09:30"}
   }'
 ```
+
+## Webhook Trigger API
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/workflow-triggers \
+  -H 'content-type: application/json' \
+  -d '{
+    "workflow_definition_id":"wfd_target",
+    "name":"CRM webhook",
+    "type":"webhook"
+  }'
+
+curl -sS -X POST http://127.0.0.1:8787/api/workflow-triggers/wtr_xxx/fire \
+  -H 'content-type: application/json' \
+  -d '{"payload":{"lead_id":"lead_123"},"dedupe_key":"crm-lead-123"}'
+```
+
+## Internal Event Trigger API
+
+`workflow_definition_id` is the workflow Atlas starts. The config identifies
+the source event:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/workflow-triggers \
+  -H 'content-type: application/json' \
+  -d '{
+    "workflow_definition_id":"wfd_target",
+    "name":"After reporter workflow",
+    "type":"workflow_run_completed",
+    "config":{"source_workflow_definition_id":"wfd_source","state":"succeeded"}
+  }'
+```
+
+For `artifact_created`, filter with `source_workflow_definition_id`, `key`, or
+`kind`. For `worker_status_changed`, filter with `worker_id` or `status`.
+Internal event triggers are fired only by Atlas.
+
+## Manual Artifact API
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/artifacts \
+  -H 'content-type: application/json' \
+  -d '{
+    "run_id":"wfr_xxx",
+    "key":"invoice_batch",
+    "kind":"json",
+    "content":{"invoice_ids":["inv_1","inv_2"]},
+    "metadata":{"source":"manual"}
+  }'
+```
+
+The response includes the artifact id. Read it later with
+`GET /api/artifacts/{id}`.
 
 ## Workflow Builder Draft API
 

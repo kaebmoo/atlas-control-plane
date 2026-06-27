@@ -116,7 +116,9 @@ Expected result:
 
 - workflow run is created
 - runtime nodes are visible in run detail
-- artifacts show `notes` and `script`
+- `completed_nodes` contains `reporter` and `anchor`
+- timeline shows node and run lifecycle events
+- artifacts show `notes` and `script` with decoded JSON where applicable
 
 ## Demo 5: Trigger
 
@@ -140,6 +142,26 @@ Expected result:
 
 - trigger creates a workflow run
 - trigger events show `received` and `started`
+- trigger card shows its latest state/error
+
+Optional webhook dedupe check:
+
+1. Create another trigger with type `webhook`.
+2. Call `/api/workflow-triggers/{id}/fire` twice with the same `dedupe_key`.
+3. Confirm the second call returns an `ignored` event with
+   `duplicate dedupe_key`.
+
+## Demo 6: Manual Artifact
+
+Use a run id from Demo 4:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/artifacts \
+  -H 'content-type: application/json' \
+  -d '{"run_id":"wfr_xxx","key":"demo_note","kind":"json","content":{"ok":true}}'
+```
+
+Select the run again. The Artifacts panel shows decoded content and metadata.
 
 ## Close Demo
 

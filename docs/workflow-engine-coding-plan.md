@@ -63,19 +63,20 @@ Files:
 
 Work:
 
-- Track completed node keys per run.
-- Add `join` node type.
-- Support join modes `all` and `any`.
-- Prevent duplicate downstream scheduling when multiple upstream edges target
+- [x] Track completed node keys per run.
+- [x] Add `join` node type.
+- [x] Support join modes `all` and `any`.
+- [x] Prevent duplicate downstream scheduling when multiple upstream edges target
   the same node.
-- Show join state in run detail.
+- [x] Show join state in run detail.
 
 Checks:
 
-- fan-out starts independent branches
-- join `all` waits for all upstream nodes
-- join `any` continues after first successful upstream
-- duplicate incoming edges do not run the same node twice
+- [x] fan-out starts independent branches
+- [x] join `all` waits for all upstream nodes
+- [x] join `any` continues after first successful upstream
+- [x] duplicate incoming edges do not run the same node twice
+- [x] resume does not run completed nodes again
 
 ## Milestone 3: Webhook And Event Triggers
 
@@ -86,29 +87,30 @@ Files:
 - `atlas/workflows.py`
 - `atlas/app.py`
 - `atlas/db.py`
+- `atlas/jobs.py`
 - `atlas/static/app.js`
 - `scripts/check_workflow_api.py`
 
 Work:
 
-- Treat `POST /api/workflow-triggers/{id}/fire` as the webhook endpoint for
+- [x] Treat `POST /api/workflow-triggers/{id}/fire` as the webhook endpoint for
   webhook triggers.
-- Add trigger types:
-  - `webhook`
-  - `workflow_run_completed`
-  - `artifact_created`
-  - `worker_status_changed`
-- Fire internal event triggers from existing DB/service points.
-- Keep `dedupe_key` behavior for all trigger types.
-- Show last event/error per trigger in UI.
+- [x] Add trigger types:
+  - [x] `webhook`
+  - [x] `workflow_run_completed`
+  - [x] `artifact_created`
+  - [x] `worker_status_changed`
+- [x] Fire internal event triggers from existing DB/service points.
+- [x] Keep `dedupe_key` behavior for all trigger types.
+- [x] Show last event/error per trigger in UI.
 
 Checks:
 
-- webhook fire creates a workflow run
-- duplicate webhook dedupe_key is ignored
-- workflow completion trigger starts dependent workflow
-- artifact_created trigger receives artifact payload
-- worker status change trigger fires once per transition
+- [x] webhook fire creates a workflow run
+- [x] duplicate webhook dedupe_key is ignored
+- [x] workflow completion trigger starts dependent workflow
+- [x] artifact_created trigger receives artifact payload
+- [x] worker status change trigger fires once per transition
 
 ## Milestone 4: Artifact APIs
 
@@ -123,18 +125,18 @@ Files:
 
 Work:
 
-- Add `GET /api/artifacts/{id}`.
-- Add `POST /api/artifacts`.
-- Validate artifact kind: `text`, `json`, `markdown`, `file_ref`, `summary`,
+- [x] Add `GET /api/artifacts/{id}`.
+- [x] Add `POST /api/artifacts`.
+- [x] Validate artifact kind: `text`, `json`, `markdown`, `file_ref`, `summary`,
   `decision`.
-- Allow manual artifact creation for a run.
-- Show artifact detail in dashboard.
+- [x] Allow manual artifact creation for a run.
+- [x] Show artifact detail in dashboard.
 
 Checks:
 
-- get artifact by id
-- create JSON artifact and read decoded metadata/content
-- reject unsupported artifact kind
+- [x] get artifact by id
+- [x] create JSON artifact and read decoded metadata/content
+- [x] reject unsupported artifact kind
 
 ## Milestone 5: Human Gates And Approvals
 
@@ -262,10 +264,10 @@ Checks:
 
 ## Completion Gate
 
-Before pushing the full plan implementation:
+Before committing a workflow milestone:
 
 ```bash
-python3 -m py_compile atlas/db.py atlas/app.py atlas/workflows.py scripts/check_workflows.py scripts/check_workflow_api.py
+python3 -m py_compile atlas/db.py atlas/app.py atlas/jobs.py atlas/workflows.py atlas/router.py scripts/check_workflows.py scripts/check_workflow_api.py
 node --check atlas/static/app.js
 python3 scripts/check_workflow_db.py
 python3 scripts/check_workflows.py
@@ -280,5 +282,6 @@ Manual UI smoke:
 - inspect nodes, events, artifacts
 - create trigger
 - fire trigger
+- inspect trigger last event/error
+- create/read a manual JSON artifact
 - pause/cancel/resume run
-- approve a human gate

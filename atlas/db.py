@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
+ARTIFACT_KINDS = frozenset({"text", "json", "markdown", "file_ref", "summary", "decision"})
+
+
 def now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -273,6 +276,7 @@ CREATE INDEX IF NOT EXISTS idx_workflow_events_run_seq ON workflow_events(run_id
 CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_triggers_definition ON workflow_triggers(workflow_definition_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_trigger_events_trigger ON workflow_trigger_events(trigger_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workflow_trigger_events_dedupe ON workflow_trigger_events(trigger_id, dedupe_key);
 
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -677,7 +681,13 @@ class Database:
         if enabled is not None:
             where.append("enabled = ?")
             params.append(1 if enabled else 0)
-        sql = "SELECT * FROM workflow_triggers"
+        sql = """
+            SELECT workflow_triggers.*,
+              (SELECT state FROM workflow_trigger_events WHERE trigger_id = workflow_triggers.id ORDER BY rowid DESC LIMIT 1) AS last_event_state,
+              (SELECT error FROM workflow_trigger_events WHERE trigger_id = workflow_triggers.id ORDER BY rowid DESC LIMIT 1) AS last_event_error,
+              (SELECT created_at FROM workflow_trigger_events WHERE trigger_id = workflow_triggers.id ORDER BY rowid DESC LIMIT 1) AS last_event_at
+            FROM workflow_triggers
+        """
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY updated_at DESC LIMIT ?"
@@ -685,6 +695,14 @@ class Database:
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [row_to_dict(row) or {} for row in rows]
+
+    def has_workflow_trigger_event_dedupe(self, trigger_id: str, dedupe_key: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM workflow_trigger_events WHERE trigger_id = ? AND dedupe_key = ? LIMIT 1",
+                (trigger_id, dedupe_key),
+            ).fetchone()
+        return row is not None
 
     def append_workflow_trigger_event(
         self,
@@ -722,7 +740,7 @@ class Database:
                 """
                 SELECT * FROM workflow_trigger_events
                 WHERE trigger_id = ?
-                ORDER BY created_at DESC
+                ORDER BY rowid DESC
                 LIMIT ?
                 """,
                 (trigger_id, limit),
@@ -732,8 +750,19 @@ class Database:
     def create_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
         artifact_id = payload.get("id") or new_id("art")
         now = now_iso()
+        key = payload.get("key")
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("artifact key is required")
+        kind = payload.get("kind", "text")
+        if not isinstance(kind, str) or kind not in ARTIFACT_KINDS:
+            raise ValueError(f"unsupported artifact kind: {kind}")
         content = payload.get("content", "")
-        if not isinstance(content, str):
+        if kind == "json":
+            try:
+                content = encode_json(json.loads(content) if isinstance(content, str) else content)
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise ValueError("json artifact content must be valid JSON") from exc
+        elif not isinstance(content, str):
             content = encode_json(content)
         with self._lock, self.connect() as conn:
             conn.execute(
@@ -745,15 +774,15 @@ class Database:
                     artifact_id,
                     payload.get("run_id"),
                     payload.get("job_id"),
-                    payload["key"],
-                    payload.get("kind") or "text",
+                    key,
+                    kind,
                     content,
                     encode_json(payload.get("metadata") or {}),
                     now,
                     now,
                 ),
             )
-        self.audit("artifact.create", "artifact", artifact_id, {"run_id": payload.get("run_id"), "key": payload["key"]})
+        self.audit("artifact.create", "artifact", artifact_id, {"run_id": payload.get("run_id"), "key": key})
         return self.get_artifact(artifact_id) or {}
 
     def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:

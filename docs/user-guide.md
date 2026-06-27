@@ -1,6 +1,7 @@
 # Atlas User Guide
 
-This guide covers the current local Atlas workflow MVP.
+This guide covers the current local Atlas control plane and deterministic
+workflow engine.
 
 ## 1. Start Atlas
 
@@ -168,9 +169,45 @@ Click `Run Workflow`.
 Inspect:
 
 - Runs list
-- Run detail JSON
-- Artifacts box
+- Run detail JSON, including `completed_nodes` and join state
+- Artifacts box, including decoded JSON content and metadata
+- Lifecycle timeline and pause/resume/cancel controls
 - Related jobs in the Jobs panel
+
+### Fan-Out And Joins
+
+Multiple matching outgoing edges queue every independent branch. Point those
+branches at a join node when downstream work must wait:
+
+```json
+{"id":"join_reviews","type":"join","mode":"all"}
+```
+
+- `all` waits for every upstream node that reaches the join.
+- `any` continues after the first successful upstream.
+- A join node does not create a worker job.
+- Resume skips node keys already recorded as completed.
+
+See [workflow-examples.md](workflow-examples.md) for a complete graph.
+
+### Artifacts
+
+Worker output remains automatic. You can also attach a typed artifact to a run:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/artifacts \
+  -H 'content-type: application/json' \
+  -d '{
+    "run_id":"wfr_xxx",
+    "key":"invoice",
+    "kind":"json",
+    "content":{"total":3},
+    "metadata":{"source":"manual"}
+  }'
+```
+
+Read it with `GET /api/artifacts/{id}`. Supported kinds are `text`, `json`,
+`markdown`, `file_ref`, `summary`, and `decision`.
 
 ## 9. Draft A Workflow With A Builder Worker
 
@@ -214,6 +251,22 @@ Daily local-time schedule:
 
 Click `Create Trigger`. Use `Fire` to start the workflow manually from that
 trigger. Click a trigger to inspect recent trigger events.
+
+Other trigger types:
+
+- `webhook`: call `POST /api/workflow-triggers/{id}/fire` with `payload` and a
+  stable `dedupe_key`.
+- `workflow_run_completed`: optional config filters are
+  `source_workflow_definition_id` and `state`.
+- `artifact_created`: optional filters are `source_workflow_definition_id`,
+  `key`, and `kind`.
+- `worker_status_changed`: optional filters are `worker_id` and `status`.
+
+The three internal event types are fired by Atlas, so the dashboard does not
+show a `Fire` button for them. Trigger cards show the last state and error;
+click a card for the full `received`, `started`, `ignored`, or `failed` history.
+Atlas blocks an internal trigger from starting its own source workflow to avoid
+an unbounded self-trigger loop.
 
 ## Troubleshooting
 

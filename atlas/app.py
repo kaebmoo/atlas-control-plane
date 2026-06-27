@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .config import Config
-from .db import Database
+from .db import ARTIFACT_KINDS, Database
 from .jobs import JobManager, TERMINAL_STATES
 from .router import Router
 from .workflows import (
@@ -309,7 +309,22 @@ class AtlasHandler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "workflow-runs"] and parts[3] == "artifacts" and method == "GET":
             if not runtime.db.get_workflow_run(parts[2]):
                 raise FileNotFoundError()
-            self._json({"artifacts": runtime.db.list_artifacts(run_id=parts[2])})
+            self._json({"artifacts": [_public_artifact(artifact) for artifact in runtime.db.list_artifacts(run_id=parts[2])]})
+            return
+
+        if parts == ["api", "artifacts"] and method == "POST":
+            payload = self._read_json()
+            _validate_artifact_payload(runtime, payload)
+            artifact = runtime.db.create_artifact(payload)
+            runtime.triggers.artifact_created(artifact)
+            self._json({"artifact": _public_artifact(artifact)}, HTTPStatus.CREATED)
+            return
+
+        if len(parts) == 3 and parts[:2] == ["api", "artifacts"] and method == "GET":
+            artifact = runtime.db.get_artifact(parts[2])
+            if not artifact:
+                raise FileNotFoundError()
+            self._json({"artifact": _public_artifact(artifact)})
             return
 
         if len(parts) == 4 and parts[:2] == ["api", "workflow-runs"] and parts[3] == "events" and method == "GET":
@@ -345,6 +360,9 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 return
 
         if len(parts) == 4 and parts[:2] == ["api", "workflow-triggers"] and parts[3] == "fire" and method == "POST":
+            trigger = runtime.db.get_workflow_trigger(parts[2])
+            if trigger and trigger["type"] in {"workflow_run_completed", "artifact_created", "worker_status_changed"}:
+                raise ValueError(f"{trigger['type']} triggers are fired by Atlas events")
             payload = self._read_json()
             result = runtime.triggers.fire_trigger(parts[2], payload.get("payload") or {}, payload.get("dedupe_key"))
             self._json(result, HTTPStatus.ACCEPTED)
@@ -502,6 +520,25 @@ def _public_worker(worker: dict[str, Any]) -> dict[str, Any]:
     token = public.pop("token", None)
     public["token_set"] = bool(token)
     return public
+
+
+def _public_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+    public = dict(artifact)
+    if public.get("kind") == "json":
+        public["content"] = json.loads(public.get("content") or "null")
+    return public
+
+
+def _validate_artifact_payload(runtime: AtlasRuntime, payload: dict[str, Any]) -> None:
+    run_id = payload.get("run_id")
+    if not run_id or not runtime.db.get_workflow_run(run_id):
+        raise ValueError(f"Unknown workflow_run_id: {run_id}")
+    if not isinstance(payload.get("kind", "text"), str) or payload.get("kind", "text") not in ARTIFACT_KINDS:
+        raise ValueError(f"unsupported artifact kind: {payload.get('kind')}")
+    if payload.get("job_id") and not runtime.db.get_job(payload["job_id"]):
+        raise ValueError(f"Unknown job_id: {payload['job_id']}")
+    if payload.get("metadata") is not None and not isinstance(payload.get("metadata"), dict):
+        raise ValueError("artifact metadata must be an object")
 
 
 def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any]) -> None:

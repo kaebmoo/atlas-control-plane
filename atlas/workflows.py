@@ -13,7 +13,12 @@ from .router import Router
 
 _FIELD_RE = re.compile(r"{([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)}")
 _JOB_TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
-_TRIGGER_STATES = {"manual", "schedule"}
+_TRIGGER_STATES = {"manual", "schedule", "webhook", "workflow_run_completed", "artifact_created", "worker_status_changed"}
+_EVENT_TRIGGER_FILTERS = {
+    "workflow_run_completed": {"source_workflow_definition_id": "workflow_definition_id", "state": "state"},
+    "artifact_created": {"source_workflow_definition_id": "workflow_definition_id", "key": "key", "kind": "kind"},
+    "worker_status_changed": {"worker_id": "worker_id", "status": "status"},
+}
 
 
 def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -38,6 +43,10 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
         node_ids.add(node_id)
         if not isinstance(node.get("type"), str) or not node["type"].strip():
             raise ValueError(f"workflow node {node_id} requires a non-empty type")
+        if node["type"] == "join":
+            mode = node.get("mode", "all")
+            if not isinstance(mode, str) or mode not in {"all", "any"}:
+                raise ValueError(f"workflow join node {node_id} mode must be all or any")
 
     start = graph.get("start")
     if not isinstance(start, str) or not start.strip():
@@ -87,6 +96,7 @@ class WorkflowRunner:
         self.job_service = job_service
         self.poll_interval_seconds = poll_interval_seconds
         self.max_wait_seconds = max_wait_seconds
+        self.trigger_service: WorkflowTriggerService | None = None
         self._threads: dict[str, threading.Thread] = {}
         self._thread_lock = threading.RLock()
 
@@ -157,6 +167,7 @@ class WorkflowRunner:
         for node in self.db.list_workflow_nodes(run_id):
             if node["state"] == "running" and node.get("job_id"):
                 self._cancel_job(node["job_id"])
+        self._notify_run_completed(run_id)
         return self.db.get_workflow_run(run_id) or run
 
     def run_graph(
@@ -187,7 +198,12 @@ class WorkflowRunner:
                 "state": "running",
                 "input": input,
                 "current_nodes": [graph["start"]],
-                "counters": {"jobs_started": 0, "node_counts": {}},
+                "counters": {
+                    "jobs_started": 0,
+                    "node_counts": {},
+                    "completed_nodes": [],
+                    "join_states": _initial_join_states(graph),
+                },
                 "started_at": now_iso(),
             }
         )
@@ -235,7 +251,9 @@ class WorkflowRunner:
     ) -> dict[str, Any]:
         validate_workflow_graph(graph, policy)
         node_map = {node["id"]: node for node in graph["nodes"]}
-        outgoing = _outgoing_edges(graph.get("edges", []))
+        edges = graph.get("edges", [])
+        outgoing = _outgoing_edges(edges)
+        cycle_edges = _cycle_edges(edges)
         run = self.db.get_workflow_run(run_id)
         if not run:
             raise ValueError(f"Unknown workflow_run_id: {run_id}")
@@ -244,6 +262,16 @@ class WorkflowRunner:
         counters = run.get("counters") or {"jobs_started": 0, "node_counts": {}}
         counters.setdefault("jobs_started", 0)
         counters.setdefault("node_counts", {})
+        restore_completed_nodes = "completed_nodes" not in counters
+        completed_nodes = counters.setdefault("completed_nodes", [])
+        if restore_completed_nodes:
+            for runtime_node in self.db.list_workflow_nodes(run_id):
+                if runtime_node["state"] == "succeeded" and runtime_node["node_key"] not in completed_nodes:
+                    completed_nodes.append(runtime_node["node_key"])
+        completed = set(completed_nodes)
+        join_states = counters.setdefault("join_states", {})
+        for node_key, state in _initial_join_states(graph).items():
+            join_states.setdefault(node_key, state)
         deadline = _workflow_deadline(run, policy)
 
         try:
@@ -254,10 +282,14 @@ class WorkflowRunner:
                         if self._stop_requested(run_id, ready, counters):
                             return self.db.get_workflow_run(run_id) or run
                         _check_deadline(deadline)
-                        _check_limit(policy, "max_jobs", counters["jobs_started"])
-                        _check_limit(policy, "max_iterations", counters["jobs_started"])
                         node_key = ready.pop(0)
+                        if node_key in completed:
+                            self.db.update_workflow_run(run_id, current_nodes=ready, counters=counters)
+                            continue
                         node = node_map[node_key]
+                        if node.get("type") != "join":
+                            _check_limit(policy, "max_jobs", counters["jobs_started"])
+                            _check_limit(policy, "max_iterations", counters["jobs_started"])
                         node_counts = counters["node_counts"]
                         node_counts[node_key] = int(node_counts.get(node_key) or 0) + 1
                         _check_limit(policy, "max_attempts_per_node", node_counts[node_key] - 1)
@@ -278,24 +310,38 @@ class WorkflowRunner:
                             {"attempt": node_counts[node_key]},
                             node_key=node_key,
                         )
-                        job = self._submit_worker_node(run, node, input, artifacts, policy)
-                        self.db.update_workflow_node(runtime_node["id"], job_id=job["id"])
-                    job = self._wait_for_job(job["id"], run["id"], deadline)
-                    counters["jobs_started"] += 1
-                    if job["state"] != "succeeded":
-                        raise ValueError(f"workflow node {node_key} job {job['id']} ended as {job['state']}")
-                    output_artifacts = self._store_output_artifact(run_id, node, job, artifacts)
+                        job = None
+                        if node.get("type") != "join":
+                            job = self._submit_worker_node(run, node, input, artifacts, policy)
+                            self.db.update_workflow_node(runtime_node["id"], job_id=job["id"])
+                    output_artifacts: list[str] = []
+                    if job:
+                        job = self._wait_for_job(job["id"], run["id"], deadline)
+                        counters["jobs_started"] += 1
+                        if job["state"] != "succeeded":
+                            raise ValueError(f"workflow node {node_key} job {job['id']} ended as {job['state']}")
+                        output_artifacts = self._store_output_artifact(run_id, node, job, artifacts)
                     self.db.update_workflow_node(
                         runtime_node["id"],
                         state="succeeded",
-                        job_id=job["id"],
+                        job_id=job["id"] if job else None,
                         output_artifacts=output_artifacts,
                         finished_at=now_iso(),
                     )
+                    if node_key not in completed:
+                        completed.add(node_key)
+                        completed_nodes.append(node_key)
+                    if node.get("type") == "join":
+                        join_states[node_key]["state"] = "succeeded"
+                    event_payload = {"output_artifacts": output_artifacts}
+                    if job:
+                        event_payload["job_id"] = job["id"]
+                    else:
+                        event_payload["join"] = join_states[node_key]
                     self.db.append_workflow_event(
                         run_id,
                         "node_succeeded",
-                        {"job_id": job["id"], "output_artifacts": output_artifacts},
+                        event_payload,
                         node_key=node_key,
                     )
                 except _WorkflowCancelled:
@@ -319,7 +365,16 @@ class WorkflowRunner:
                             {"to": edge["to"], "condition_result": condition_result},
                             node_key=node_key,
                         )
-                        ready.append(edge["to"])
+                        _schedule_node(
+                            edge,
+                            ready,
+                            completed,
+                            completed_nodes,
+                            node_map,
+                            join_states,
+                            cycle_edges,
+                            prioritize=node.get("type") == "join",
+                        )
                     else:
                         if condition.get("type") == "max_iterations_below":
                             self.db.append_workflow_event(run_id, "guard_tripped", condition_result, node_key=node_key)
@@ -329,6 +384,7 @@ class WorkflowRunner:
                             {"to": edge["to"], "condition_result": condition_result},
                             node_key=node_key,
                         )
+                self.db.update_workflow_run(run_id, current_nodes=ready, counters=counters)
 
             if (self.db.get_workflow_run(run_id) or {}).get("state") == "cancelled":
                 return self.db.get_workflow_run(run_id) or run
@@ -368,6 +424,23 @@ class WorkflowRunner:
             finished_at=now_iso(),
         )
         self.db.append_workflow_event(run_id, "run_finished", {"state": state, "error": error})
+        self._notify_run_completed(run_id)
+
+    def _notify_run_completed(self, run_id: str) -> None:
+        if not self.trigger_service:
+            return
+        run = self.db.get_workflow_run(run_id)
+        if run:
+            self.trigger_service.fire_internal(
+                "workflow_run_completed",
+                {
+                    "run_id": run_id,
+                    "workflow_definition_id": run.get("workflow_definition_id"),
+                    "state": run["state"],
+                    "error": run.get("error"),
+                },
+                f"workflow_run_completed:{run_id}:{run['state']}",
+            )
 
     def _submit_worker_node(
         self,
@@ -463,6 +536,8 @@ class WorkflowRunner:
             }
         )
         artifacts[key] = value
+        if self.trigger_service:
+            self.trigger_service.artifact_created(artifact)
         return [artifact["id"]]
 
 
@@ -470,6 +545,8 @@ class WorkflowTriggerService:
     def __init__(self, db: Database, runner: WorkflowRunner, poll_seconds: float = 30):
         self.db = db
         self.runner = runner
+        self.runner.trigger_service = self
+        self.runner.job_service.trigger_service = self
         self.poll_seconds = poll_seconds
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -503,7 +580,7 @@ class WorkflowTriggerService:
             raise ValueError(f"Unknown workflow_trigger_id: {trigger_id}")
         payload = payload or {}
 
-        if dedupe_key and any(event.get("dedupe_key") == dedupe_key for event in self.db.list_workflow_trigger_events(trigger_id, 1000)):
+        if dedupe_key and self.db.has_workflow_trigger_event_dedupe(trigger_id, dedupe_key):
             event = self.db.append_workflow_trigger_event(trigger_id, "ignored", payload=payload, dedupe_key=dedupe_key, error="duplicate dedupe_key")
             return {"trigger": trigger, "event": event, "run": None}
 
@@ -531,6 +608,37 @@ class WorkflowTriggerService:
             )
             return {"trigger": updated or trigger, "event": event, "run": None}
 
+    def artifact_created(self, artifact: dict[str, Any]) -> list[dict[str, Any]]:
+        run = self.db.get_workflow_run(artifact.get("run_id") or "") or {}
+        return self.fire_internal(
+            "artifact_created",
+            {
+                "artifact_id": artifact["id"],
+                "run_id": artifact.get("run_id"),
+                "workflow_definition_id": run.get("workflow_definition_id"),
+                "job_id": artifact.get("job_id"),
+                "key": artifact["key"],
+                "kind": artifact["kind"],
+            },
+            f"artifact_created:{artifact['id']}",
+        )
+
+    def fire_internal(self, event_type: str, payload: dict[str, Any], dedupe_key: str) -> list[dict[str, Any]]:
+        results = []
+        event_payload = {**payload, "event_type": event_type}
+        try:
+            triggers = self.db.list_workflow_triggers(limit=500, enabled=True)
+            for trigger in triggers:
+                if trigger.get("type") != event_type or not _event_trigger_matches(trigger, event_payload):
+                    continue
+                # ponytail: self-triggering needs an explicit guarded design, otherwise one completion can loop forever.
+                if event_type in {"workflow_run_completed", "artifact_created"} and trigger["workflow_definition_id"] == payload.get("workflow_definition_id"):
+                    continue
+                results.append(self.fire_trigger(trigger["id"], event_payload, dedupe_key))
+        except Exception as exc:
+            self.db.audit("workflow_trigger.internal_error", "workflow_trigger", event_type, {"error": str(exc)})
+        return results
+
     def _loop(self) -> None:
         while not self._stop.wait(self.poll_seconds):
             try:
@@ -541,18 +649,20 @@ class WorkflowTriggerService:
 
 def validate_workflow_trigger_payload(payload: dict[str, Any]) -> None:
     trigger_type = payload.get("type") or "manual"
-    if trigger_type not in _TRIGGER_STATES:
+    if not isinstance(trigger_type, str) or trigger_type not in _TRIGGER_STATES:
         raise ValueError(f"unsupported workflow trigger type: {trigger_type}")
+    if payload.get("config") is not None and not isinstance(payload.get("config"), dict):
+        raise ValueError("workflow trigger config must be an object")
     if trigger_type == "schedule":
         next_fire_at_for_trigger(payload)
 
 
 def next_fire_at_for_trigger(trigger: dict[str, Any], base: datetime | None = None) -> str | None:
     trigger_type = trigger.get("type") or "manual"
-    if trigger_type == "manual":
-        return None
-    if trigger_type != "schedule":
+    if not isinstance(trigger_type, str) or trigger_type not in _TRIGGER_STATES:
         raise ValueError(f"unsupported workflow trigger type: {trigger_type}")
+    if trigger_type != "schedule":
+        return None
 
     config = trigger.get("config") or {}
     base = (base or datetime.now(UTC)).astimezone(UTC).replace(microsecond=0)
@@ -577,6 +687,11 @@ def next_fire_at_for_trigger(trigger: dict[str, Any], base: datetime | None = No
         return _iso_utc(candidate.astimezone(UTC))
 
     raise ValueError("schedule config requires interval_minutes or daily_time")
+
+
+def _event_trigger_matches(trigger: dict[str, Any], payload: dict[str, Any]) -> bool:
+    config = trigger.get("config") or {}
+    return all(config.get(key) == payload.get(payload_key) for key, payload_key in _EVENT_TRIGGER_FILTERS[trigger["type"]].items() if key in config)
 
 
 def _validate_edge(edge: Any, index: int, node_ids: set[str]) -> None:
@@ -647,6 +762,85 @@ def _outgoing_edges(edges: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
     for edge in edges:
         outgoing.setdefault(edge["from"], []).append(edge)
     return outgoing
+
+
+def _initial_join_states(graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    incoming: dict[str, list[str]] = {}
+    for edge in graph.get("edges", []):
+        sources = incoming.setdefault(edge["to"], [])
+        if edge["from"] not in sources:
+            sources.append(edge["from"])
+    return {
+        node["id"]: {
+            "mode": node.get("mode") or "all",
+            "state": "ready" if node["id"] == graph.get("start") else "waiting",
+            "upstream_nodes": incoming.get(node["id"], []),
+            "completed_upstreams": [],
+        }
+        for node in graph.get("nodes", [])
+        if node.get("type") == "join"
+    }
+
+
+def _cycle_edges(edges: list[dict[str, Any]]) -> set[tuple[str, str]]:
+    # ponytail: workflow graphs are small; use SCC indexing only if this scan becomes measurable.
+    outgoing = _outgoing_edges(edges)
+
+    def reaches(start: str, target: str) -> bool:
+        pending = [start]
+        visited = set()
+        while pending:
+            node = pending.pop()
+            if node == target:
+                return True
+            if node not in visited:
+                visited.add(node)
+                pending.extend(edge["to"] for edge in outgoing.get(node, []))
+        return False
+
+    return {(edge["from"], edge["to"]) for edge in edges if reaches(edge["to"], edge["from"])}
+
+
+def _schedule_node(
+    edge: dict[str, Any],
+    ready: list[str],
+    completed: set[str],
+    completed_nodes: list[str],
+    node_map: dict[str, dict[str, Any]],
+    join_states: dict[str, dict[str, Any]],
+    cycle_edges: set[tuple[str, str]],
+    prioritize: bool = False,
+) -> None:
+    source = edge["from"]
+    target = edge["to"]
+    is_cycle = (source, target) in cycle_edges
+    if is_cycle and target in completed:
+        completed.remove(target)
+        completed_nodes.remove(target)
+        if target in join_states:
+            join_states[target]["state"] = "waiting"
+            join_states[target]["completed_upstreams"] = []
+
+    if node_map[target].get("type") == "join":
+        state = join_states[target]
+        if source not in state["completed_upstreams"]:
+            state["completed_upstreams"].append(source)
+        satisfied = (
+            bool(state["completed_upstreams"])
+            if state["mode"] == "any"
+            else set(state["upstream_nodes"]) <= set(state["completed_upstreams"])
+        )
+        if target in completed or not satisfied:
+            return
+        state["state"] = "ready"
+        prioritize = True
+
+    if target in completed or target in ready:
+        return
+    if prioritize:
+        ready.insert(0, target)
+    else:
+        ready.append(target)
 
 
 def _check_limit(policy: dict[str, Any], key: str, count: int) -> None:

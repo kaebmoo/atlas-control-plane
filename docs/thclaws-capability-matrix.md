@@ -18,7 +18,9 @@ Atlas can already use thClaws as a worker runtime, but not every orchestration f
 - **Restart a worker**: use `/v1/restart`.
 - **Multi-machine dashboard**: Atlas can proxy, aggregate, and persist state around the APIs above.
 
-This is enough for the current control-plane MVP: worker registry, workspace mapping, routing, streaming, history, audit, and single-step handoff.
+This is enough for the current control plane: worker registry, workspace
+mapping, routing, streaming, history, audit, handoff, and Atlas-owned
+deterministic workflows.
 
 ### Possible As Workarounds, But Not Native
 
@@ -72,6 +74,10 @@ Based on the current `thclaws --serve` surface:
 - Job history and replay through Atlas' own `job_events` table.
 - Audit log for routing, worker changes, workspace changes, and job lifecycle.
 - Best-effort cancel by marking the Atlas job cancelled and closing/releasing the stream when possible.
+- Workflow graph state, fan-out, joins, conditions, limits, and artifacts in
+  Atlas SQLite.
+- Manual, schedule, webhook, workflow-completion, artifact, and worker-status
+  triggers without worker-side orchestration APIs.
 
 ## Workarounds, Not Native
 

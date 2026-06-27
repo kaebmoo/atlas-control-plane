@@ -8,6 +8,11 @@ flowchart LR
   API --> DB[("SQLite State")]
   API --> Router["Router"]
   Router --> DB
+  API --> Workflows["Workflow Runner"]
+  API --> Triggers["Trigger Service"]
+  Workflows --> DB
+  Triggers --> Workflows
+  Triggers --> DB
   API --> Jobs["Job Manager"]
   Jobs --> DB
   Jobs --> W1["thClaws Worker A"]
@@ -44,7 +49,26 @@ This keeps manual override available while letting Atlas auto-route when the cal
 - `session_bindings`: maps Atlas conversation to thClaws `session_id`.
 - `jobs`: one routed execution.
 - `job_events`: append-only event stream persisted from thClaws SSE.
+- `workflow_definitions`: versioned graph and policy JSON.
+- `workflow_runs`, `workflow_nodes`, `workflow_edges`: persisted runtime state.
+- `workflow_events`: append-only run lifecycle timeline.
+- `artifacts`: typed workflow blackboard entries.
+- `workflow_triggers`, `workflow_trigger_events`: manual, schedule, webhook, and
+  internal event automation with dedupe history.
 - `audit_log`: operator and system actions.
+
+## Workflow Execution
+
+Atlas centrally queues graph nodes. Worker nodes create normal Atlas jobs;
+`join` nodes run only in the control plane. Fan-out queues every matching
+branch, joins track completed upstream keys, and duplicate incoming edges do
+not schedule a node twice. The current executor is queue-based rather than
+parallel.
+
+Run completion, artifact creation, and worker status transitions feed the
+trigger service. Internal triggers can filter by source workflow, state,
+artifact key/kind, worker, or status. Atlas blocks unguarded self-triggering to
+avoid infinite automation loops.
 
 ## Phase 4 Readiness
 

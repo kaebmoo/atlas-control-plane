@@ -2,6 +2,10 @@
 
 ใช้ไฟล์นี้เป็นชุด prompt สำหรับเปิด new chat แล้วสั่ง coding ต่อทีละ spin.
 
+> Historical: spins ชุดนี้ถูกทำครบและถูกแทนที่ด้วย milestone checklist ใน
+> `docs/workflow-engine-coding-plan.md` แล้ว อย่าใช้ Recommended Order ด้านล่าง
+> เป็นสถานะปัจจุบันของระบบ.
+
 ## Prompt ตั้งต้นทุก Spin
 
 ```text

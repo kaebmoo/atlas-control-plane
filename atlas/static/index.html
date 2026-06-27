@@ -128,6 +128,7 @@
                 <label>Run Input JSON<textarea id="workflowRunInput" rows="4">{}</textarea></label>
                 <div class="workflow-actions">
                   <button id="runWorkflowBtn" class="primary-btn" type="button">Run Workflow</button>
+                  <div class="subhead">Artifacts</div>
                   <pre id="workflowArtifactList" class="compact-pre"></pre>
                 </div>
               </div>
@@ -153,7 +154,14 @@
               <div class="subhead">Triggers</div>
               <div class="form-grid">
                 <label>Name<input id="triggerNameInput" placeholder="Manual"></label>
-                <label>Type<select id="triggerTypeSelect"><option value="manual">manual</option><option value="schedule">schedule</option></select></label>
+                <label>Type<select id="triggerTypeSelect">
+                  <option value="manual">manual</option>
+                  <option value="schedule">schedule</option>
+                  <option value="webhook">webhook</option>
+                  <option value="workflow_run_completed">workflow_run_completed</option>
+                  <option value="artifact_created">artifact_created</option>
+                  <option value="worker_status_changed">worker_status_changed</option>
+                </select></label>
                 <label>Config JSON<textarea id="triggerConfigInput" rows="3">{}</textarea></label>
                 <label class="toggle-row"><input id="triggerEnabledInput" type="checkbox" checked><span>Enabled</span></label>
                 <button id="saveTriggerBtn" class="secondary-btn" type="button">Create Trigger</button>

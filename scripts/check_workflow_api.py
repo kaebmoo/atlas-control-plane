@@ -145,6 +145,7 @@ def main() -> None:
             assert schedule["next_fire_at"]
             disabled = request(base_url, "PUT", f"/api/workflow-triggers/{schedule['id']}", {"enabled": False})["trigger"]
             assert not disabled["enabled"]
+            check_milestones_3_and_4(base_url, workflow_id)
             assert request(base_url, "DELETE", f"/api/workflow-triggers/{schedule['id']}")["deleted"]
             assert request(base_url, "DELETE", f"/api/workflow-triggers/{trigger['id']}")["deleted"]
             assert request(base_url, "DELETE", f"/api/workflows/{workflow_id}")["deleted"]
@@ -157,6 +158,132 @@ def main() -> None:
             thread.join(timeout=2)
 
     print("workflow api check ok")
+
+
+def check_milestones_3_and_4(base_url: str, workflow_id: str) -> None:
+    source = request(
+        base_url,
+        "POST",
+        "/api/workflows",
+        {
+            "name": "Event source",
+            "graph": {"start": "source", "nodes": [{"id": "source", "type": "worker", "prompt": "source"}], "edges": []},
+        },
+    )["workflow"]
+
+    webhook = request(
+        base_url,
+        "POST",
+        "/api/workflow-triggers",
+        {"workflow_definition_id": workflow_id, "name": "Webhook", "type": "webhook"},
+    )["trigger"]
+    fired = request(
+        base_url,
+        "POST",
+        f"/api/workflow-triggers/{webhook['id']}/fire",
+        {"payload": {"topic": "webhook"}, "dedupe_key": "webhook-once"},
+    )
+    assert fired["run"] and wait_for_api_run(base_url, fired["run"]["id"], "failed")["state"] == "failed"
+    duplicate = request(
+        base_url,
+        "POST",
+        f"/api/workflow-triggers/{webhook['id']}/fire",
+        {"payload": {"topic": "webhook"}, "dedupe_key": "webhook-once"},
+    )
+    assert duplicate["event"]["state"] == "ignored"
+    listed = next(trigger for trigger in request(base_url, "GET", "/api/workflow-triggers")["triggers"] if trigger["id"] == webhook["id"])
+    assert listed["last_event_state"] == "ignored"
+    assert "duplicate dedupe_key" in listed["last_event_error"]
+
+    completion = request(
+        base_url,
+        "POST",
+        "/api/workflow-triggers",
+        {
+            "workflow_definition_id": workflow_id,
+            "name": "After source",
+            "type": "workflow_run_completed",
+            "config": {"source_workflow_definition_id": source["id"], "state": "failed"},
+        },
+    )["trigger"]
+    source_run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": source["id"]})["run"]
+    wait_for_api_run(base_url, source_run["id"], "failed")
+    completion_event = wait_for_trigger_event(base_url, completion["id"], "started")
+    assert completion_event["run_id"] != source_run["id"]
+    assert completion_event["payload"]["run_id"] == source_run["id"]
+    assert completion_event["payload"]["event_type"] == "workflow_run_completed"
+    internal_fire = request_error(base_url, "POST", f"/api/workflow-triggers/{completion['id']}/fire", {})
+    assert "fired by Atlas events" in internal_fire["error"]
+
+    artifact_trigger = request(
+        base_url,
+        "POST",
+        "/api/workflow-triggers",
+        {
+            "workflow_definition_id": workflow_id,
+            "name": "Invoice artifact",
+            "type": "artifact_created",
+            "config": {"source_workflow_definition_id": source["id"], "key": "invoice"},
+        },
+    )["trigger"]
+    created = request(
+        base_url,
+        "POST",
+        "/api/artifacts",
+        {
+            "run_id": source_run["id"],
+            "key": "invoice",
+            "kind": "json",
+            "content": {"total": 3},
+            "metadata": {"source": "manual"},
+        },
+    )["artifact"]
+    assert created["content"] == {"total": 3}
+    assert created["metadata"] == {"source": "manual"}
+    fetched = request(base_url, "GET", f"/api/artifacts/{created['id']}")["artifact"]
+    assert fetched["content"] == {"total": 3}
+    artifacts = request(base_url, "GET", f"/api/workflow-runs/{source_run['id']}/artifacts")["artifacts"]
+    assert artifacts[0]["content"] == {"total": 3}
+    artifact_event = wait_for_trigger_event(base_url, artifact_trigger["id"], "started")
+    assert artifact_event["payload"]["artifact_id"] == created["id"]
+    assert artifact_event["payload"]["key"] == "invoice"
+    bad_kind = request_error(
+        base_url,
+        "POST",
+        "/api/artifacts",
+        {"run_id": source_run["id"], "key": "bad", "kind": "binary", "content": "x"},
+    )
+    assert "unsupported artifact kind" in bad_kind["error"]
+    bad_json = request_error(
+        base_url,
+        "POST",
+        "/api/artifacts",
+        {"run_id": source_run["id"], "key": "bad-json", "kind": "json", "content": "{"},
+    )
+    assert "valid JSON" in bad_json["error"]
+
+    worker = request(
+        base_url,
+        "POST",
+        "/api/workers",
+        {"name": "Offline event worker", "base_url": "http://127.0.0.1:1"},
+    )["worker"]
+    worker_trigger = request(
+        base_url,
+        "POST",
+        "/api/workflow-triggers",
+        {
+            "workflow_definition_id": workflow_id,
+            "name": "Worker offline",
+            "type": "worker_status_changed",
+            "config": {"worker_id": worker["id"], "status": "offline"},
+        },
+    )["trigger"]
+    assert request(base_url, "POST", f"/api/workers/{worker['id']}/poll")["worker"]["status"] == "offline"
+    wait_for_trigger_event(base_url, worker_trigger["id"], "started")
+    started_count = sum(event["state"] == "started" for event in request(base_url, "GET", f"/api/workflow-triggers/{worker_trigger['id']}/events")["events"])
+    request(base_url, "POST", f"/api/workers/{worker['id']}/poll")
+    assert sum(event["state"] == "started" for event in request(base_url, "GET", f"/api/workflow-triggers/{worker_trigger['id']}/events")["events"]) == started_count == 1
 
 
 def request(base_url: str, method: str, path: str, payload: dict | None = None) -> dict:
@@ -182,6 +309,17 @@ def wait_for_api_run(base_url: str, run_id: str, state: str) -> dict:
             return run
         time.sleep(0.02)
     raise AssertionError(f"workflow run {run_id} did not reach {state}")
+
+
+def wait_for_trigger_event(base_url: str, trigger_id: str, state: str) -> dict:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        events = request(base_url, "GET", f"/api/workflow-triggers/{trigger_id}/events")["events"]
+        event = next((item for item in events if item["state"] == state), None)
+        if event:
+            return event
+        time.sleep(0.02)
+    raise AssertionError(f"workflow trigger {trigger_id} did not record {state}")
 
 
 if __name__ == "__main__":

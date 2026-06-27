@@ -333,7 +333,12 @@ function renderWorkflowRuns() {
       </article>
     `).join("");
   }
-  $("#workflowRunDetail").textContent = state.workflowRunDetail ? prettyJson(state.workflowRunDetail) : "";
+  const progress = state.workflowRunDetail?.run?.counters || {};
+  $("#workflowRunDetail").textContent = state.workflowRunDetail ? prettyJson({
+    completed_nodes: progress.completed_nodes || [],
+    joins: progress.join_states || {},
+    ...state.workflowRunDetail,
+  }) : "";
   $("#workflowArtifactList").textContent = state.workflowArtifacts.length ? prettyJson(state.workflowArtifacts) : "";
   const selectedRun = state.workflowRunDetail?.run;
   $("#pauseWorkflowRunBtn").disabled = selectedRun?.state !== "running";
@@ -370,8 +375,9 @@ function renderWorkflowTriggers() {
         <span>${escapeHtml(trigger.type)}</span>
       </div>
       <div class="item-sub">${trigger.enabled ? "enabled" : "disabled"} · next ${escapeHtml(formatTime(trigger.next_fire_at) || "manual")} · ${shortId(trigger.id)}</div>
+      <div class="item-sub">last ${escapeHtml(trigger.last_event_state || "never")} ${escapeHtml(formatTime(trigger.last_event_at))}${trigger.last_event_error ? ` · ${escapeHtml(trigger.last_event_error)}` : ""}</div>
       <div class="item-actions">
-        <button class="secondary-btn fire-trigger" data-trigger-id="${escapeHtml(trigger.id)}">Fire</button>
+        ${["manual", "schedule", "webhook"].includes(trigger.type) ? `<button class="secondary-btn fire-trigger" data-trigger-id="${escapeHtml(trigger.id)}">Fire</button>` : ""}
         <button class="danger-btn delete-trigger" data-trigger-id="${escapeHtml(trigger.id)}">Delete</button>
       </div>
     </article>

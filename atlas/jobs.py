@@ -23,6 +23,7 @@ class JobManager:
         self.db = db
         self.router = Router(db)
         self.request_timeout_seconds = request_timeout_seconds
+        self.trigger_service: Any = None
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.RLock()
 
@@ -109,7 +110,19 @@ class JobManager:
             self.db.update_worker_status(worker_id, status, merged_info, None)
         except ThClawsError as exc:
             self.db.update_worker_status(worker_id, "offline", {}, str(exc))
-        return self.db.get_worker(worker_id) or worker
+        updated = self.db.get_worker(worker_id) or worker
+        if self.trigger_service and worker.get("status") != updated.get("status"):
+            self.trigger_service.fire_internal(
+                "worker_status_changed",
+                {
+                    "worker_id": worker_id,
+                    "previous_status": worker.get("status"),
+                    "status": updated.get("status"),
+                    "updated_at": updated.get("updated_at"),
+                },
+                f"worker_status_changed:{worker_id}:{worker.get('status')}:{updated.get('status')}:{updated.get('updated_at')}",
+            )
+        return updated
 
     def poll_all_workers(self) -> list[dict[str, Any]]:
         results = []
