@@ -385,6 +385,7 @@ textarea:focus {
   border: 1px solid #f1b8b2;
 }
 
+.secondary-btn:disabled,
 .danger-btn:disabled {
   color: #a8b2af;
   background: #f3f5f4;

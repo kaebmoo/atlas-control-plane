@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .db import Database, now_iso
+from .router import Router
 
 
 _FIELD_RE = re.compile(r"{([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)}")
@@ -86,6 +87,8 @@ class WorkflowRunner:
         self.job_service = job_service
         self.poll_interval_seconds = poll_interval_seconds
         self.max_wait_seconds = max_wait_seconds
+        self._threads: dict[str, threading.Thread] = {}
+        self._thread_lock = threading.RLock()
 
     def run_workflow(self, workflow_definition_id: str, input: dict[str, Any] | None = None) -> dict[str, Any]:
         definition = self.db.get_workflow_definition(workflow_definition_id)
@@ -99,6 +102,63 @@ class WorkflowRunner:
             name=definition.get("name") or "Workflow run",
         )
 
+    def start_workflow(self, workflow_definition_id: str, input: dict[str, Any] | None = None) -> dict[str, Any]:
+        definition = self.db.get_workflow_definition(workflow_definition_id)
+        if not definition:
+            raise ValueError(f"Unknown workflow_definition_id: {workflow_definition_id}")
+        graph = definition["graph"]
+        policy = definition.get("policy") or {}
+        input = input or {}
+        validate_workflow_graph(graph, policy)
+        run = self._create_run(graph, input, workflow_definition_id, definition.get("name") or "Workflow run")
+        self._start_background(run["id"], graph, policy, input)
+        return self.db.get_workflow_run(run["id"]) or run
+
+    def pause_run(self, run_id: str) -> dict[str, Any]:
+        with self._thread_lock:
+            run = self.db.get_workflow_run(run_id)
+            if not run:
+                raise ValueError(f"Unknown workflow_run_id: {run_id}")
+            if run["state"] == "paused":
+                return run
+            if run["state"] != "running":
+                raise ValueError(f"workflow run {run_id} cannot be paused from {run['state']}")
+            self.db.update_workflow_run(run_id, state="paused")
+            self.db.append_workflow_event(run_id, "run_paused")
+        return self.db.get_workflow_run(run_id) or run
+
+    def resume_run(self, run_id: str) -> dict[str, Any]:
+        with self._thread_lock:
+            run = self.db.get_workflow_run(run_id)
+            if not run:
+                raise ValueError(f"Unknown workflow_run_id: {run_id}")
+            if run["state"] != "paused":
+                raise ValueError(f"workflow run {run_id} cannot be resumed from {run['state']}")
+            definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
+            if not definition:
+                raise ValueError("workflow definition is unavailable; run cannot be resumed")
+            self.db.update_workflow_run(run_id, state="running", error=None, finished_at=None)
+            self.db.append_workflow_event(run_id, "run_resumed")
+            active = self._threads.get(run_id)
+            if not active or not active.is_alive():
+                self._spawn_thread(run_id, definition["graph"], definition.get("policy") or {}, run.get("input") or {})
+        return self.db.get_workflow_run(run_id) or run
+
+    def cancel_run(self, run_id: str) -> dict[str, Any]:
+        with self._thread_lock:
+            run = self.db.get_workflow_run(run_id)
+            if not run:
+                raise ValueError(f"Unknown workflow_run_id: {run_id}")
+            if run["state"] in {"succeeded", "failed", "cancelled"}:
+                return run
+            self.db.update_workflow_run(run_id, state="cancelled", current_nodes=[], finished_at=now_iso())
+            self.db.append_workflow_event(run_id, "run_cancelled")
+            self.db.append_workflow_event(run_id, "run_finished", {"state": "cancelled"})
+        for node in self.db.list_workflow_nodes(run_id):
+            if node["state"] == "running" and node.get("job_id"):
+                self._cancel_job(node["job_id"])
+        return self.db.get_workflow_run(run_id) or run
+
     def run_graph(
         self,
         graph: dict[str, Any],
@@ -110,75 +170,213 @@ class WorkflowRunner:
         policy = policy or {}
         input = input or {}
         validate_workflow_graph(graph, policy)
+        run = self._create_run(graph, input, workflow_definition_id, name)
+        return self._execute_run(run["id"], graph, policy, input)
 
-        node_map = {node["id"]: node for node in graph["nodes"]}
-        outgoing = _outgoing_edges(graph.get("edges", []))
-        ready = [graph["start"]]
-        artifacts: dict[str, Any] = {}
-        counters = {"jobs_started": 0, "node_counts": {}}
-        run = self.db.create_workflow_run(
+    def _create_run(
+        self,
+        graph: dict[str, Any],
+        input: dict[str, Any],
+        workflow_definition_id: str | None,
+        name: str,
+    ) -> dict[str, Any]:
+        return self.db.create_workflow_run(
             {
                 "workflow_definition_id": workflow_definition_id,
                 "name": name,
                 "state": "running",
                 "input": input,
-                "current_nodes": ready,
-                "counters": counters,
+                "current_nodes": [graph["start"]],
+                "counters": {"jobs_started": 0, "node_counts": {}},
                 "started_at": now_iso(),
             }
         )
 
+    def _start_background(
+        self,
+        run_id: str,
+        graph: dict[str, Any],
+        policy: dict[str, Any],
+        input: dict[str, Any],
+    ) -> None:
+        with self._thread_lock:
+            self._spawn_thread(run_id, graph, policy, input)
+
+    def _spawn_thread(
+        self,
+        run_id: str,
+        graph: dict[str, Any],
+        policy: dict[str, Any],
+        input: dict[str, Any],
+    ) -> None:
+        thread = threading.Thread(
+            target=self._run_background,
+            args=(run_id, graph, policy, input),
+            name=f"atlas-workflow-{run_id}",
+            daemon=True,
+        )
+        self._threads[run_id] = thread
+        thread.start()
+
+    def _run_background(self, run_id: str, graph: dict[str, Any], policy: dict[str, Any], input: dict[str, Any]) -> None:
+        try:
+            self._execute_run(run_id, graph, policy, input)
+        finally:
+            with self._thread_lock:
+                if self._threads.get(run_id) is threading.current_thread():
+                    self._threads.pop(run_id, None)
+
+    def _execute_run(
+        self,
+        run_id: str,
+        graph: dict[str, Any],
+        policy: dict[str, Any],
+        input: dict[str, Any],
+    ) -> dict[str, Any]:
+        validate_workflow_graph(graph, policy)
+        node_map = {node["id"]: node for node in graph["nodes"]}
+        outgoing = _outgoing_edges(graph.get("edges", []))
+        run = self.db.get_workflow_run(run_id)
+        if not run:
+            raise ValueError(f"Unknown workflow_run_id: {run_id}")
+        ready = list(run.get("current_nodes") or [])
+        artifacts = self._load_artifacts(run_id)
+        counters = run.get("counters") or {"jobs_started": 0, "node_counts": {}}
+        counters.setdefault("jobs_started", 0)
+        counters.setdefault("node_counts", {})
+        deadline = _workflow_deadline(run, policy)
+
         try:
             while ready:
-                self.db.update_workflow_run(run["id"], current_nodes=ready, counters=counters)
-                next_ready: list[str] = []
-                for node_key in ready:
-                    _check_limit(policy, "max_jobs", counters["jobs_started"])
-                    _check_limit(policy, "max_iterations", counters["jobs_started"])
-                    node = node_map[node_key]
-                    node_counts = counters["node_counts"]
-                    node_counts[node_key] = int(node_counts.get(node_key) or 0) + 1
-                    _check_limit(policy, "max_attempts_per_node", node_counts[node_key] - 1)
-                    runtime_node = self.db.create_workflow_node(
-                        {
-                            "run_id": run["id"],
-                            "node_key": node_key,
-                            "state": "running",
-                            "attempt": node_counts[node_key],
-                            "input_artifacts": list(artifacts),
-                            "started_at": now_iso(),
-                        }
-                    )
-                    try:
-                        job = self._run_worker_node(run, node, input, artifacts)
-                        counters["jobs_started"] += 1
-                        if job["state"] != "succeeded":
-                            raise ValueError(f"workflow node {node_key} job {job['id']} ended as {job['state']}")
-                        output_artifacts = self._store_output_artifact(run["id"], node, job, artifacts)
-                        self.db.update_workflow_node(
-                            runtime_node["id"],
-                            state="succeeded",
-                            job_id=job["id"],
-                            output_artifacts=output_artifacts,
-                            finished_at=now_iso(),
+                runtime_node = None
+                try:
+                    with self._thread_lock:
+                        if self._stop_requested(run_id, ready, counters):
+                            return self.db.get_workflow_run(run_id) or run
+                        _check_deadline(deadline)
+                        _check_limit(policy, "max_jobs", counters["jobs_started"])
+                        _check_limit(policy, "max_iterations", counters["jobs_started"])
+                        node_key = ready.pop(0)
+                        node = node_map[node_key]
+                        node_counts = counters["node_counts"]
+                        node_counts[node_key] = int(node_counts.get(node_key) or 0) + 1
+                        _check_limit(policy, "max_attempts_per_node", node_counts[node_key] - 1)
+                        self.db.update_workflow_run(run_id, current_nodes=[node_key, *ready], counters=counters)
+                        runtime_node = self.db.create_workflow_node(
+                            {
+                                "run_id": run_id,
+                                "node_key": node_key,
+                                "state": "running",
+                                "attempt": node_counts[node_key],
+                                "input_artifacts": list(artifacts),
+                                "started_at": now_iso(),
+                            }
                         )
-                    except Exception as exc:
+                        self.db.append_workflow_event(
+                            run_id,
+                            "node_started",
+                            {"attempt": node_counts[node_key]},
+                            node_key=node_key,
+                        )
+                        job = self._submit_worker_node(run, node, input, artifacts, policy)
+                        self.db.update_workflow_node(runtime_node["id"], job_id=job["id"])
+                    job = self._wait_for_job(job["id"], run["id"], deadline)
+                    counters["jobs_started"] += 1
+                    if job["state"] != "succeeded":
+                        raise ValueError(f"workflow node {node_key} job {job['id']} ended as {job['state']}")
+                    output_artifacts = self._store_output_artifact(run_id, node, job, artifacts)
+                    self.db.update_workflow_node(
+                        runtime_node["id"],
+                        state="succeeded",
+                        job_id=job["id"],
+                        output_artifacts=output_artifacts,
+                        finished_at=now_iso(),
+                    )
+                    self.db.append_workflow_event(
+                        run_id,
+                        "node_succeeded",
+                        {"job_id": job["id"], "output_artifacts": output_artifacts},
+                        node_key=node_key,
+                    )
+                except _WorkflowCancelled:
+                    if runtime_node:
+                        self.db.update_workflow_node(runtime_node["id"], state="cancelled", finished_at=now_iso())
+                    raise
+                except Exception as exc:
+                    if runtime_node:
                         self.db.update_workflow_node(runtime_node["id"], state="failed", error=str(exc), finished_at=now_iso())
-                        raise
+                        self.db.append_workflow_event(run_id, "node_failed", {"error": str(exc)}, node_key=node_key)
+                    raise
 
-                    for edge in outgoing.get(node_key, []):
-                        condition_result = _evaluate_condition(edge.get("condition", {"type": "always"}), artifacts, counters)
-                        if condition_result["matched"]:
-                            self.db.append_workflow_edge(run["id"], edge["from"], edge["to"], condition_result)
-                            next_ready.append(edge["to"])
-                ready = next_ready
+                for edge in outgoing.get(node_key, []):
+                    condition = edge.get("condition", {"type": "always"})
+                    condition_result = _evaluate_condition(condition, artifacts, counters)
+                    if condition_result["matched"]:
+                        self.db.append_workflow_edge(run_id, edge["from"], edge["to"], condition_result)
+                        self.db.append_workflow_event(
+                            run_id,
+                            "edge_taken",
+                            {"to": edge["to"], "condition_result": condition_result},
+                            node_key=node_key,
+                        )
+                        ready.append(edge["to"])
+                    else:
+                        if condition.get("type") == "max_iterations_below":
+                            self.db.append_workflow_event(run_id, "guard_tripped", condition_result, node_key=node_key)
+                        self.db.append_workflow_event(
+                            run_id,
+                            "condition_skipped",
+                            {"to": edge["to"], "condition_result": condition_result},
+                            node_key=node_key,
+                        )
 
-            self.db.update_workflow_run(run["id"], state="succeeded", current_nodes=[], counters=counters, finished_at=now_iso())
+            if (self.db.get_workflow_run(run_id) or {}).get("state") == "cancelled":
+                return self.db.get_workflow_run(run_id) or run
+            self._finish_run(run_id, "succeeded", counters)
+        except _WorkflowCancelled:
+            return self.db.get_workflow_run(run_id) or run
+        except _WorkflowGuardTripped as exc:
+            self.db.append_workflow_event(run_id, "guard_tripped", {"error": str(exc)})
+            self._finish_run(run_id, "failed", counters, str(exc))
         except Exception as exc:
-            self.db.update_workflow_run(run["id"], state="failed", current_nodes=[], counters=counters, error=str(exc), finished_at=now_iso())
-        return self.db.get_workflow_run(run["id"]) or run
+            if (self.db.get_workflow_run(run_id) or {}).get("state") != "cancelled":
+                self._finish_run(run_id, "failed", counters, str(exc))
+        return self.db.get_workflow_run(run_id) or run
 
-    def _run_worker_node(self, run: dict[str, Any], node: dict[str, Any], input: dict[str, Any], artifacts: dict[str, Any]) -> dict[str, Any]:
+    def _stop_requested(self, run_id: str, ready: list[str], counters: dict[str, Any]) -> bool:
+        run = self.db.get_workflow_run(run_id)
+        if not run or run["state"] == "cancelled":
+            return True
+        if run["state"] != "paused":
+            return False
+        with self._thread_lock:
+            run = self.db.get_workflow_run(run_id)
+            if run and run["state"] == "paused":
+                self.db.update_workflow_run(run_id, current_nodes=ready, counters=counters)
+                if self._threads.get(run_id) is threading.current_thread():
+                    self._threads.pop(run_id, None)
+                return True
+        return False
+
+    def _finish_run(self, run_id: str, state: str, counters: dict[str, Any], error: str | None = None) -> None:
+        self.db.update_workflow_run(
+            run_id,
+            state=state,
+            current_nodes=[],
+            counters=counters,
+            error=error,
+            finished_at=now_iso(),
+        )
+        self.db.append_workflow_event(run_id, "run_finished", {"state": state, "error": error})
+
+    def _submit_worker_node(
+        self,
+        run: dict[str, Any],
+        node: dict[str, Any],
+        input: dict[str, Any],
+        artifacts: dict[str, Any],
+        policy: dict[str, Any],
+    ) -> dict[str, Any]:
         if node.get("type") != "worker":
             raise ValueError(f"unsupported workflow node type: {node.get('type')}")
         prompt = render_prompt(node.get("prompt") or "", input=input, artifacts=artifacts, run=run, node=node, job={})
@@ -186,18 +384,61 @@ class WorkflowRunner:
         for key in ("worker_id", "workspace_id", "workspace_key", "company", "model", "tags", "role"):
             if node.get(key):
                 payload[key] = node[key]
-        job = self.job_service.submit(payload)
-        return self._wait_for_job(job["id"])
+        allowed_worker_ids = policy.get("allowed_worker_ids")
+        if allowed_worker_ids is not None and (
+            not isinstance(allowed_worker_ids, list)
+            or not all(isinstance(worker_id, str) and worker_id for worker_id in allowed_worker_ids)
+        ):
+            raise ValueError("workflow policy allowed_worker_ids must be a list of ids")
+        if allowed_worker_ids:
+            allowed = set(allowed_worker_ids)
+            worker_id = node.get("worker_id")
+            if worker_id and worker_id not in allowed:
+                raise ValueError(f"workflow node {node['id']} worker_id is not allowed by policy")
+            workspace_id = node.get("workspace_id")
+            workspace = self.db.get_workspace(workspace_id) if workspace_id else None
+            if workspace and workspace["worker_id"] not in allowed:
+                raise ValueError(f"workflow node {node['id']} workspace worker is not allowed by policy")
+            decision = Router(self.db).resolve({**payload, "allowed_worker_ids": allowed_worker_ids})
+            payload["worker_id"] = decision.worker["id"]
+            if decision.workspace:
+                payload["workspace_id"] = decision.workspace["id"]
+        return self.job_service.submit(payload)
 
-    def _wait_for_job(self, job_id: str) -> dict[str, Any]:
-        deadline = time.monotonic() + self.max_wait_seconds
+    def _wait_for_job(self, job_id: str, run_id: str | None = None, deadline_at: datetime | None = None) -> dict[str, Any]:
+        wait_deadline = time.monotonic() + self.max_wait_seconds
         while True:
+            if run_id:
+                run = self.db.get_workflow_run(run_id)
+                if not run or run["state"] == "cancelled":
+                    self._cancel_job(job_id)
+                    raise _WorkflowCancelled()
+            if deadline_at is not None and datetime.now(UTC) >= deadline_at:
+                self._cancel_job(job_id)
+                raise _WorkflowGuardTripped("workflow policy max_minutes exceeded")
             job = self.db.get_job(job_id)
             if job and job["state"] in _JOB_TERMINAL_STATES:
                 return job
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= wait_deadline:
                 raise TimeoutError(f"workflow job timed out: {job_id}")
             time.sleep(self.poll_interval_seconds)
+
+    def _cancel_job(self, job_id: str) -> None:
+        cancel = getattr(self.job_service, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel(job_id)
+            except Exception:
+                pass
+
+    def _load_artifacts(self, run_id: str) -> dict[str, Any]:
+        artifacts: dict[str, Any] = {}
+        for artifact in reversed(self.db.list_artifacts(run_id=run_id, limit=1000)):
+            value: Any = artifact.get("content") or ""
+            if artifact.get("kind") == "json":
+                value = json.loads(value)
+            artifacts[artifact["key"]] = value
+        return artifacts
 
     def _store_output_artifact(self, run_id: str, node: dict[str, Any], job: dict[str, Any], artifacts: dict[str, Any]) -> list[str]:
         outputs = node.get("outputs") or []
@@ -269,7 +510,7 @@ class WorkflowTriggerService:
         self.db.append_workflow_trigger_event(trigger_id, "received", payload=payload, dedupe_key=dedupe_key)
         fired_at = now_iso()
         try:
-            run = self.runner.run_workflow(trigger["workflow_definition_id"], payload)
+            run = self.runner.start_workflow(trigger["workflow_definition_id"], payload)
             event = self.db.append_workflow_trigger_event(trigger_id, "started", payload=payload, run_id=run["id"], dedupe_key=dedupe_key)
             updated = self.db.update_workflow_trigger(
                 trigger_id,
@@ -411,7 +652,20 @@ def _outgoing_edges(edges: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
 def _check_limit(policy: dict[str, Any], key: str, count: int) -> None:
     value = policy.get(key)
     if isinstance(value, int) and value > 0 and count >= value:
-        raise ValueError(f"workflow policy {key} exceeded")
+        raise _WorkflowGuardTripped(f"workflow policy {key} exceeded")
+
+
+def _workflow_deadline(run: dict[str, Any], policy: dict[str, Any]) -> datetime | None:
+    max_minutes = policy.get("max_minutes")
+    if not isinstance(max_minutes, (int, float)) or max_minutes <= 0:
+        return None
+    started_at = run.get("started_at") or run.get("created_at")
+    return _parse_utc(started_at) + timedelta(minutes=max_minutes)
+
+
+def _check_deadline(deadline: datetime | None) -> None:
+    if deadline is not None and datetime.now(UTC) >= deadline:
+        raise _WorkflowGuardTripped("workflow policy max_minutes exceeded")
 
 
 def _has_loop_guard(policy: dict[str, Any], edges: list[dict[str, Any]] | None = None) -> bool:
@@ -495,3 +749,11 @@ def _iso_utc(value: datetime) -> str:
 
 def _parse_utc(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+class _WorkflowCancelled(Exception):
+    pass
+
+
+class _WorkflowGuardTripped(ValueError):
+    pass

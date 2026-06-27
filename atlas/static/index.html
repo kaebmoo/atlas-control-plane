@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Atlas Control Plane</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260626-workflows">
+    <link rel="stylesheet" href="/static/styles.css?v=20260627-workflow-controls">
   </head>
   <body>
     <div class="app-shell">
@@ -141,7 +141,14 @@
 
               <div class="subhead">Runs</div>
               <div id="workflowRunList" class="workflow-list short-list"></div>
+              <div id="workflowRunControls" class="item-actions">
+                <button id="pauseWorkflowRunBtn" class="secondary-btn" type="button" disabled>Pause</button>
+                <button id="resumeWorkflowRunBtn" class="secondary-btn" type="button" disabled>Resume</button>
+                <button id="cancelWorkflowRunBtn" class="danger-btn" type="button" disabled>Cancel</button>
+              </div>
               <pre id="workflowRunDetail" class="compact-pre"></pre>
+              <div class="subhead">Timeline</div>
+              <div id="workflowEventList" class="event-list short-list"></div>
 
               <div class="subhead">Triggers</div>
               <div class="form-grid">
@@ -232,6 +239,6 @@
     </div>
 
     <div id="toast" class="toast" aria-live="polite"></div>
-    <script src="/static/app.js?v=20260626-workflows" type="module"></script>
+    <script src="/static/app.js?v=20260627-workflow-controls" type="module"></script>
   </body>
 </html>

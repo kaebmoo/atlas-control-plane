@@ -20,6 +20,7 @@ def main() -> None:
             "workflow_runs",
             "workflow_nodes",
             "workflow_edges",
+            "workflow_events",
             "artifacts",
             "workflow_triggers",
             "workflow_trigger_events",
@@ -39,6 +40,11 @@ def main() -> None:
         run = db.create_workflow_run({"workflow_definition_id": definition["id"], "input": {"topic": "x"}})
         assert db.get_workflow_run(run["id"])["input"]["topic"] == "x"
         assert db.list_workflow_runs(workflow_definition_id=definition["id"])[0]["id"] == run["id"]
+        event = db.append_workflow_event(run["id"], "node_started", {"attempt": 1}, node_key="a")
+        events = db.list_workflow_events(run["id"])
+        assert [item["seq"] for item in events] == [1, 2]
+        assert [item["event_type"] for item in events] == ["created", "node_started"]
+        assert event["node_key"] == "a"
 
         trigger = db.create_workflow_trigger({"workflow_definition_id": definition["id"], "name": "Manual", "type": "manual"})
         event = db.append_workflow_trigger_event(trigger["id"], "received", {"topic": "x"}, run_id=run["id"], dedupe_key="one")

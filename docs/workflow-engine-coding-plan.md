@@ -33,22 +33,22 @@ Files:
 
 Work:
 
-- Add `workflow_events` table with append/list helpers.
-- Record run lifecycle events: created, node_started, node_succeeded,
+- [x] Add `workflow_events` table with append/list helpers.
+- [x] Record run lifecycle events: created, node_started, node_succeeded,
   node_failed, edge_taken, condition_skipped, guard_tripped, run_finished.
-- Add `GET /api/workflow-runs/{id}/events`.
-- Add run cancel/pause/resume state APIs.
-- Enforce `policy.max_minutes`.
-- Enforce `policy.allowed_worker_ids` at runtime, not only save time.
-- Show workflow event timeline and run controls in the dashboard.
+- [x] Add `GET /api/workflow-runs/{id}/events`.
+- [x] Add run cancel/pause/resume state APIs.
+- [x] Enforce `policy.max_minutes`.
+- [x] Enforce `policy.allowed_worker_ids` at runtime, not only save time.
+- [x] Show workflow event timeline and run controls in the dashboard.
 
 Checks:
 
-- run events are append-only and ordered
-- cancel blocks new nodes from starting
-- pause stops before next node
-- max_minutes fails loudly
-- disallowed worker fails before job creation
+- [x] run events are append-only and ordered
+- [x] cancel blocks new nodes from starting
+- [x] pause stops before next node
+- [x] max_minutes fails loudly
+- [x] disallowed worker fails before job creation
 
 ## Milestone 2: Joins And Fan-Out Completion
 

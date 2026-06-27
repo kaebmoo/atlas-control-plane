@@ -13,6 +13,7 @@ const state = {
   selectedWorkflowTriggerId: null,
   workflowRunDetail: null,
   workflowArtifacts: [],
+  workflowEvents: [],
   workflowTriggerEvents: [],
   eventSource: null,
   streamText: "",
@@ -123,6 +124,9 @@ async function loadAll() {
   state.workflowRuns = workflowRuns.runs || [];
   state.workflowTriggers = workflowTriggers.triggers || [];
   state.audit = audit.audit || [];
+  if (state.selectedWorkflowRunId && state.workflowRuns.some((run) => run.id === state.selectedWorkflowRunId)) {
+    await loadWorkflowRunDetail(state.selectedWorkflowRunId);
+  }
   render();
   $("#lastRefresh").textContent = `Refreshed ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
@@ -331,6 +335,20 @@ function renderWorkflowRuns() {
   }
   $("#workflowRunDetail").textContent = state.workflowRunDetail ? prettyJson(state.workflowRunDetail) : "";
   $("#workflowArtifactList").textContent = state.workflowArtifacts.length ? prettyJson(state.workflowArtifacts) : "";
+  const selectedRun = state.workflowRunDetail?.run;
+  $("#pauseWorkflowRunBtn").disabled = selectedRun?.state !== "running";
+  $("#resumeWorkflowRunBtn").disabled = selectedRun?.state !== "paused";
+  $("#cancelWorkflowRunBtn").disabled = !selectedRun || ["succeeded", "failed", "cancelled"].includes(selectedRun.state);
+  $("#workflowEventList").innerHTML = state.workflowEvents.length ? state.workflowEvents.map((event) => `
+    <article class="event-item">
+      <div class="item-title">
+        <span>${escapeHtml(event.event_type)}</span>
+        <span>${escapeHtml(formatTime(event.created_at))}</span>
+      </div>
+      <div class="item-sub">${escapeHtml(event.node_key || `run · #${event.seq}`)}</div>
+      <pre class="event-payload">${escapeHtml(JSON.stringify(event.payload || {}, null, 2))}</pre>
+    </article>
+  `).join("") : '<div class="empty">Select a run</div>';
 }
 
 function renderWorkflowTriggers() {
@@ -535,6 +553,7 @@ function newWorkflow() {
   state.selectedWorkflowTriggerId = null;
   state.workflowRunDetail = null;
   state.workflowArtifacts = [];
+  state.workflowEvents = [];
   state.workflowTriggerEvents = [];
   $("#draftResult").textContent = "";
   $("#workflowRunInput").value = "{}";
@@ -549,6 +568,7 @@ function selectWorkflow(workflowId) {
   state.selectedWorkflowTriggerId = null;
   state.workflowRunDetail = null;
   state.workflowArtifacts = [];
+  state.workflowEvents = [];
   state.workflowTriggerEvents = [];
   $("#draftResult").textContent = "";
   renderWorkflowEditor(true);
@@ -625,13 +645,26 @@ async function runWorkflow() {
 
 async function selectWorkflowRun(runId) {
   state.selectedWorkflowRunId = runId;
-  const [detail, artifacts] = await Promise.all([
+  await loadWorkflowRunDetail(runId);
+  renderWorkflowRuns();
+}
+
+async function loadWorkflowRunDetail(runId) {
+  const [detail, artifacts, events] = await Promise.all([
     api(`/api/workflow-runs/${runId}`),
     api(`/api/workflow-runs/${runId}/artifacts`),
+    api(`/api/workflow-runs/${runId}/events`),
   ]);
   state.workflowRunDetail = detail;
   state.workflowArtifacts = artifacts.artifacts || [];
-  renderWorkflowRuns();
+  state.workflowEvents = events.events || [];
+}
+
+async function controlWorkflowRun(action) {
+  if (!state.selectedWorkflowRunId) return;
+  await api(`/api/workflow-runs/${state.selectedWorkflowRunId}/${action}`, { method: "POST" });
+  await loadAll();
+  toast(`Workflow ${action} requested`);
 }
 
 async function saveTrigger() {
@@ -814,6 +847,9 @@ $("#saveWorkflowBtn").addEventListener("click", () => saveWorkflow().catch((erro
 $("#validateWorkflowBtn").addEventListener("click", () => validateWorkflow().catch((error) => toast(error.message)));
 $("#draftWorkflowBtn").addEventListener("click", () => draftWorkflow().catch((error) => toast(error.message)));
 $("#runWorkflowBtn").addEventListener("click", () => runWorkflow().catch((error) => toast(error.message)));
+$("#pauseWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("pause").catch((error) => toast(error.message)));
+$("#resumeWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("resume").catch((error) => toast(error.message)));
+$("#cancelWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("cancel").catch((error) => toast(error.message)));
 $("#saveTriggerBtn").addEventListener("click", () => saveTrigger().catch((error) => toast(error.message)));
 $("#addWorkerBtn").addEventListener("click", () => openWorkerModal());
 $("#addWorkspaceBtn").addEventListener("click", () => openWorkspaceModal());

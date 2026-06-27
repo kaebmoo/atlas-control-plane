@@ -212,6 +212,18 @@ CREATE TABLE IF NOT EXISTS workflow_edges (
   FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS workflow_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  node_key TEXT,
+  payload TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  UNIQUE(run_id, seq),
+  FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS artifacts (
   id TEXT PRIMARY KEY,
   run_id TEXT,
@@ -257,6 +269,7 @@ CREATE INDEX IF NOT EXISTS idx_workflow_definitions_updated ON workflow_definiti
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_created ON workflow_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_workflow_nodes_run ON workflow_nodes(run_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_edges_run ON workflow_edges(run_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_events_run_seq ON workflow_events(run_id, seq);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_triggers_definition ON workflow_triggers(workflow_definition_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_trigger_events_trigger ON workflow_trigger_events(trigger_id, created_at DESC);
@@ -427,6 +440,11 @@ class Database:
                 ),
             )
         self.audit("workflow_run.create", "workflow_run", run_id, {"workflow_definition_id": payload.get("workflow_definition_id")})
+        self.append_workflow_event(
+            run_id,
+            "created",
+            {"workflow_definition_id": payload.get("workflow_definition_id")},
+        )
         return self.get_workflow_run(run_id) or {}
 
     def get_workflow_run(self, run_id: str) -> dict[str, Any] | None:
@@ -535,6 +553,44 @@ class Database:
             rows = conn.execute(
                 "SELECT * FROM workflow_edges WHERE run_id = ? ORDER BY created_at ASC",
                 (run_id,),
+            ).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def append_workflow_event(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: Any = None,
+        node_key: str | None = None,
+    ) -> dict[str, Any]:
+        created_at = now_iso()
+        with self._lock, self.connect() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM workflow_events WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            seq = int(row["next_seq"])
+            conn.execute(
+                """
+                INSERT INTO workflow_events(run_id, seq, event_type, node_key, payload, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, seq, event_type, node_key, encode_json(payload or {}), created_at),
+            )
+        return {
+            "run_id": run_id,
+            "seq": seq,
+            "event_type": event_type,
+            "node_key": node_key,
+            "payload": payload or {},
+            "created_at": created_at,
+        }
+
+    def list_workflow_events(self, run_id: str, limit: int = 500) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM workflow_events WHERE run_id = ? ORDER BY seq ASC LIMIT ?",
+                (run_id, limit),
             ).fetchall()
         return [row_to_dict(row) or {} for row in rows]
 

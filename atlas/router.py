@@ -21,6 +21,15 @@ class Router:
     def resolve(self, payload: dict[str, Any]) -> RouteDecision:
         workers = self.db.list_workers()
         workspaces = self.db.list_workspaces()
+        raw_allowed_worker_ids = payload.get("allowed_worker_ids")
+        if raw_allowed_worker_ids is not None and (
+            not isinstance(raw_allowed_worker_ids, list)
+            or not all(isinstance(worker_id, str) and worker_id for worker_id in raw_allowed_worker_ids)
+        ):
+            raise ValueError("allowed_worker_ids must be a list of ids")
+        allowed_worker_ids = set(raw_allowed_worker_ids or [])
+        if allowed_worker_ids:
+            workers = [worker for worker in workers if worker["id"] in allowed_worker_ids]
         if not workers:
             raise ValueError("No workers registered")
 

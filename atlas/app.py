@@ -289,7 +289,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 workflow_definition_id = payload.get("workflow_definition_id")
                 if not workflow_definition_id:
                     raise ValueError("workflow_definition_id is required")
-                run = runtime.workflows.run_workflow(workflow_definition_id, payload.get("input") or {})
+                run = runtime.workflows.start_workflow(workflow_definition_id, payload.get("input") or {})
                 self._json({"run": run}, HTTPStatus.ACCEPTED)
                 return
 
@@ -311,6 +311,25 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 raise FileNotFoundError()
             self._json({"artifacts": runtime.db.list_artifacts(run_id=parts[2])})
             return
+
+        if len(parts) == 4 and parts[:2] == ["api", "workflow-runs"] and parts[3] == "events" and method == "GET":
+            if not runtime.db.get_workflow_run(parts[2]):
+                raise FileNotFoundError()
+            limit = int(query.get("limit", ["500"])[0])
+            self._json({"events": runtime.db.list_workflow_events(parts[2], limit)})
+            return
+
+        if len(parts) == 4 and parts[:2] == ["api", "workflow-runs"] and method == "POST":
+            action = parts[3]
+            if action == "pause":
+                self._json({"run": runtime.workflows.pause_run(parts[2])})
+                return
+            if action == "resume":
+                self._json({"run": runtime.workflows.resume_run(parts[2])}, HTTPStatus.ACCEPTED)
+                return
+            if action == "cancel":
+                self._json({"run": runtime.workflows.cancel_run(parts[2])})
+                return
 
         if parts == ["api", "workflow-triggers"]:
             if method == "GET":

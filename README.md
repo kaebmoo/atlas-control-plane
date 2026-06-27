@@ -31,8 +31,10 @@ Atlas currently supports:
 - Best-effort cancellation at the Atlas layer.
 - Single-step handoff: when job A succeeds, Atlas can automatically start job B
   on another worker and pass job A's result into job B's prompt.
-- Workflow definitions, synchronous workflow runs, artifacts, JSON artifacts,
+- Workflow definitions, workflow runs, artifacts, JSON artifacts,
   condition edges, loop guards, manual triggers, and schedule triggers.
+- Workflow run lifecycle events, pause/resume/cancel controls, and runtime
+  worker/time policy enforcement.
 - A workflow builder entry point that routes plain-language draft requests to a
   worker with role or tag `workflow_builder`.
 
@@ -515,6 +517,10 @@ Interval schedules use `{"interval_minutes": 15}`. Daily local schedules use
 - `POST /api/workflow-runs`
 - `GET /api/workflow-runs/{id}`
 - `GET /api/workflow-runs/{id}/artifacts`
+- `GET /api/workflow-runs/{id}/events`
+- `POST /api/workflow-runs/{id}/pause`
+- `POST /api/workflow-runs/{id}/resume`
+- `POST /api/workflow-runs/{id}/cancel`
 - `GET /api/workflow-triggers`
 - `POST /api/workflow-triggers`
 - `GET /api/workflow-triggers/{id}`

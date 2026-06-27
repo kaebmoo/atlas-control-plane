@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -13,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from atlas.app import AtlasHttpServer, AtlasRuntime
 from atlas.config import Config
+from atlas.db import now_iso
 
 
 def main() -> None:
@@ -80,11 +82,32 @@ def main() -> None:
             assert request(base_url, "POST", f"/api/workflows/{workflow_id}/repair")["draft"]["explanation"] == "Workflow already validates."
 
             run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id, "input": {"topic": "x"}})["run"]
-            assert run["state"] == "failed"
+            run = wait_for_api_run(base_url, run["id"], "failed")
             detail = request(base_url, "GET", f"/api/workflow-runs/{run['id']}")
             assert detail["run"]["id"] == run["id"]
             assert detail["nodes"][0]["state"] == "failed"
             assert request(base_url, "GET", f"/api/workflow-runs/{run['id']}/artifacts")["artifacts"] == []
+            run_events = request(base_url, "GET", f"/api/workflow-runs/{run['id']}/events")["events"]
+            assert [event["seq"] for event in run_events] == list(range(1, len(run_events) + 1))
+            assert {event["event_type"] for event in run_events} >= {"created", "node_started", "node_failed", "run_finished"}
+
+            paused = runtime.db.create_workflow_run(
+                {
+                    "workflow_definition_id": workflow_id,
+                    "name": "Paused API run",
+                    "state": "running",
+                    "current_nodes": ["only"],
+                    "started_at": now_iso(),
+                }
+            )
+            assert request(base_url, "POST", f"/api/workflow-runs/{paused['id']}/pause")["run"]["state"] == "paused"
+            request(base_url, "POST", f"/api/workflow-runs/{paused['id']}/resume")
+            assert wait_for_api_run(base_url, paused["id"], "failed")["state"] == "failed"
+
+            cancelled = runtime.db.create_workflow_run(
+                {"workflow_definition_id": workflow_id, "name": "Cancelled API run", "state": "running"}
+            )
+            assert request(base_url, "POST", f"/api/workflow-runs/{cancelled['id']}/cancel")["run"]["state"] == "cancelled"
 
             draft_error = request_error(base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "make a news workflow"})
             assert "workflow_builder" in draft_error["error"]
@@ -102,7 +125,7 @@ def main() -> None:
                 f"/api/workflow-triggers/{trigger['id']}/fire",
                 {"payload": {"topic": "manual"}, "dedupe_key": "once"},
             )
-            assert fired["run"]["state"] == "failed"
+            assert wait_for_api_run(base_url, fired["run"]["id"], "failed")["state"] == "failed"
             ignored = request(
                 base_url,
                 "POST",
@@ -149,6 +172,16 @@ def request_error(base_url: str, method: str, path: str, payload: dict | None = 
     except urllib.error.HTTPError as exc:
         return json.loads(exc.read().decode("utf-8"))
     raise AssertionError("expected HTTPError")
+
+
+def wait_for_api_run(base_url: str, run_id: str, state: str) -> dict:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        run = request(base_url, "GET", f"/api/workflow-runs/{run_id}")["run"]
+        if run["state"] == state:
+            return run
+        time.sleep(0.02)
+    raise AssertionError(f"workflow run {run_id} did not reach {state}")
 
 
 if __name__ == "__main__":
