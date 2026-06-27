@@ -17,11 +17,11 @@ Already implemented:
 - trigger event history
 - workflow draft/explain/repair endpoints
 - dashboard workflow editor, runs, artifacts, triggers
-- workflow lifecycle events, joins, event triggers, artifact APIs, and human
-  approvals from Milestones 1–5 below
+- workflow lifecycle events, joins, event triggers, artifact APIs, human
+  approvals, and bounded manager routing from Milestones 1–6 below
 
-Milestones 1–5 are complete. The next implementation target is Milestone 6;
-Milestones 7 and 8 remain dependent follow-up work.
+Milestones 1–6 are complete. Milestones 7 and 8 remain dependent follow-up
+work.
 
 ## Milestone 1: Hardening And Observability
 
@@ -193,27 +193,29 @@ Files:
 
 Work:
 
-- Add `manager` node type.
-- Define manager prompt context: graph, current node, artifacts, counters,
+- [x] Add `manager` node type.
+- [x] Define manager prompt context: graph, current node, artifacts, counters,
   policy.
-- Parse manager JSON contract.
-- Add `manager_selected` condition.
-- Validate manager proposals:
-  - target node exists
-  - edge from manager to target exists
-  - required artifacts exist
-  - worker/workspace allowed
-  - loop/policy guards pass
-- Record manager accepted/rejected events.
-- Show manager decisions in dashboard.
+- [x] Parse manager JSON contract.
+- [x] Add `manager_selected` condition.
+- [x] Validate manager proposals:
+  - [x] target node exists
+  - [x] edge from manager to target exists
+  - [x] required artifacts exist
+  - [x] worker/workspace allowed
+  - [x] loop/policy guards pass
+- [x] Record manager accepted/rejected events and audit entries.
+- [x] Show manager decisions in dashboard.
 
 Checks:
 
-- valid manager JSON selects an allowed node
-- invalid JSON fails node
-- forbidden worker is rejected
-- missing artifact is rejected
-- manager loop stops at policy guard
+- [x] valid manager JSON selects an allowed node once
+- [x] invalid JSON fails node with an auditable rejection
+- [x] target without a manager edge is rejected
+- [x] forbidden worker or workspace is rejected before target job creation
+- [x] missing artifact is rejected
+- [x] manager loop stops at policy guard
+- [x] duplicate target proposals do not create duplicate execution
 
 ## Milestone 7: Builder Completion
 

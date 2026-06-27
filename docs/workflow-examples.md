@@ -292,6 +292,83 @@ Use `"mode":"any"` when the first successful review may continue downstream.
 Other queued branches still run; Atlas prevents the join or its downstream node
 from being scheduled twice.
 
+## Bounded Manager-Directed Loop
+
+The manager chooses only declared outgoing targets. After research, the manager
+can select the writer with `input_artifacts: ["research"]`, or return
+`{"stop":true,"reason":"...","next":[]}`. Atlas validates the proposal before
+creating the selected target job.
+
+```json
+{
+  "start": "manager",
+  "nodes": [
+    {
+      "id": "manager",
+      "type": "manager",
+      "worker_id": "wrk_manager",
+      "schema": "manager_decision_v1",
+      "prompt": "Choose researcher, writer, or stop. Return manager_decision_v1 JSON only."
+    },
+    {
+      "id": "researcher",
+      "type": "worker",
+      "worker_id": "wrk_researcher",
+      "prompt": "Research: {input.topic}",
+      "outputs": ["research"]
+    },
+    {
+      "id": "writer",
+      "type": "worker",
+      "worker_id": "wrk_writer",
+      "prompt": "Write from: {artifact.research}",
+      "outputs": ["draft"]
+    }
+  ],
+  "edges": [
+    {
+      "from": "manager",
+      "to": "researcher",
+      "condition": {"type": "manager_selected", "target": "researcher"}
+    },
+    {
+      "from": "manager",
+      "to": "writer",
+      "condition": {"type": "manager_selected", "target": "writer"}
+    },
+    {"from": "researcher", "to": "manager", "condition": {"type": "always"}}
+  ]
+}
+```
+
+Policy:
+
+```json
+{
+  "max_jobs": 5,
+  "max_iterations": 5,
+  "max_attempts_per_node": 3,
+  "max_minutes": 30,
+  "allowed_worker_ids": ["wrk_manager", "wrk_researcher", "wrk_writer"]
+}
+```
+
+Manager response selecting the writer:
+
+```json
+{
+  "stop": false,
+  "reason": "Research artifact is ready.",
+  "next": [
+    {
+      "node": "writer",
+      "input_artifacts": ["research"],
+      "instructions": "Produce one concise draft."
+    }
+  ]
+}
+```
+
 ## Manual Trigger API
 
 ```bash

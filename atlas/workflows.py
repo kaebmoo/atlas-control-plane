@@ -13,6 +13,7 @@ from .router import Router
 
 _FIELD_RE = re.compile(r"{([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)}")
 _JOB_TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
+_MANAGER_SCHEMA = "manager_decision_v1"
 _TRIGGER_STATES = {"manual", "schedule", "webhook", "workflow_run_completed", "artifact_created", "worker_status_changed"}
 _EVENT_TRIGGER_FILTERS = {
     "workflow_run_completed": {"source_workflow_definition_id": "workflow_definition_id", "state": "state"},
@@ -32,6 +33,7 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
         raise ValueError("workflow graph nodes must be a non-empty list")
 
     node_ids = set()
+    node_map = {}
     for index, node in enumerate(nodes):
         if not isinstance(node, dict):
             raise ValueError(f"workflow node at index {index} must be an object")
@@ -41,10 +43,13 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
         if node_id in node_ids:
             raise ValueError(f"duplicate node id: {node_id}")
         node_ids.add(node_id)
+        node_map[node_id] = node
         if not isinstance(node.get("type"), str) or not node["type"].strip():
             raise ValueError(f"workflow node {node_id} requires a non-empty type")
-        if node["type"] not in {"worker", "join", "human_gate"}:
+        if node["type"] not in {"worker", "manager", "join", "human_gate"}:
             raise ValueError(f"workflow node {node_id} uses unsupported type: {node['type']}")
+        if node["type"] == "manager" and node.get("schema", _MANAGER_SCHEMA) != _MANAGER_SCHEMA:
+            raise ValueError(f"workflow manager node {node_id} schema must be {_MANAGER_SCHEMA}")
         if node["type"] == "join":
             mode = node.get("mode", "all")
             if not isinstance(mode, str) or mode not in {"all", "any"}:
@@ -61,6 +66,14 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
         raise ValueError("workflow graph edges must be a list")
     for index, edge in enumerate(edges):
         _validate_edge(edge, index, node_ids)
+        condition = edge.get("condition", {"type": "always"})
+        if node_map[edge["from"]]["type"] == "manager" and condition.get("type") != "manager_selected":
+            raise ValueError(f"workflow manager edge at index {index} requires manager_selected condition")
+        if condition.get("type") == "manager_selected":
+            if node_map[edge["from"]]["type"] != "manager":
+                raise ValueError(f"workflow edge at index {index} manager_selected requires manager source")
+            if condition.get("target") != edge["to"]:
+                raise ValueError(f"workflow edge at index {index} manager_selected target must match edge target")
 
     if _has_cycle(node_ids, edges) and not _has_loop_guard(policy or {}, edges):
         raise ValueError("workflow graph has a cycle; policy.max_iterations or max_iterations_below is required")
@@ -345,10 +358,11 @@ class WorkflowRunner:
             join_states.setdefault(node_key, state)
         deadline = _workflow_deadline(run, policy)
 
-        def schedule_outgoing(node_key: str, node: dict[str, Any]) -> None:
+        def schedule_outgoing(node_key: str, node: dict[str, Any], manager_decision: dict[str, Any] | None = None) -> None:
+            manager_selected = set((manager_decision or {}).get("selected_nodes") or [])
             for edge in outgoing.get(node_key, []):
                 condition = edge.get("condition", {"type": "always"})
-                condition_result = _evaluate_condition(condition, artifacts, counters)
+                condition_result = _evaluate_condition(condition, artifacts, counters, manager_selected)
                 if condition_result["matched"]:
                     self.db.append_workflow_edge(run_id, edge["from"], edge["to"], condition_result)
                     self.db.append_workflow_event(
@@ -391,7 +405,7 @@ class WorkflowRunner:
                             continue
                         node = node_map[node_key]
                         node_type = node.get("type")
-                        if node_type == "worker":
+                        if node_type in {"worker", "manager"}:
                             if _requires_human_after_iterations(policy, counters):
                                 ready.insert(0, node_key)
                                 approval = self.db.create_approval(
@@ -443,16 +457,31 @@ class WorkflowRunner:
                             schedule_outgoing(node_key, node)
                             self._wait_for_human(run_id, ready, counters, approval)
                             return self.db.get_workflow_run(run_id) or run
-                        if node_type == "worker":
-                            job = self._submit_worker_node(run, node, input, artifacts, policy)
+                        if node_type in {"worker", "manager"}:
+                            job = self._submit_worker_node(run, node, input, artifacts, policy, graph, counters)
                             self.db.update_workflow_node(runtime_node["id"], job_id=job["id"])
                     output_artifacts: list[str] = []
+                    manager_decision = None
                     if job:
                         job = self._wait_for_job(job["id"], run["id"], deadline)
                         counters["jobs_started"] += 1
                         if job["state"] != "succeeded":
                             raise ValueError(f"workflow node {node_key} job {job['id']} ended as {job['state']}")
-                        output_artifacts = self._store_output_artifact(run_id, node, job, artifacts)
+                        if node_type == "manager":
+                            manager_decision = self._validate_manager_decision(
+                                run,
+                                graph,
+                                node,
+                                job,
+                                input,
+                                artifacts,
+                                counters,
+                                policy,
+                                outgoing.get(node_key, []),
+                                deadline,
+                            )
+                        else:
+                            output_artifacts = self._store_output_artifact(run_id, node, job, artifacts)
                     self.db.update_workflow_node(
                         runtime_node["id"],
                         state="succeeded",
@@ -468,8 +497,11 @@ class WorkflowRunner:
                     event_payload = {"output_artifacts": output_artifacts}
                     if job:
                         event_payload["job_id"] = job["id"]
+                    if manager_decision:
+                        event_payload["manager_decision"] = manager_decision
                     else:
-                        event_payload["join"] = join_states[node_key]
+                        if node.get("type") == "join":
+                            event_payload["join"] = join_states[node_key]
                     self.db.append_workflow_event(
                         run_id,
                         "node_succeeded",
@@ -486,7 +518,7 @@ class WorkflowRunner:
                         self.db.append_workflow_event(run_id, "node_failed", {"error": str(exc)}, node_key=node_key)
                     raise
 
-                schedule_outgoing(node_key, node)
+                schedule_outgoing(node_key, node, manager_decision)
                 self.db.update_workflow_run(run_id, current_nodes=ready, counters=counters)
 
             if (self.db.get_workflow_run(run_id) or {}).get("state") == "cancelled":
@@ -564,6 +596,119 @@ class WorkflowRunner:
                 f"workflow_run_completed:{run_id}:{run['state']}",
             )
 
+    def _validate_manager_decision(
+        self,
+        run: dict[str, Any],
+        graph: dict[str, Any],
+        manager: dict[str, Any],
+        job: dict[str, Any],
+        input: dict[str, Any],
+        artifacts: dict[str, Any],
+        counters: dict[str, Any],
+        policy: dict[str, Any],
+        outgoing: list[dict[str, Any]],
+        deadline: datetime | None,
+    ) -> dict[str, Any]:
+        try:
+            proposal = _parse_manager_decision(job.get("assistant_text") or "")
+        except ValueError as exc:
+            decision = {
+                "manager": manager["id"],
+                "state": "rejected",
+                "reason": str(exc),
+                "job_id": job["id"],
+                "response": job.get("assistant_text") or "",
+                "selected_nodes": [],
+            }
+            self._record_manager_decision(run["id"], decision, counters)
+            raise ValueError(f"manager node {manager['id']} returned invalid JSON: {exc}") from exc
+
+        node_map = {node["id"]: node for node in graph["nodes"]}
+        allowed_targets = {edge["to"] for edge in outgoing}
+        selected_nodes: list[str] = []
+        item_results: list[dict[str, Any]] = []
+        errors: list[Exception] = []
+        for action in proposal["next"]:
+            target = action["node"]
+            try:
+                if target not in node_map:
+                    raise ValueError(f"target node does not exist: {target}")
+                if target not in allowed_targets:
+                    raise ValueError(f"manager has no outgoing edge to target: {target}")
+                missing = [key for key in action["input_artifacts"] if key not in artifacts]
+                if missing:
+                    raise ValueError(f"required artifacts are missing for {target}: {', '.join(missing)}")
+                _check_deadline(deadline)
+                target_node = node_map[target]
+                target_count = int((counters.get("node_counts") or {}).get(target) or 0)
+                _check_limit(policy, "max_attempts_per_node", target_count)
+                if target_node.get("type") in {"worker", "manager"}:
+                    _check_limit(policy, "max_jobs", int(counters.get("jobs_started") or 0))
+                    _check_limit(policy, "max_iterations", int(counters.get("jobs_started") or 0))
+                    self._prepare_worker_node_payload(
+                        run,
+                        target_node,
+                        input,
+                        artifacts,
+                        policy,
+                        graph,
+                        counters,
+                        consume_manager_action=False,
+                    )
+                if target in selected_nodes:
+                    item_results.append({"node": target, "accepted": False, "reason": "duplicate target ignored"})
+                    continue
+                selected_nodes.append(target)
+                item_results.append({"node": target, "accepted": True, "reason": "accepted"})
+            except ValueError as exc:
+                errors.append(exc)
+                item_results.append({"node": target, "accepted": False, "reason": str(exc)})
+
+        if errors:
+            reason = "; ".join(str(error) for error in errors)
+            for item in item_results:
+                if item["accepted"]:
+                    item.update(accepted=False, reason="not scheduled because another proposal item was rejected")
+            decision = {
+                "manager": manager["id"],
+                "state": "rejected",
+                "reason": reason,
+                "job_id": job["id"],
+                "proposal": proposal,
+                "items": item_results,
+                "selected_nodes": [],
+            }
+            self._record_manager_decision(run["id"], decision, counters)
+            guard = next((error for error in errors if isinstance(error, _WorkflowGuardTripped)), None)
+            if guard:
+                raise guard
+            raise ValueError(f"manager proposal rejected: {reason}")
+
+        actions = counters.setdefault("manager_actions", {})
+        for target in selected_nodes:
+            action = next(item for item in proposal["next"] if item["node"] == target)
+            if node_map[target].get("type") == "worker":
+                actions[target] = action
+        decision = {
+            "manager": manager["id"],
+            "state": "accepted",
+            "reason": proposal["reason"] or ("manager requested stop" if proposal["stop"] else "proposal accepted"),
+            "job_id": job["id"],
+            "proposal": proposal,
+            "items": item_results,
+            "selected_nodes": selected_nodes,
+        }
+        self._record_manager_decision(run["id"], decision, counters)
+        return decision
+
+    def _record_manager_decision(self, run_id: str, decision: dict[str, Any], counters: dict[str, Any]) -> None:
+        decisions = counters.setdefault("manager_decisions", [])
+        decisions.append(decision)
+        self.db.update_workflow_run(run_id, counters=counters)
+        event_type = f"manager_proposal_{decision['state']}"
+        self.db.append_workflow_event(run_id, event_type, decision, node_key=decision["manager"])
+        self.db.audit(f"workflow.{event_type}", "workflow_run", run_id, decision)
+
     def _submit_worker_node(
         self,
         run: dict[str, Any],
@@ -571,34 +716,47 @@ class WorkflowRunner:
         input: dict[str, Any],
         artifacts: dict[str, Any],
         policy: dict[str, Any],
+        graph: dict[str, Any],
+        counters: dict[str, Any],
     ) -> dict[str, Any]:
-        if node.get("type") != "worker":
+        return self.job_service.submit(self._prepare_worker_node_payload(run, node, input, artifacts, policy, graph, counters))
+
+    def _prepare_worker_node_payload(
+        self,
+        run: dict[str, Any],
+        node: dict[str, Any],
+        input: dict[str, Any],
+        artifacts: dict[str, Any],
+        policy: dict[str, Any],
+        graph: dict[str, Any],
+        counters: dict[str, Any],
+        consume_manager_action: bool = True,
+    ) -> dict[str, Any]:
+        if node.get("type") not in {"worker", "manager"}:
             raise ValueError(f"unsupported workflow node type: {node.get('type')}")
-        prompt = render_prompt(node.get("prompt") or "", input=input, artifacts=artifacts, run=run, node=node, job={})
+        if node.get("type") == "manager":
+            prompt = _manager_prompt(graph, node, artifacts, counters, policy)
+        else:
+            prompt = render_prompt(node.get("prompt") or "", input=input, artifacts=artifacts, run=run, node=node, job={})
+            if consume_manager_action:
+                action = (counters.get("manager_actions") or {}).pop(node["id"], None)
+                if action and action["instructions"].strip():
+                    prompt = f"{action['instructions'].strip()}\n\n{prompt}".strip()
         payload = {"prompt": prompt}
         for key in ("worker_id", "workspace_id", "workspace_key", "company", "model", "tags", "role"):
             if node.get(key):
                 payload[key] = node[key]
-        allowed_worker_ids = policy.get("allowed_worker_ids")
-        if allowed_worker_ids is not None and (
-            not isinstance(allowed_worker_ids, list)
-            or not all(isinstance(worker_id, str) and worker_id for worker_id in allowed_worker_ids)
-        ):
-            raise ValueError("workflow policy allowed_worker_ids must be a list of ids")
-        if allowed_worker_ids:
-            allowed = set(allowed_worker_ids)
-            worker_id = node.get("worker_id")
-            if worker_id and worker_id not in allowed:
-                raise ValueError(f"workflow node {node['id']} worker_id is not allowed by policy")
-            workspace_id = node.get("workspace_id")
-            workspace = self.db.get_workspace(workspace_id) if workspace_id else None
-            if workspace and workspace["worker_id"] not in allowed:
-                raise ValueError(f"workflow node {node['id']} workspace worker is not allowed by policy")
-            decision = Router(self.db).resolve({**payload, "allowed_worker_ids": allowed_worker_ids})
-            payload["worker_id"] = decision.worker["id"]
-            if decision.workspace:
-                payload["workspace_id"] = decision.workspace["id"]
-        return self.job_service.submit(payload)
+        for key in ("allowed_worker_ids", "allowed_workspace_ids"):
+            value = policy.get(key)
+            if value is not None and (not isinstance(value, list) or not all(isinstance(item, str) and item for item in value)):
+                raise ValueError(f"workflow policy {key} must be a list of ids")
+            if value:
+                payload[key] = value
+        decision = Router(self.db).resolve(payload)
+        payload["worker_id"] = decision.worker["id"]
+        if decision.workspace:
+            payload["workspace_id"] = decision.workspace["id"]
+        return payload
 
     def _wait_for_job(self, job_id: str, run_id: str | None = None, deadline_at: datetime | None = None) -> dict[str, Any]:
         wait_deadline = time.monotonic() + self.max_wait_seconds
@@ -846,6 +1004,10 @@ def _validate_condition(condition: Any, edge_index: int, node_ids: set[str]) -> 
         if not isinstance(condition.get("values"), list):
             raise ValueError(f"workflow edge at index {edge_index} artifact_in requires values list")
         return
+    if condition_type == "manager_selected":
+        if condition.get("target") not in node_ids:
+            raise ValueError(f"workflow edge at index {edge_index} manager_selected references missing target")
+        return
     if condition_type == "max_iterations_below":
         if condition.get("node") not in node_ids:
             raise ValueError(f"workflow edge at index {edge_index} max_iterations_below references missing node")
@@ -1038,7 +1200,69 @@ def _prompt_value(value: Any) -> str:
     return str(value)
 
 
-def _evaluate_condition(condition: dict[str, Any], artifacts: dict[str, Any], counters: dict[str, Any]) -> dict[str, Any]:
+def _manager_prompt(
+    graph: dict[str, Any],
+    node: dict[str, Any],
+    artifacts: dict[str, Any],
+    counters: dict[str, Any],
+    policy: dict[str, Any],
+) -> str:
+    context = {
+        "graph": graph,
+        "current_node": node,
+        "artifacts": artifacts,
+        "counters": counters,
+        "policy": policy,
+    }
+    return (
+        f"{str(node.get('prompt') or 'Choose the next workflow action.').strip()}\n\n"
+        "Return JSON only using manager_decision_v1: "
+        '{"stop":false,"reason":"...","next":[{"node":"target","input_artifacts":[],"instructions":"..."}]}.\n'
+        f"Manager context JSON:\n{json.dumps(context, ensure_ascii=True, separators=(',', ':'))}"
+    )
+
+
+def _parse_manager_decision(text: str) -> dict[str, Any]:
+    try:
+        decision = json.loads(text.strip())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"response must be one JSON object: {exc.msg}") from exc
+    if not isinstance(decision, dict):
+        raise ValueError("response must be a JSON object")
+    if not isinstance(decision.get("stop"), bool):
+        raise ValueError("manager decision stop must be boolean")
+    if not isinstance(decision.get("reason"), str):
+        raise ValueError("manager decision reason must be a string")
+    actions = decision.get("next")
+    if not isinstance(actions, list):
+        raise ValueError("manager decision next must be a list")
+    if decision["stop"] and actions:
+        raise ValueError("manager decision next must be empty when stop is true")
+    if not decision["stop"] and not actions:
+        raise ValueError("manager decision next must not be empty when stop is false")
+    normalized = []
+    for index, action in enumerate(actions):
+        if not isinstance(action, dict):
+            raise ValueError(f"manager decision next item {index} must be an object")
+        node = action.get("node")
+        if not isinstance(node, str) or not node.strip():
+            raise ValueError(f"manager decision next item {index} requires node")
+        input_artifacts = action.get("input_artifacts")
+        if not isinstance(input_artifacts, list) or not all(isinstance(key, str) and key for key in input_artifacts):
+            raise ValueError(f"manager decision next item {index} input_artifacts must be a list of keys")
+        instructions = action.get("instructions")
+        if not isinstance(instructions, str):
+            raise ValueError(f"manager decision next item {index} instructions must be a string")
+        normalized.append({"node": node, "input_artifacts": input_artifacts, "instructions": instructions})
+    return {"stop": decision["stop"], "reason": decision["reason"], "next": normalized}
+
+
+def _evaluate_condition(
+    condition: dict[str, Any],
+    artifacts: dict[str, Any],
+    counters: dict[str, Any],
+    manager_selected: set[str] | None = None,
+) -> dict[str, Any]:
     condition_type = condition.get("type") or "always"
     if condition_type == "always":
         return {"type": "always", "matched": True}
@@ -1048,6 +1272,9 @@ def _evaluate_condition(condition: dict[str, Any], artifacts: dict[str, Any], co
     if condition_type == "artifact_in":
         actual = _artifact_condition_value(condition, artifacts)
         return {"type": condition_type, "matched": actual in condition.get("values", []), "actual": actual}
+    if condition_type == "manager_selected":
+        target = condition.get("target")
+        return {"type": condition_type, "matched": target in (manager_selected or set()), "target": target}
     if condition_type == "max_iterations_below":
         count = int((counters.get("node_counts") or {}).get(condition["node"]) or 0)
         return {"type": condition_type, "matched": count < int(condition["max"]), "actual": count}

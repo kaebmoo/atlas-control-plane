@@ -240,6 +240,40 @@ Set `policy.requires_human_after_iterations` to pause once before the next
 worker job after that many worker jobs have completed. Approval clears this
 policy gate for the rest of the run; `max_iterations` remains the hard limit.
 
+### Manager Nodes
+
+Use a `manager` node when a worker should propose one or more allowed next
+nodes. Its outgoing edges must use `manager_selected`:
+
+```json
+{
+  "id": "manager",
+  "type": "manager",
+  "worker_id": "wrk_manager",
+  "schema": "manager_decision_v1",
+  "prompt": "Choose the next bounded workflow action."
+}
+```
+
+```json
+{
+  "from": "manager",
+  "to": "writer",
+  "condition": {"type": "manager_selected", "target": "writer"}
+}
+```
+
+The manager receives only the graph, current node, artifacts, counters, and
+policy. It must return one JSON object with `stop`, `reason`, and `next`; every
+next item requires `node`, `input_artifacts`, and `instructions`. Atlas prepends
+accepted instructions to the selected worker prompt, then enforces the target
+edge, artifact presence, worker/workspace allowlists, and job/attempt/time/loop
+guards before creating the target job. One invalid item rejects the whole
+proposal and fails the manager node. Duplicate targets run once.
+
+The run detail shows the proposal and accepted/rejected reason under **Manager
+decisions**. The same decision is retained in workflow events and audit.
+
 ## 9. Draft A Workflow With A Builder Worker
 
 Add a worker with role or tag `workflow_builder`.
@@ -307,3 +341,7 @@ an unbounded self-trigger loop.
 - `missing prompt variable`: the prompt uses an input/artifact path that does
   not exist.
 - `output_format=json` fails: the worker did not return valid JSON.
+- `manager node ... returned invalid JSON`: return the exact
+  `manager_decision_v1` object without Markdown fences or surrounding text.
+- `manager proposal rejected`: inspect Manager decisions for the target, edge,
+  artifact, route-policy, or guard reason.

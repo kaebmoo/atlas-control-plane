@@ -21,6 +21,9 @@ class Router:
     def resolve(self, payload: dict[str, Any]) -> RouteDecision:
         workers = self.db.list_workers()
         workspaces = self.db.list_workspaces()
+        requested_workspace_id = payload.get("workspace_id")
+        requested_worker_id = payload.get("worker_id")
+        conversation_id = payload.get("conversation_id")
         raw_allowed_worker_ids = payload.get("allowed_worker_ids")
         if raw_allowed_worker_ids is not None and (
             not isinstance(raw_allowed_worker_ids, list)
@@ -28,14 +31,27 @@ class Router:
         ):
             raise ValueError("allowed_worker_ids must be a list of ids")
         allowed_worker_ids = set(raw_allowed_worker_ids or [])
+        raw_allowed_workspace_ids = payload.get("allowed_workspace_ids")
+        if raw_allowed_workspace_ids is not None and (
+            not isinstance(raw_allowed_workspace_ids, list)
+            or not all(isinstance(workspace_id, str) and workspace_id for workspace_id in raw_allowed_workspace_ids)
+        ):
+            raise ValueError("allowed_workspace_ids must be a list of ids")
+        allowed_workspace_ids = set(raw_allowed_workspace_ids or [])
+        if requested_worker_id and allowed_worker_ids and requested_worker_id not in allowed_worker_ids:
+            raise ValueError(f"Worker is not allowed by policy: {requested_worker_id}")
+        if requested_workspace_id and allowed_workspace_ids and requested_workspace_id not in allowed_workspace_ids:
+            raise ValueError(f"Workspace is not allowed by policy: {requested_workspace_id}")
         if allowed_worker_ids:
             workers = [worker for worker in workers if worker["id"] in allowed_worker_ids]
+        if allowed_workspace_ids:
+            workspaces = [workspace for workspace in workspaces if workspace["id"] in allowed_workspace_ids]
+            workspace_worker_ids = {workspace["worker_id"] for workspace in workspaces}
+            if requested_worker_id and requested_worker_id not in workspace_worker_ids:
+                raise ValueError(f"Worker has no workspace allowed by policy: {requested_worker_id}")
+            workers = [worker for worker in workers if worker["id"] in workspace_worker_ids]
         if not workers:
             raise ValueError("No workers registered")
-
-        requested_workspace_id = payload.get("workspace_id")
-        requested_worker_id = payload.get("worker_id")
-        conversation_id = payload.get("conversation_id")
 
         if requested_workspace_id:
             workspace = self._workspace_by_id(workspaces, requested_workspace_id)

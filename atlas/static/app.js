@@ -358,6 +358,17 @@ function renderWorkflowRuns() {
       <pre class="event-payload">${escapeHtml(JSON.stringify(event.payload || {}, null, 2))}</pre>
     </article>
   `).join("") : '<div class="empty">Select a run</div>';
+  const managerDecisions = state.workflowEvents.filter((event) => event.event_type.startsWith("manager_proposal_"));
+  $("#managerDecisionList").innerHTML = managerDecisions.length ? managerDecisions.map((event) => `
+    <article class="event-item">
+      <div class="item-title">
+        <span>${escapeHtml(event.node_key || "manager")}</span>
+        <span class="status ${statusClass(event.payload?.state)}">${escapeHtml(event.payload?.state || "unknown")}</span>
+      </div>
+      <div class="item-sub">${escapeHtml(event.payload?.reason || "")}</div>
+      <pre class="event-payload">${escapeHtml(JSON.stringify(event.payload?.proposal || event.payload?.response || {}, null, 2))}</pre>
+    </article>
+  `).join("") : '<div class="empty">No manager decisions</div>';
 }
 
 function renderApprovals() {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import threading
 import time
@@ -71,6 +72,7 @@ def main() -> None:
     check_runner()
     check_joins_and_fan_out()
     check_condition_runner()
+    check_managers()
     check_human_gates()
     check_hardening()
     print("workflow validation/render check ok")
@@ -268,6 +270,165 @@ def check_condition_runner() -> None:
         assert guarded_run["state"] == "succeeded"
         assert guarded_run["counters"]["node_counts"]["reporter"] == 2
         assert "guard_tripped" in {event["event_type"] for event in db.list_workflow_events(guarded_run["id"])}
+
+
+def check_managers() -> None:
+    def proposal(node: str, artifacts: list[str] | None = None, instructions: str = "do it", duplicate: bool = False) -> str:
+        action = {"node": node, "input_artifacts": artifacts or [], "instructions": instructions}
+        return json.dumps({"stop": False, "reason": f"select {node}", "next": [action, action] if duplicate else [action]})
+
+    def manager_graph(manager_id: str, targets: list[dict], edges: list[dict], start: str = "manager") -> dict:
+        return {
+            "start": start,
+            "nodes": [{"id": "manager", "type": "manager", "worker_id": manager_id, "schema": "manager_decision_v1", "prompt": "Choose."}, *targets],
+            "edges": edges,
+        }
+
+    def selected_edge(target: str) -> dict:
+        return {"from": "manager", "to": target, "condition": {"type": "manager_selected", "target": target}}
+
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+        manager_worker = db.upsert_worker({"name": "Manager", "base_url": "http://127.0.0.1:1"})
+        allowed = db.upsert_worker({"name": "Allowed", "base_url": "http://127.0.0.1:2"})
+        forbidden = db.upsert_worker({"name": "Forbidden", "base_url": "http://127.0.0.1:3"})
+        manager_workspace = db.upsert_workspace(
+            {"worker_id": manager_worker["id"], "workspace_key": "manager", "workspace_dir": "/tmp/manager"}
+        )
+        forbidden_workspace = db.upsert_workspace(
+            {"worker_id": allowed["id"], "workspace_key": "forbidden", "workspace_dir": "/tmp/forbidden"}
+        )
+        workers = [manager_worker["id"], allowed["id"], forbidden["id"]]
+
+        valid_graph = manager_graph(
+            manager_worker["id"],
+            [
+                {"id": "seed", "type": "worker", "worker_id": allowed["id"], "prompt": "seed", "outputs": ["notes"]},
+                {"id": "work", "type": "worker", "worker_id": allowed["id"], "prompt": "work"},
+            ],
+            [{"from": "seed", "to": "manager"}, selected_edge("work")],
+            start="seed",
+        )
+        jobs = FakeJobService(
+            db,
+            manager_worker["id"],
+            lambda prompt: proposal("work", ["notes"]) if "Manager context JSON:" in prompt else f"result: {prompt}",
+        )
+        valid = WorkflowRunner(db, jobs, poll_interval_seconds=0).run_graph(
+            valid_graph,
+            {"allowed_worker_ids": workers, "max_jobs": 5, "max_iterations": 5},
+        )
+        assert valid["state"] == "succeeded"
+        assert len(jobs.prompts) == 3 and jobs.prompts[-1] == "do it\n\nwork"
+        assert [edge["to_node"] for edge in db.list_workflow_edges(valid["id"])] == ["manager", "work"]
+        context = json.loads(jobs.prompts[1].split("Manager context JSON:\n", 1)[1])
+        assert set(context) == {"graph", "current_node", "artifacts", "counters", "policy"}
+        assert context["artifacts"]["notes"] == "result: seed"
+        assert valid["counters"]["manager_decisions"][0]["state"] == "accepted"
+        assert any(event["event_type"] == "manager_proposal_accepted" for event in db.list_workflow_events(valid["id"]))
+        assert any(entry["action"] == "workflow.manager_proposal_accepted" for entry in db.list_audit())
+
+        duplicate_jobs = FakeJobService(
+            db,
+            manager_worker["id"],
+            lambda prompt: proposal("work", duplicate=True) if "Manager context JSON:" in prompt else "done",
+        )
+        duplicate = WorkflowRunner(db, duplicate_jobs, poll_interval_seconds=0).run_graph(
+            manager_graph(
+                manager_worker["id"],
+                [{"id": "work", "type": "worker", "worker_id": allowed["id"], "prompt": "work"}],
+                [selected_edge("work")],
+            )
+        )
+        assert duplicate["state"] == "succeeded" and len(duplicate_jobs.prompts) == 2
+        assert len(db.list_workflow_edges(duplicate["id"])) == 1
+        assert duplicate["counters"]["manager_decisions"][0]["items"][1]["reason"] == "duplicate target ignored"
+
+        invalid_jobs = FakeJobService(db, manager_worker["id"], lambda _prompt: "not JSON")
+        invalid = WorkflowRunner(db, invalid_jobs, poll_interval_seconds=0).run_graph(
+            manager_graph(manager_worker["id"], [], [])
+        )
+        assert invalid["state"] == "failed" and "invalid JSON" in invalid["error"]
+        assert len(invalid_jobs.prompts) == 1
+        assert any(event["event_type"] == "manager_proposal_rejected" for event in db.list_workflow_events(invalid["id"]))
+
+        no_edge_jobs = FakeJobService(db, manager_worker["id"], lambda _prompt: proposal("other"))
+        no_edge = WorkflowRunner(db, no_edge_jobs, poll_interval_seconds=0).run_graph(
+            manager_graph(
+                manager_worker["id"],
+                [
+                    {"id": "allowed", "type": "worker", "worker_id": allowed["id"], "prompt": "allowed"},
+                    {"id": "other", "type": "worker", "worker_id": allowed["id"], "prompt": "other"},
+                ],
+                [selected_edge("allowed")],
+            )
+        )
+        assert no_edge["state"] == "failed" and "no outgoing edge" in no_edge["error"]
+        assert len(no_edge_jobs.prompts) == 1
+
+        missing_target_jobs = FakeJobService(db, manager_worker["id"], lambda _prompt: proposal("missing"))
+        missing_target = WorkflowRunner(db, missing_target_jobs, poll_interval_seconds=0).run_graph(
+            manager_graph(manager_worker["id"], [], [])
+        )
+        assert missing_target["state"] == "failed" and "target node does not exist" in missing_target["error"]
+        assert len(missing_target_jobs.prompts) == 1
+
+        forbidden_jobs = FakeJobService(db, manager_worker["id"], lambda _prompt: proposal("forbidden"))
+        forbidden_run = WorkflowRunner(db, forbidden_jobs, poll_interval_seconds=0).run_graph(
+            manager_graph(
+                manager_worker["id"],
+                [{"id": "forbidden", "type": "worker", "worker_id": forbidden["id"], "prompt": "forbidden"}],
+                [selected_edge("forbidden")],
+            ),
+            {"allowed_worker_ids": [manager_worker["id"]]},
+        )
+        assert forbidden_run["state"] == "failed" and "not allowed by policy" in forbidden_run["error"]
+        assert len(forbidden_jobs.prompts) == 1
+
+        workspace_jobs = FakeJobService(db, manager_worker["id"], lambda _prompt: proposal("workspace"))
+        workspace_run = WorkflowRunner(db, workspace_jobs, poll_interval_seconds=0).run_graph(
+            manager_graph(
+                manager_worker["id"],
+                [
+                    {
+                        "id": "workspace",
+                        "type": "worker",
+                        "worker_id": allowed["id"],
+                        "workspace_id": forbidden_workspace["id"],
+                        "prompt": "workspace",
+                    }
+                ],
+                [selected_edge("workspace")],
+            ),
+            {"allowed_worker_ids": workers, "allowed_workspace_ids": [manager_workspace["id"]]},
+        )
+        assert workspace_run["state"] == "failed" and "Workspace is not allowed by policy" in workspace_run["error"]
+        assert len(workspace_jobs.prompts) == 1
+
+        artifact_jobs = FakeJobService(db, manager_worker["id"], lambda _prompt: proposal("work", ["missing"]))
+        artifact_run = WorkflowRunner(db, artifact_jobs, poll_interval_seconds=0).run_graph(
+            manager_graph(
+                manager_worker["id"],
+                [{"id": "work", "type": "worker", "worker_id": allowed["id"], "prompt": "work"}],
+                [selected_edge("work")],
+            )
+        )
+        assert artifact_run["state"] == "failed" and "required artifacts are missing" in artifact_run["error"]
+        assert len(artifact_jobs.prompts) == 1
+
+        guard_jobs = FakeJobService(db, manager_worker["id"], lambda _prompt: proposal("work"))
+        guarded = WorkflowRunner(db, guard_jobs, poll_interval_seconds=0).run_graph(
+            manager_graph(
+                manager_worker["id"],
+                [{"id": "work", "type": "worker", "worker_id": allowed["id"], "prompt": "work"}],
+                [selected_edge("work"), {"from": "work", "to": "manager"}],
+            ),
+            {"max_iterations": 1},
+        )
+        assert guarded["state"] == "failed" and "max_iterations exceeded" in guarded["error"]
+        assert len(guard_jobs.prompts) == 1
+        guard_events = {event["event_type"] for event in db.list_workflow_events(guarded["id"])}
+        assert {"manager_proposal_rejected", "guard_tripped"} <= guard_events
 
 
 def check_hardening() -> None:

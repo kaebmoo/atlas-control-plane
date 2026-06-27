@@ -39,6 +39,8 @@ Atlas currently supports:
   worker/time policy enforcement. Resume skips completed nodes.
 - Human approval gates, approval audit events, and iteration-based approval
   policy enforcement without creating worker jobs for gates.
+- Bounded manager nodes that propose next actions as strict JSON while Atlas
+  validates edges, artifacts, routes, workspaces, and execution guards.
 - A workflow builder entry point that routes plain-language draft requests to a
   worker with role or tag `workflow_builder`.
 
@@ -50,7 +52,7 @@ Research worker -> Writer worker
 Coder worker    -> Reviewer worker
 ```
 
-For manager-directed execution and remaining milestones, see
+For the remaining builder and template milestones, see
 [docs/workflow-engine-plan.md](docs/workflow-engine-plan.md).
 
 ## User Documentation
@@ -491,6 +493,31 @@ curl -sS -X POST http://127.0.0.1:8787/api/approvals/apr_xxx/reject
 Approval resumes the staged outgoing edges. Rejection fails the run. Repeated
 decisions return an error and do not schedule downstream nodes again.
 
+### Run A Manager Node
+
+A `manager` node uses a normal worker job but must return only the
+`manager_decision_v1` JSON contract:
+
+```json
+{
+  "stop": false,
+  "reason": "Research is ready for writing.",
+  "next": [
+    {
+      "node": "writer",
+      "input_artifacts": ["research"],
+      "instructions": "Write a concise draft."
+    }
+  ]
+}
+```
+
+Manager outgoing edges use `manager_selected`, with `target` equal to the edge
+destination. Atlas rejects the whole proposal before downstream scheduling if
+any target, edge, artifact, worker/workspace route, or execution guard is
+invalid. Accepted and rejected decisions are visible in run events, audit, and
+the dashboard Manager decisions panel.
+
 ### Draft A Workflow
 
 Configure a worker with role or tag `workflow_builder`, then:
@@ -753,9 +780,9 @@ python3 -B -m atlas --host 127.0.0.1 --port 8787
 
 The deterministic workflow engine now includes graph execution, conditions,
 fan-out, joins, loop/time/job guards, artifacts, lifecycle controls, event
-triggers, and human approvals. The remaining coding milestones, in order, are:
+triggers, human approvals, and bounded manager-directed routing. The remaining
+coding milestones, in order, are:
 
-- **Milestone 6**: bounded manager-directed next-step proposals
 - **Milestone 7**: builder completion for the full node/trigger surface
 - **Milestone 8**: built-in workflow templates
 

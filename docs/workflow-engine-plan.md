@@ -16,11 +16,11 @@ coordination.
 
 ## Implementation Status
 
-Coding-plan Milestones 1–5 are implemented: workflow lifecycle controls and
+Coding-plan Milestones 1–6 are implemented: workflow lifecycle controls and
 events, fan-out with `all`/`any` joins, duplicate-schedule prevention,
 webhook/internal event triggers, first-class artifact APIs, and human gates with
-approvals. Manager nodes, full builder forms, and built-in templates remain
-planned.
+approvals, plus bounded manager nodes with proposal validation and audit. Full
+builder forms and built-in templates remain planned.
 
 ## Goals
 
@@ -635,8 +635,9 @@ Atlas validates:
 - required artifacts exist
 - edge from manager to target is allowed
 
-If JSON is invalid, Atlas records a manager error and either retries or asks for
-human input.
+If JSON is invalid, Atlas records a rejected manager decision and fails the
+manager node. Atlas does not create downstream execution from a rejected
+proposal.
 
 ## AI-Assisted Workflow Builder
 
@@ -823,7 +824,7 @@ Deliver:
 - trigger event history
 - webhook trigger endpoint
 
-### Phase 3: Manager Worker (planned; next coding milestone)
+### Phase 3: Manager Worker (implemented)
 
 Deliver:
 
