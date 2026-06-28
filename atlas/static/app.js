@@ -83,6 +83,42 @@ function toast(message) {
   setTimeout(() => node.classList.remove("visible"), 2600);
 }
 
+function reflectEditorDirty() {
+  $("#view-workflows")?.classList.toggle("is-dirty", state.workflowEditorDirty);
+}
+
+function setDirty(value) {
+  state.workflowEditorDirty = value;
+  reflectEditorDirty();
+}
+
+const VIEWS = ["command", "workflows", "monitor", "jobs", "audit", "fleet"];
+
+function showView(view) {
+  if (!VIEWS.includes(view)) view = "command";
+  for (const section of document.querySelectorAll(".view")) {
+    section.classList.toggle("is-active", section.dataset.view === view);
+  }
+  for (const button of document.querySelectorAll(".nav-item")) {
+    const active = button.dataset.view === view;
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  }
+  try { localStorage.setItem("atlasView", view); } catch { /* private mode */ }
+}
+
+function setNavBadge(name, count) {
+  const badge = document.querySelector(`.nav-badge[data-badge="${name}"]`);
+  if (!badge) return;
+  badge.textContent = count > 99 ? "99+" : String(count);
+  badge.hidden = !count;
+}
+
+function renderNavBadges() {
+  setNavBadge("approvals", state.approvals.length);
+  setNavBadge("jobs", state.jobs.filter((job) => ["queued", "running", "cancel_requested"].includes(job.state)).length);
+}
+
 function tagsToText(tags) {
   if (Array.isArray(tags)) return tags.join(", ");
   return String(tags || "");
@@ -163,7 +199,7 @@ function syncPolicyJsonFromForm() {
     }
   }
   $("#workflowPolicyInput").value = prettyJson(policy);
-  state.workflowEditorDirty = true;
+  setDirty(true);
   return true;
 }
 
@@ -201,7 +237,7 @@ function addBuilderNode() {
   graph.edges ||= [];
   graph.start ||= id;
   $("#workflowGraphInput").value = prettyJson(graph);
-  state.workflowEditorDirty = true;
+  setDirty(true);
   toast(`${type} node added to JSON preview`);
 }
 
@@ -227,7 +263,7 @@ function addBuilderEdge() {
   }
   graph.edges = [...(graph.edges || []), { from, to, condition }];
   $("#workflowGraphInput").value = prettyJson(graph);
-  state.workflowEditorDirty = true;
+  setDirty(true);
   toast(`${type} edge added to JSON preview`);
 }
 
@@ -289,6 +325,7 @@ async function refreshAll({ poll = false, notice = false } = {}) {
 
 function render() {
   renderMetrics();
+  renderNavBadges();
   renderWorkers();
   renderWorkspaces();
   renderSelects();
@@ -296,6 +333,31 @@ function render() {
   renderWorkflows();
   renderAudit();
   updateComposerRoutePreview();
+  reflectEditorDirty();
+}
+
+function renderRunSummary() {
+  const summary = $("#workflowRunSummary");
+  const run = state.workflowRunDetail?.run;
+  if (!run) {
+    summary.innerHTML = "";
+    return;
+  }
+  const counters = run.counters || {};
+  const chips = [`<span class="chip">state <b>${escapeHtml(run.state)}</b></span>`];
+  if (typeof counters.jobs_started === "number") chips.push(`<span class="chip">jobs <b>${counters.jobs_started}</b></span>`);
+  if (typeof counters.budget_units_spent === "number") chips.push(`<span class="chip">budget <b>${counters.budget_units_spent}</b></span>`);
+  const completed = (counters.completed_nodes || []).length;
+  if (completed) chips.push(`<span class="chip good">nodes done <b>${completed}</b></span>`);
+  const failed = (counters.failed_nodes || []).length;
+  if (failed) chips.push(`<span class="chip bad">nodes failed <b>${failed}</b></span>`);
+  for (const [joinId, join] of Object.entries(counters.join_states || {})) {
+    const have = (join.completed_upstreams || []).length;
+    const need = join.mode === "quorum" ? (join.quorum ?? "?") : (join.upstream_nodes || []).length;
+    const cls = join.state === "succeeded" ? "good" : join.state === "failed" ? "bad" : "warn";
+    chips.push(`<span class="chip ${cls}">join ${escapeHtml(joinId)} · ${escapeHtml(join.mode)} <b>${have}/${need}</b></span>`);
+  }
+  summary.innerHTML = chips.join("");
 }
 
 function renderMetrics() {
@@ -490,7 +552,7 @@ function renderWorkerSuggestions() {
       <div class="item-title"><span>${escapeHtml(item.node_id)} · ${escapeHtml(item.role || "no role")}</span><span>${escapeHtml(item.state)}</span></div>
       <div class="item-sub">${escapeHtml(item.reason)}</div>
       <div class="item-sub">${escapeHtml(item.worker_id || "no worker")} ${item.workspace_id ? `· ${escapeHtml(item.workspace_id)}` : ""}</div>
-      ${item.worker_id || item.workspace_id ? `<button class="secondary-btn apply-worker-suggestion" type="button" data-node-id="${escapeHtml(item.node_id)}">Apply To JSON</button>` : ""}
+      ${item.worker_id || item.workspace_id ? `<button class="preview-btn apply-worker-suggestion" type="button" data-node-id="${escapeHtml(item.node_id)}">Apply To JSON</button>` : ""}
     </article>
   `).join("") : "";
 }
@@ -531,7 +593,10 @@ function renderWorkflowRuns() {
   $("#retryInterruptedRunBtn").disabled = selectedRun?.state !== "recovery_required";
   $("#cancelWorkflowRunBtn").disabled = !selectedRun || ["succeeded", "failed", "cancelled"].includes(selectedRun.state);
   const recovery = selectedRun?.counters?.recovery;
-  $("#workflowRecoveryWarning").textContent = recovery ? `${recovery.warning} Interrupted: ${(recovery.interrupted || []).map((item) => `${item.node_key}${item.job_id ? ` (${item.job_id})` : ""}`).join(", ")}` : "";
+  const recoveryEl = $("#workflowRecoveryWarning");
+  recoveryEl.textContent = recovery ? `${recovery.warning} Interrupted: ${(recovery.interrupted || []).map((item) => `${item.node_key}${item.job_id ? ` (${item.job_id})` : ""}`).join(", ")}` : "";
+  recoveryEl.hidden = !recovery;
+  renderRunSummary();
   $("#workflowEventList").innerHTML = state.workflowEvents.length ? state.workflowEvents.map((event) => `
     <article class="event-item">
       <div class="item-title">
@@ -661,6 +726,7 @@ async function submitJob() {
   $("#promptInput").value = "";
   await loadAll();
   openJobStream(data.job.id);
+  showView("jobs");
 }
 
 function openJobStream(jobId) {
@@ -787,7 +853,7 @@ function newWorkflow() {
   state.workflowEvents = [];
   state.workflowTriggerEvents = [];
   state.workerSuggestions = [];
-  state.workflowEditorDirty = false;
+  setDirty(false);
   $("#draftResult").textContent = "";
   $("#workflowExplanation").textContent = "";
   $("#workflowRunInput").value = "{}";
@@ -805,7 +871,7 @@ function selectWorkflow(workflowId) {
   state.workflowEvents = [];
   state.workflowTriggerEvents = [];
   state.workerSuggestions = [];
-  state.workflowEditorDirty = false;
+  setDirty(false);
   $("#draftResult").textContent = "";
   $("#workflowExplanation").textContent = "";
   renderWorkflowEditor(true);
@@ -824,7 +890,7 @@ async function saveWorkflow() {
   const method = workflowId ? "PUT" : "POST";
   const data = await api(path, { method, body: JSON.stringify(payload) });
   state.selectedWorkflowId = data.workflow.id;
-  state.workflowEditorDirty = false;
+  setDirty(false);
   toast("Workflow saved");
   await loadAll();
 }
@@ -874,7 +940,7 @@ async function repairWorkflow() {
     $("#triggerConfigInput").value = prettyJson(firstTrigger.config || {});
     $("#triggerEnabledInput").checked = firstTrigger.enabled !== false;
   }
-  state.workflowEditorDirty = true;
+  setDirty(true);
   toast("Validated repair copied to previews; not saved");
 }
 
@@ -900,7 +966,7 @@ function applyWorkerSuggestion(nodeId) {
   if (suggestion.worker_id) node.worker_id = suggestion.worker_id;
   if (suggestion.workspace_id) node.workspace_id = suggestion.workspace_id;
   $("#workflowGraphInput").value = prettyJson(graph);
-  state.workflowEditorDirty = true;
+  setDirty(true);
   toast("Suggestion applied to Graph JSON; not saved");
 }
 
@@ -918,7 +984,7 @@ async function draftWorkflow() {
   $("#workflowDescriptionInput").value = draft.description || "";
   $("#workflowGraphInput").value = prettyJson(draft.graph || defaultWorkflowGraph());
   $("#workflowPolicyInput").value = prettyJson(draft.policy || {});
-  state.workflowEditorDirty = true;
+  setDirty(true);
   $("#draftResult").textContent = prettyJson({
     explanation: draft.explanation || "",
     warnings: draft.warnings || [],
@@ -932,7 +998,7 @@ function applyWorkflowTemplate() {
   const template = state.workflowTemplates.find((item) => item.id === $("#workflowTemplateSelect").value);
   if (!template) throw new Error("Choose a template first");
   state.selectedWorkflowId = null;
-  state.workflowEditorDirty = true;
+  setDirty(true);
   $("#workflowNameInput").dataset.workflowId = "";
   $("#workflowNameInput").value = template.name;
   $("#workflowDescriptionInput").value = template.description || "";
@@ -956,6 +1022,7 @@ async function runWorkflow() {
   state.selectedWorkflowRunId = data.run.id;
   await loadAll();
   await selectWorkflowRun(data.run.id);
+  showView("monitor");
   toast(`Workflow ${data.run.state}`);
 }
 
@@ -1082,7 +1149,10 @@ async function fireTrigger(triggerId) {
   if (data.run?.id) state.selectedWorkflowRunId = data.run.id;
   await loadAll();
   await selectWorkflowTrigger(triggerId);
-  if (data.run?.id) await selectWorkflowRun(data.run.id);
+  if (data.run?.id) {
+    await selectWorkflowRun(data.run.id);
+    showView("monitor");
+  }
   toast(data.event?.state === "ignored" ? "Trigger ignored" : "Trigger fired");
 }
 
@@ -1310,19 +1380,32 @@ $("#workspaceSelect").addEventListener("change", () => {
 $("#workerForm").addEventListener("submit", (event) => saveWorker(event).catch((error) => toast(error.message)));
 $("#workspaceForm").addEventListener("submit", (event) => saveWorkspace(event).catch((error) => toast(error.message)));
 for (const selector of ["#workflowNameInput", "#workflowDescriptionInput", "#workflowGraphInput", "#workflowPolicyInput"]) {
-  $(selector).addEventListener("input", () => { state.workflowEditorDirty = true; });
+  $(selector).addEventListener("input", () => { setDirty(true); });
 }
 $("#workflowPolicyInput").addEventListener("input", () => { syncPolicyFormFromJson(); });
 for (const [, selector] of POLICY_FORM_FIELDS) {
   $(selector).addEventListener("input", () => { syncPolicyJsonFromForm(); });
 }
 
+for (const button of document.querySelectorAll(".nav-item")) {
+  button.addEventListener("click", () => showView(button.dataset.view));
+}
+showView(localStorage.getItem("atlasView") || "command");
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeModals();
+});
+
 loadAll()
   .then(() => {
+    document.body.classList.remove("is-loading");
     const firstActive = state.jobs.find((job) => ["running", "queued", "cancel_requested"].includes(job.state));
     if (firstActive) openJobStream(firstActive.id);
   })
-  .catch((error) => toast(error.message));
+  .catch((error) => {
+    document.body.classList.remove("is-loading");
+    toast(error.message);
+  });
 
 setInterval(() => {
   loadAll().catch(() => undefined);

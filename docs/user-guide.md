@@ -46,7 +46,7 @@ thclaws --serve --bind 127.0.0.1 --port 4318
 
 ## 3. Add Workers
 
-In the sidebar, click `Add` under Workers.
+Open the **Fleet** view from the left navigation, then click `Add worker`.
 
 Example reporter worker:
 
@@ -72,7 +72,7 @@ After saving, Atlas polls the worker. A reachable worker becomes `online`.
 
 ## 4. Add Workspaces
 
-Click `Add` under Workspaces.
+In the **Fleet** view, click `Add workspace`.
 
 ```text
 Worker:    Reporter
@@ -86,7 +86,7 @@ Tags:      local,news
 
 ## 5. Run A Simple Job
 
-In the Command panel:
+In the **Command** view:
 
 1. Enter a prompt.
 2. Choose a worker or leave routing on auto.
@@ -100,7 +100,7 @@ Use this when job B should start after job A succeeds.
 
 1. Select the reporter worker.
 2. Enter a reporter prompt.
-3. Enable `After success`.
+3. Enable `Hand off after success`.
 4. Select the anchor worker.
 5. Keep or edit the handoff prompt.
 6. Click `Run`.
@@ -109,7 +109,7 @@ Atlas creates a child job when the reporter job succeeds.
 
 ## 7. Create A Workflow
 
-In the Workflows panel:
+In the **Workflows** view:
 
 1. Click `New`.
 2. Set a name.
@@ -170,15 +170,13 @@ In `Run Input JSON`, enter:
 }
 ```
 
-Click `Run Workflow`.
-
-Inspect:
+Click `Run Workflow`. Atlas opens the **Monitor** view, where you can inspect:
 
 - Runs list
 - Run detail JSON, including `completed_nodes` and join state
-- Artifacts box, including decoded JSON content and metadata
+- Artifacts card, including decoded JSON content and metadata
 - Lifecycle timeline and pause/resume/cancel controls
-- Related jobs in the Jobs panel
+- Related jobs in the **Jobs** view
 
 ### Fan-Out And Joins
 

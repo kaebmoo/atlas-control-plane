@@ -161,7 +161,7 @@ error response ต้องชัดเจน
 - Workflow Definitions list
 - create/edit workflow JSON
 - validate button
-- plain-language draft panel เรียก /api/workflows/draft
+- plain-language draft card เรียก /api/workflows/draft
 - Workflow Runs list/detail
 - run workflow button
 - artifacts view

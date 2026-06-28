@@ -241,9 +241,9 @@ curl -H "Authorization: Bearer dev-token-1" \
 
 ## Add Workers In The Dashboard
 
-Open Atlas and use the sidebar:
+Open Atlas and go to the **Fleet** view in the left navigation:
 
-1. Click `Add` in the Workers section.
+1. Click `Add worker` in the Workers card.
 2. Fill:
 
 ```text
@@ -273,7 +273,7 @@ When editing an existing worker, leave the token blank to keep the stored token.
 
 ## Add Workspaces
 
-Click `Add` in the Workspaces section.
+In the **Fleet** view, click `Add workspace` in the Workspaces card.
 
 Example:
 
@@ -300,7 +300,7 @@ unique record as `(worker_id, workspace_key)`.
 
 ## Run A Simple Job
 
-In the Command panel:
+In the **Command** view:
 
 1. Enter a prompt.
 2. Optionally select a Worker or Workspace.
@@ -327,7 +327,7 @@ Local thClaws    role=reporter
 Local thClaws 2  role=anchor
 ```
 
-In the Command panel:
+In the **Command** view:
 
 1. Select `Local thClaws` as Worker.
 2. Prompt:
@@ -336,7 +336,7 @@ In the Command panel:
 Find one concise technology news item and summarize the facts.
 ```
 
-3. Enable `After success`.
+3. Enable `Hand off after success`.
 4. Select `Local thClaws 2` under `Send to worker`.
 5. Keep or edit the Handoff prompt:
 
@@ -527,7 +527,7 @@ Manager outgoing edges use `manager_selected`, with `target` equal to the edge
 destination. Atlas rejects the whole proposal before downstream scheduling if
 any target, edge, artifact, worker/workspace route, or execution guard is
 invalid. Accepted and rejected decisions are visible in run events, audit, and
-the dashboard Manager decisions panel.
+the **Monitor** view's Manager decisions card.
 
 ### Draft A Workflow
 
@@ -718,7 +718,7 @@ Check:
 ### Logs are long
 
 The dashboard constrains job text, event log, job list, and audit log into
-scrollable panels. SQLite still stores the full event history.
+scrollable lists within each view. SQLite still stores the full event history.
 
 ## Current Limitations
 

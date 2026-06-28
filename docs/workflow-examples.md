@@ -1,6 +1,6 @@
 # Workflow Examples
 
-Copy these into the Workflows panel.
+Copy these into the **Workflows** view.
 
 ## Reporter To Anchor
 

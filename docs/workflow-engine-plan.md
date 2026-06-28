@@ -798,10 +798,10 @@ Views:
    - add edge form
    - policy form
    - trigger form
-   - plain-language draft/repair panel
+   - plain-language draft/repair card
    - JSON preview
 
-4. **Manager Decision Panel**
+4. **Manager Decision Card**
    - manager proposals
    - accepted/rejected reason
    - policy validation failures

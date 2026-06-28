@@ -4,295 +4,443 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Atlas Control Plane</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260628-workflow-m15">
+    <link rel="stylesheet" href="/static/styles.css?v=20260628-ux2">
   </head>
-  <body>
+  <body class="is-loading">
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="loading-bar" aria-hidden="true"></div>
+
     <div class="app-shell">
-      <aside class="rail">
+      <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark">A</div>
-          <div>
+          <div class="brand-text">
             <h1>Atlas</h1>
             <span>Control Plane</span>
           </div>
         </div>
 
-        <section class="rail-section">
-          <div class="section-head">
-            <h2>Workers</h2>
-            <div class="head-actions">
-              <button id="addWorkerBtn" class="mini-btn" type="button">Add</button>
-              <button id="pollAllBtn" class="icon-btn" title="Poll all workers" type="button">↻</button>
-            </div>
-          </div>
-          <div id="workerList" class="stack-list"></div>
-        </section>
+        <nav class="nav" aria-label="Primary">
+          <button class="nav-item" type="button" data-view="command" aria-current="page">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
+            <span>Command</span>
+          </button>
+          <button class="nav-item" type="button" data-view="workflows">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h6a1 1 0 0 1 1 1V14"/></svg>
+            <span>Workflows</span>
+          </button>
+          <button class="nav-item" type="button" data-view="monitor">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg>
+            <span>Monitor</span>
+            <span class="nav-badge" data-badge="approvals" hidden></span>
+          </button>
+          <button class="nav-item" type="button" data-view="jobs">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg>
+            <span>Jobs</span>
+            <span class="nav-badge" data-badge="jobs" hidden></span>
+          </button>
+          <button class="nav-item" type="button" data-view="audit">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h11l3 3v13H5zM9 9h6M9 13h6M9 17h4"/></svg>
+            <span>Audit</span>
+          </button>
+          <button class="nav-item" type="button" data-view="fleet">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="5" rx="1"/><rect x="3" y="15" width="18" height="5" rx="1"/><path d="M7 6.5h.01M7 17.5h.01"/></svg>
+            <span>Fleet</span>
+          </button>
+        </nav>
 
-        <section class="rail-section">
-          <div class="section-head">
-            <h2>Workspaces</h2>
-            <button id="addWorkspaceBtn" class="mini-btn" type="button">Add</button>
+        <div class="sidebar-foot">
+          <div class="metrics">
+            <div><span id="metricWorkers">0</span><label>workers</label></div>
+            <div><span id="metricRunning">0</span><label>running</label></div>
+            <div><span id="metricDone">0</span><label>done</label></div>
           </div>
-          <div id="workspaceList" class="stack-list"></div>
-        </section>
+          <button id="refreshBtn" class="secondary-btn block-btn" type="button">Refresh &amp; poll</button>
+        </div>
       </aside>
 
-      <main class="main">
-        <header class="topbar">
-          <div>
-            <h2>Command</h2>
-            <p id="routePreview">No route selected</p>
-          </div>
-          <div class="topbar-right">
-            <div class="metrics">
-              <div><span id="metricWorkers">0</span><label>workers</label></div>
-              <div><span id="metricRunning">0</span><label>running</label></div>
-              <div><span id="metricDone">0</span><label>done</label></div>
+      <main class="main" id="main">
+        <!-- COMMAND -->
+        <section class="view is-active" id="view-command" data-view="command" tabindex="-1">
+          <header class="view-head">
+            <div>
+              <h2 class="view-title">Command</h2>
+              <p id="routePreview" class="view-sub">No route selected</p>
             </div>
-            <button id="refreshBtn" class="secondary-btn" type="button">Refresh</button>
-          </div>
-        </header>
+          </header>
 
-        <section class="composer">
-          <div class="composer-grid">
-            <label>
-              Prompt
-              <textarea id="promptInput" rows="6" placeholder="Ask Atlas to route work to the right thClaws worker"></textarea>
-            </label>
-            <div class="control-column">
-              <label>
-                Conversation
-                <select id="conversationSelect"></select>
+          <div class="card composer">
+            <div class="composer-grid">
+              <label class="field span-prompt">
+                Prompt
+                <textarea id="promptInput" rows="6" placeholder="Ask Atlas to route work to the right thClaws worker"></textarea>
               </label>
-              <label>
-                Worker
-                <select id="workerSelect"></select>
-              </label>
-              <label>
-                Workspace
-                <select id="workspaceSelect"></select>
-              </label>
-              <label>
-                Model
-                <input id="modelInput" placeholder="optional">
-              </label>
-              <section class="handoff-box">
-                <label class="toggle-row">
-                  <input id="handoffEnabled" type="checkbox">
-                  <span>After success</span>
-                </label>
-                <label>
-                  Send to worker
-                  <select id="handoffWorkerSelect"></select>
-                </label>
-                <label>
-                  Send to workspace
-                  <select id="handoffWorkspaceSelect"></select>
-                </label>
-                <label>
-                  Handoff prompt
-                  <textarea id="handoffPromptInput" rows="5"></textarea>
-                </label>
-              </section>
-              <button id="submitJobBtn" class="primary-btn">Run</button>
+              <div class="control-column">
+                <label class="field">Conversation<select id="conversationSelect"></select></label>
+                <label class="field">Worker<select id="workerSelect"></select></label>
+                <label class="field">Workspace<select id="workspaceSelect"></select></label>
+                <label class="field">Model<input id="modelInput" placeholder="optional"></label>
+                <section class="handoff-box">
+                  <div class="handoff-head">
+                    <label class="toggle-row">
+                      <input id="handoffEnabled" type="checkbox">
+                      <span>Hand off after success</span>
+                    </label>
+                  </div>
+                  <label class="field">Send to worker<select id="handoffWorkerSelect"></select></label>
+                  <label class="field">Send to workspace<select id="handoffWorkspaceSelect"></select></label>
+                  <label class="field">Handoff prompt<textarea id="handoffPromptInput" rows="5"></textarea></label>
+                </section>
+                <button id="submitJobBtn" class="primary-btn block-btn" type="button">Run</button>
+              </div>
             </div>
           </div>
         </section>
 
-        <section class="panel workflow-panel">
-          <div class="panel-head">
+        <!-- WORKFLOWS -->
+        <section class="view" id="view-workflows" data-view="workflows" tabindex="-1">
+          <header class="view-head">
             <div>
-              <h2>Workflows</h2>
-              <p id="workflowMeta">No workflow selected</p>
+              <h2 class="view-title">Workflows
+                <span class="dirty-badge" title="The editor has changes that are not saved">Unsaved changes</span>
+              </h2>
+              <p id="workflowMeta" class="view-sub">No workflow selected</p>
             </div>
             <div class="head-actions">
               <button id="newWorkflowBtn" class="secondary-btn" type="button">New</button>
-              <button id="validateWorkflowBtn" class="secondary-btn" type="button">Validate</button>
-              <button id="explainWorkflowBtn" class="secondary-btn" type="button">Explain</button>
-              <button id="repairWorkflowBtn" class="secondary-btn" type="button">Repair</button>
+              <button id="validateWorkflowBtn" class="preview-btn" type="button">Validate</button>
+              <button id="explainWorkflowBtn" class="preview-btn" type="button">Explain</button>
+              <button id="repairWorkflowBtn" class="preview-btn" type="button">Repair</button>
               <button id="saveWorkflowBtn" class="primary-btn" type="button">Save</button>
             </div>
-          </div>
-          <div class="workflow-grid">
-            <div class="workflow-column">
-              <div class="subhead">Definitions</div>
-              <div id="workflowList" class="workflow-list"></div>
+          </header>
+
+          <div class="two-pane">
+            <div class="pane-side">
+              <div class="card">
+                <div class="card-head"><h3>Definitions</h3></div>
+                <div id="workflowList" class="stack-list scroll-list"><div class="empty">Loading…</div></div>
+              </div>
             </div>
 
-            <div class="workflow-editor">
-              <div class="form-grid two-col">
-                <label>Template<select id="workflowTemplateSelect"><option value="">Choose a template</option></select></label>
-                <button id="applyWorkflowTemplateBtn" class="secondary-btn" type="button">Copy Template To Editor</button>
-              </div>
-              <div class="form-grid two-col">
-                <label>Name<input id="workflowNameInput" placeholder="News workflow"></label>
-                <label>Description<input id="workflowDescriptionInput" placeholder="optional"></label>
-              </div>
-              <div class="subhead">Builder Lite</div>
-              <div class="form-grid two-col">
-                <label>Node ID<input id="builderNodeIdInput" placeholder="reviewer"></label>
-                <label>Node type<select id="builderNodeTypeSelect">
-                  <option value="worker">worker</option>
-                  <option value="manager">manager</option>
-                  <option value="join">join</option>
-                  <option value="human_gate">human_gate</option>
-                </select></label>
-                <label>Role / label<input id="builderNodeRoleInput" placeholder="reviewer"></label>
-                <label>Prompt / reason<input id="builderNodePromptInput" placeholder="Review {artifact.draft}"></label>
-                <label>Outputs<input id="builderNodeOutputsInput" placeholder="review"></label>
-                <label>Budget units<input id="builderNodeBudgetInput" type="number" min="1" value="1"></label>
-                <label>Human choices<input id="builderHumanChoicesInput" placeholder="publish:Publish, revise:Revise"></label>
-                <label>Join mode<select id="builderJoinModeSelect"><option value="all">all</option><option value="any">any</option><option value="quorum">quorum</option></select></label>
-                <label>Join quorum<input id="builderJoinQuorumInput" type="number" min="1" value="2"></label>
-                <button id="builderAddNodeBtn" class="secondary-btn" type="button">Add Node</button>
-              </div>
-              <div class="form-grid two-col">
-                <label>From<input id="builderEdgeFromInput" placeholder="writer"></label>
-                <label>To<input id="builderEdgeToInput" placeholder="reviewer"></label>
-                <label>Condition<select id="builderConditionTypeSelect">
-                  <option value="always">always</option>
-                  <option value="artifact_equals">artifact_equals</option>
-                  <option value="artifact_in">artifact_in</option>
-                  <option value="manager_selected">manager_selected</option>
-                  <option value="human_selected">human_selected</option>
-                  <option value="max_iterations_below">max_iterations_below</option>
-                </select></label>
-                <label>Artifact / node<input id="builderConditionSubjectInput" placeholder="fact_check"></label>
-                <label>Path<input id="builderConditionPathInput" placeholder="verdict"></label>
-                <label>Value(s) / max<input id="builderConditionValueInput" placeholder="approved or approved,rewrite"></label>
-                <button id="builderAddEdgeBtn" class="secondary-btn" type="button">Add Edge</button>
-              </div>
-              <label>Graph JSON<textarea id="workflowGraphInput" rows="12"></textarea></label>
-              <div class="item-actions">
-                <button id="suggestWorkersBtn" class="secondary-btn" type="button">Suggest Workers</button>
-              </div>
-              <div id="workerSuggestionList" class="workflow-list short-list"></div>
-              <div class="subhead">Policy</div>
-              <div id="workflowPolicyForm" class="form-grid two-col">
-                <label>Max jobs<input id="policyMaxJobsInput" type="number" min="1"></label>
-                <label>Max iterations<input id="policyMaxIterationsInput" type="number" min="1"></label>
-                <label>Max attempts / node<input id="policyMaxAttemptsInput" type="number" min="1"></label>
-                <label>Max minutes<input id="policyMaxMinutesInput" type="number" min="1"></label>
-                <label>Human after iterations<input id="policyHumanAfterInput" type="number" min="1"></label>
-                <label>Max budget units<input id="policyMaxBudgetInput" type="number" min="1"></label>
-                <label>Allowed worker IDs<input id="policyAllowedWorkersInput" placeholder="wrk_one, wrk_two"></label>
-                <label>Allowed workspace IDs<input id="policyAllowedWorkspacesInput" placeholder="wsp_one, wsp_two"></label>
-                <label class="toggle-row"><input id="policyStopOnFailureInput" type="checkbox" checked><span>Stop on first failure</span></label>
-              </div>
-              <label>Policy JSON<textarea id="workflowPolicyInput" rows="4"></textarea></label>
-              <pre id="workflowExplanation" class="compact-pre"></pre>
-              <div class="form-grid two-col">
-                <label>Run Input JSON<textarea id="workflowRunInput" rows="4">{}</textarea></label>
-                <div class="workflow-actions">
-                  <button id="runWorkflowBtn" class="primary-btn" type="button">Run Workflow</button>
-                  <div class="subhead">Artifacts</div>
-                  <label>File key<input id="workflowFileKeyInput" placeholder="attachment"></label>
-                  <label>Upload file<input id="workflowFileInput" type="file"></label>
-                  <button id="uploadWorkflowFileBtn" class="secondary-btn" type="button">Upload File</button>
-                  <div id="workflowArtifactDownloads" class="workflow-list short-list"></div>
-                  <pre id="workflowArtifactList" class="compact-pre"></pre>
+            <div class="pane-main workflow-editor">
+              <div class="card">
+                <div class="card-head"><h3>Start from a template</h3></div>
+                <div class="row-2">
+                  <label class="field">Template<select id="workflowTemplateSelect"><option value="">Choose a template</option></select></label>
+                  <button id="applyWorkflowTemplateBtn" class="preview-btn" type="button">Copy template to editor</button>
                 </div>
               </div>
-            </div>
 
-            <div class="workflow-column">
-              <div class="subhead">Draft</div>
-              <label>Prompt<textarea id="draftPromptInput" rows="4"></textarea></label>
-              <button id="draftWorkflowBtn" class="secondary-btn" type="button">Draft</button>
-              <pre id="draftResult" class="compact-pre"></pre>
+              <div class="card">
+                <div class="card-head"><h3>Definition</h3></div>
+                <div class="row-2">
+                  <label class="field">Name<input id="workflowNameInput" placeholder="News workflow"></label>
+                  <label class="field">Description<input id="workflowDescriptionInput" placeholder="optional"></label>
+                </div>
 
-              <div class="subhead">Runs</div>
-              <div id="workflowRunList" class="workflow-list short-list"></div>
-              <div id="workflowRunControls" class="item-actions">
-                <button id="pauseWorkflowRunBtn" class="secondary-btn" type="button" disabled>Pause</button>
-                <button id="resumeWorkflowRunBtn" class="secondary-btn" type="button" disabled>Resume</button>
-                <button id="retryInterruptedRunBtn" class="danger-btn" type="button" disabled>Retry Interrupted</button>
-                <button id="cancelWorkflowRunBtn" class="danger-btn" type="button" disabled>Cancel</button>
+                <div class="field code-field">
+                  <div class="code-label">
+                    <span>Graph JSON</span>
+                    <span class="tag tag-edit">Raw · editable</span>
+                  </div>
+                  <textarea id="workflowGraphInput" class="code-area" rows="14" spellcheck="false" wrap="off"></textarea>
+                </div>
+
+                <details class="builder">
+                  <summary>Builder Lite — add nodes &amp; edges to the graph above</summary>
+                  <div class="builder-body">
+                    <p class="hint"><span class="tag tag-preview">Preview only</span> Builder actions edit the Graph JSON; nothing is saved until you press Save.</p>
+                    <div class="field-group">
+                      <div class="field-group-title">Node</div>
+                      <div class="row-3">
+                        <label class="field">Node ID<input id="builderNodeIdInput" placeholder="reviewer"></label>
+                        <label class="field">Node type<select id="builderNodeTypeSelect">
+                          <option value="worker">worker</option>
+                          <option value="manager">manager</option>
+                          <option value="join">join</option>
+                          <option value="human_gate">human_gate</option>
+                        </select></label>
+                        <label class="field">Role / label<input id="builderNodeRoleInput" placeholder="reviewer"></label>
+                        <label class="field">Prompt / reason<input id="builderNodePromptInput" placeholder="Review {artifact.draft}"></label>
+                        <label class="field">Outputs<input id="builderNodeOutputsInput" placeholder="review"></label>
+                        <label class="field">Budget units<input id="builderNodeBudgetInput" type="number" min="1" value="1"></label>
+                        <label class="field">Human choices<input id="builderHumanChoicesInput" placeholder="publish:Publish, revise:Revise"></label>
+                        <label class="field">Join mode<select id="builderJoinModeSelect"><option value="all">all</option><option value="any">any</option><option value="quorum">quorum</option></select></label>
+                        <label class="field">Join quorum<input id="builderJoinQuorumInput" type="number" min="1" value="2"></label>
+                      </div>
+                      <button id="builderAddNodeBtn" class="preview-btn" type="button">Add node</button>
+                    </div>
+                    <div class="field-group">
+                      <div class="field-group-title">Edge</div>
+                      <div class="row-3">
+                        <label class="field">From<input id="builderEdgeFromInput" placeholder="writer"></label>
+                        <label class="field">To<input id="builderEdgeToInput" placeholder="reviewer"></label>
+                        <label class="field">Condition<select id="builderConditionTypeSelect">
+                          <option value="always">always</option>
+                          <option value="artifact_equals">artifact_equals</option>
+                          <option value="artifact_in">artifact_in</option>
+                          <option value="manager_selected">manager_selected</option>
+                          <option value="human_selected">human_selected</option>
+                          <option value="max_iterations_below">max_iterations_below</option>
+                        </select></label>
+                        <label class="field">Artifact / node<input id="builderConditionSubjectInput" placeholder="fact_check"></label>
+                        <label class="field">Path<input id="builderConditionPathInput" placeholder="verdict"></label>
+                        <label class="field">Value(s) / max<input id="builderConditionValueInput" placeholder="approved or approved,rewrite"></label>
+                      </div>
+                      <button id="builderAddEdgeBtn" class="preview-btn" type="button">Add edge</button>
+                    </div>
+                  </div>
+                </details>
+
+                <div class="field-group">
+                  <div class="field-group-title">Worker resolution</div>
+                  <div class="item-actions">
+                    <button id="suggestWorkersBtn" class="preview-btn" type="button">Suggest workers</button>
+                  </div>
+                  <div id="workerSuggestionList" class="stack-list short-list"></div>
+                </div>
               </div>
-              <div id="workflowRecoveryWarning" class="item-sub"></div>
-              <div class="subhead">Approvals</div>
-              <div id="approvalList" class="workflow-list short-list"></div>
-              <pre id="workflowRunDetail" class="compact-pre"></pre>
-              <div class="subhead">Manager decisions</div>
-              <div id="managerDecisionList" class="event-list short-list"></div>
-              <div class="subhead">Timeline</div>
-              <div id="workflowEventList" class="event-list short-list"></div>
 
-              <div class="subhead">Triggers</div>
-              <div class="form-grid">
-                <label>Quick trigger<select id="triggerQuickTypeSelect">
-                  <option value="manual">manual</option>
-                  <option value="webhook">webhook</option>
-                  <option value="interval">schedule interval</option>
-                  <option value="daily">schedule daily</option>
-                </select></label>
-                <label>Quick value<input id="triggerQuickValueInput" placeholder="15 or 09:30"></label>
-                <button id="applyTriggerQuickBtn" class="secondary-btn" type="button">Apply To JSON</button>
-                <label>Name<input id="triggerNameInput" placeholder="Manual"></label>
-                <label>Type<select id="triggerTypeSelect">
-                  <option value="manual">manual</option>
-                  <option value="schedule">schedule</option>
-                  <option value="webhook">webhook</option>
-                  <option value="workflow_run_completed">workflow_run_completed</option>
-                  <option value="artifact_created">artifact_created</option>
-                  <option value="worker_status_changed">worker_status_changed</option>
-                </select></label>
-                <label>Config JSON<textarea id="triggerConfigInput" rows="3">{}</textarea></label>
-                <label class="toggle-row"><input id="triggerEnabledInput" type="checkbox" checked><span>Enabled</span></label>
-                <button id="saveTriggerBtn" class="secondary-btn" type="button">Create Trigger</button>
-                <button id="suggestTriggersBtn" class="secondary-btn" type="button">Suggest Triggers</button>
+              <div class="card">
+                <div class="card-head"><h3>Policy</h3></div>
+                <div id="workflowPolicyForm" class="row-3">
+                  <label class="field">Max jobs<input id="policyMaxJobsInput" type="number" min="1"></label>
+                  <label class="field">Max iterations<input id="policyMaxIterationsInput" type="number" min="1"></label>
+                  <label class="field">Max attempts / node<input id="policyMaxAttemptsInput" type="number" min="1"></label>
+                  <label class="field">Max minutes<input id="policyMaxMinutesInput" type="number" min="1"></label>
+                  <label class="field">Human after iterations<input id="policyHumanAfterInput" type="number" min="1"></label>
+                  <label class="field">Max budget units<input id="policyMaxBudgetInput" type="number" min="1"></label>
+                  <label class="field">Allowed worker IDs<input id="policyAllowedWorkersInput" placeholder="wrk_one, wrk_two"></label>
+                  <label class="field">Allowed workspace IDs<input id="policyAllowedWorkspacesInput" placeholder="wsp_one, wsp_two"></label>
+                  <div class="field toggle-field"><span>Stop on first failure</span>
+                    <label class="switch"><input id="policyStopOnFailureInput" type="checkbox" checked><span class="slider"></span></label>
+                  </div>
+                </div>
+                <div class="field code-field">
+                  <div class="code-label">
+                    <span>Policy JSON</span>
+                    <span class="tag tag-edit">Raw · stays in sync</span>
+                  </div>
+                  <textarea id="workflowPolicyInput" class="code-area" rows="5" spellcheck="false" wrap="off"></textarea>
+                </div>
               </div>
-              <div id="triggerList" class="workflow-list short-list"></div>
-              <pre id="triggerEventList" class="compact-pre"></pre>
+
+              <div class="card">
+                <div class="card-head"><h3>Explanation</h3><span class="tag tag-preview">Display only</span></div>
+                <pre id="workflowExplanation" class="code-block"></pre>
+              </div>
+
+              <div class="card">
+                <div class="card-head"><h3>Run</h3></div>
+                <label class="field code-field">
+                  <span>Run input JSON</span>
+                  <textarea id="workflowRunInput" class="code-area" rows="4" spellcheck="false" wrap="off">{}</textarea>
+                </label>
+                <button id="runWorkflowBtn" class="primary-btn block-btn" type="button">Run workflow</button>
+              </div>
+
+              <div class="card">
+                <div class="card-head"><h3>Draft from plain language</h3><span class="tag tag-preview">Preview only</span></div>
+                <label class="field">Prompt<textarea id="draftPromptInput" rows="4" placeholder="Describe the workflow in plain language"></textarea></label>
+                <button id="draftWorkflowBtn" class="preview-btn" type="button">Draft</button>
+                <pre id="draftResult" class="code-block"></pre>
+              </div>
             </div>
           </div>
         </section>
 
-        <section class="split">
-          <div class="panel jobs-panel">
-            <div class="panel-head">
-              <h2>Jobs</h2>
-              <span id="lastRefresh" class="panel-note">Not refreshed yet</span>
+        <!-- MONITOR -->
+        <section class="view" id="view-monitor" data-view="monitor" tabindex="-1">
+          <header class="view-head">
+            <div>
+              <h2 class="view-title">Monitor</h2>
+              <p class="view-sub">Runs, approvals, and triggers for the selected workflow</p>
             </div>
-            <div id="jobList" class="job-list"></div>
-          </div>
+          </header>
 
-          <div class="panel stream-panel">
-            <div class="panel-head">
-              <div>
-                <h2 id="streamTitle">Live Stream</h2>
-                <p id="streamMeta">Select a job</p>
+          <div class="two-pane">
+            <div class="pane-side">
+              <div class="card">
+                <div class="card-head"><h3>Runs</h3></div>
+                <div id="workflowRunList" class="stack-list scroll-list"><div class="empty">Loading…</div></div>
               </div>
-              <button id="cancelJobBtn" class="danger-btn" disabled>Cancel</button>
             </div>
-            <pre id="streamOutput" class="stream-output"></pre>
-            <div id="eventList" class="event-list"></div>
+
+            <div class="pane-main">
+              <div class="card">
+                <div class="card-head"><h3>Run detail</h3></div>
+                <div id="workflowRecoveryWarning" class="alert alert-warn" hidden></div>
+                <div id="workflowRunSummary" class="chip-row"></div>
+                <div id="workflowRunControls" class="item-actions">
+                  <button id="pauseWorkflowRunBtn" class="secondary-btn" type="button" disabled>Pause</button>
+                  <button id="resumeWorkflowRunBtn" class="secondary-btn" type="button" disabled>Resume</button>
+                  <button id="retryInterruptedRunBtn" class="danger-btn" type="button" disabled>Retry interrupted</button>
+                  <button id="cancelWorkflowRunBtn" class="danger-btn" type="button" disabled>Cancel</button>
+                </div>
+                <pre id="workflowRunDetail" class="code-block"></pre>
+              </div>
+
+              <div class="card">
+                <div class="card-head"><h3>Artifacts</h3></div>
+                <div id="workflowArtifactDownloads" class="stack-list short-list"></div>
+                <pre id="workflowArtifactList" class="code-block"></pre>
+                <div class="field-group">
+                  <div class="field-group-title">Upload to selected run</div>
+                  <div class="row-2">
+                    <label class="field">File key<input id="workflowFileKeyInput" placeholder="attachment"></label>
+                    <label class="field">File<input id="workflowFileInput" type="file"></label>
+                  </div>
+                  <button id="uploadWorkflowFileBtn" class="secondary-btn" type="button">Upload file</button>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-head"><h3>Approvals</h3></div>
+                <div id="approvalList" class="stack-list"><div class="empty">No pending approvals</div></div>
+              </div>
+
+              <div class="card">
+                <div class="card-head"><h3>Manager decisions</h3></div>
+                <div id="managerDecisionList" class="stack-list short-list"></div>
+              </div>
+
+              <div class="card">
+                <div class="card-head"><h3>Timeline</h3></div>
+                <div id="workflowEventList" class="stack-list scroll-list"></div>
+              </div>
+
+              <div class="card">
+                <div class="card-head"><h3>Triggers</h3></div>
+                <div class="field-group">
+                  <div class="row-3">
+                    <label class="field">Quick trigger<select id="triggerQuickTypeSelect">
+                      <option value="manual">manual</option>
+                      <option value="webhook">webhook</option>
+                      <option value="interval">schedule interval</option>
+                      <option value="daily">schedule daily</option>
+                    </select></label>
+                    <label class="field">Quick value<input id="triggerQuickValueInput" placeholder="15 or 09:30"></label>
+                    <button id="applyTriggerQuickBtn" class="preview-btn" type="button">Apply to JSON</button>
+                  </div>
+                  <div class="row-3">
+                    <label class="field">Name<input id="triggerNameInput" placeholder="Manual"></label>
+                    <label class="field">Type<select id="triggerTypeSelect">
+                      <option value="manual">manual</option>
+                      <option value="schedule">schedule</option>
+                      <option value="webhook">webhook</option>
+                      <option value="workflow_run_completed">workflow_run_completed</option>
+                      <option value="artifact_created">artifact_created</option>
+                      <option value="worker_status_changed">worker_status_changed</option>
+                    </select></label>
+                    <div class="field toggle-field"><span>Enabled</span>
+                      <label class="switch"><input id="triggerEnabledInput" type="checkbox" checked><span class="slider"></span></label>
+                    </div>
+                  </div>
+                  <label class="field code-field"><span>Config JSON</span><textarea id="triggerConfigInput" class="code-area" rows="3" spellcheck="false" wrap="off">{}</textarea></label>
+                  <div class="item-actions">
+                    <button id="saveTriggerBtn" class="secondary-btn" type="button">Create trigger</button>
+                    <button id="suggestTriggersBtn" class="preview-btn" type="button">Suggest triggers</button>
+                  </div>
+                </div>
+                <div id="triggerList" class="stack-list short-list"></div>
+                <pre id="triggerEventList" class="code-block"></pre>
+              </div>
+            </div>
           </div>
         </section>
 
-        <section class="panel audit-panel">
-          <div class="panel-head">
-            <h2>Audit</h2>
-            <span class="panel-note">Latest 30</span>
+        <!-- JOBS -->
+        <section class="view" id="view-jobs" data-view="jobs" tabindex="-1">
+          <header class="view-head">
+            <div>
+              <h2 class="view-title">Jobs</h2>
+              <p id="lastRefresh" class="view-sub">Not refreshed yet</p>
+            </div>
+          </header>
+
+          <div class="two-pane">
+            <div class="pane-side">
+              <div class="card">
+                <div class="card-head"><h3>Jobs</h3></div>
+                <div id="jobList" class="stack-list scroll-list"><div class="empty">Loading…</div></div>
+              </div>
+            </div>
+            <div class="pane-main">
+              <div class="card stream-card">
+                <div class="card-head">
+                  <div>
+                    <h3 id="streamTitle">Live stream</h3>
+                    <p id="streamMeta" class="card-sub">Select a job</p>
+                  </div>
+                  <button id="cancelJobBtn" class="danger-btn" type="button" disabled>Cancel</button>
+                </div>
+                <pre id="streamOutput" class="stream-output"></pre>
+                <div class="card-head"><h3>Events</h3></div>
+                <div id="eventList" class="stack-list scroll-list"></div>
+              </div>
+            </div>
           </div>
-          <div id="auditList" class="audit-list"></div>
+        </section>
+
+        <!-- AUDIT -->
+        <section class="view" id="view-audit" data-view="audit" tabindex="-1">
+          <header class="view-head">
+            <div>
+              <h2 class="view-title">Audit</h2>
+              <p class="view-sub">Latest 30 control-plane actions</p>
+            </div>
+          </header>
+          <div class="card">
+            <div id="auditList" class="stack-list scroll-list tall"><div class="empty">Loading…</div></div>
+          </div>
+        </section>
+
+        <!-- FLEET -->
+        <section class="view" id="view-fleet" data-view="fleet" tabindex="-1">
+          <header class="view-head">
+            <div>
+              <h2 class="view-title">Fleet</h2>
+              <p class="view-sub">Workers and workspaces</p>
+            </div>
+          </header>
+
+          <div class="two-col">
+            <div class="card">
+              <div class="card-head">
+                <h3>Workers</h3>
+                <div class="head-actions">
+                  <button id="addWorkerBtn" class="primary-btn" type="button">Add worker</button>
+                  <button id="pollAllBtn" class="icon-btn" title="Poll all workers" aria-label="Poll all workers" type="button">↻</button>
+                </div>
+              </div>
+              <div id="workerList" class="stack-list"><div class="empty">Loading…</div></div>
+            </div>
+            <div class="card">
+              <div class="card-head">
+                <h3>Workspaces</h3>
+                <button id="addWorkspaceBtn" class="primary-btn" type="button">Add workspace</button>
+              </div>
+              <div id="workspaceList" class="stack-list"><div class="empty">Loading…</div></div>
+            </div>
+          </div>
         </section>
       </main>
     </div>
 
     <div id="workerModal" class="modal-backdrop" hidden>
-      <form id="workerForm" class="modal" autocomplete="off">
+      <form id="workerForm" class="modal" autocomplete="off" role="dialog" aria-modal="true" aria-labelledby="workerFormTitle">
         <div class="modal-head">
           <h2 id="workerFormTitle">Add Worker</h2>
-          <button class="icon-btn close-modal" type="button" data-close-modal>×</button>
+          <button class="icon-btn close-modal" type="button" data-close-modal aria-label="Close">×</button>
         </div>
         <input name="id" type="hidden">
         <div class="form-grid">
-          <label>Name<input name="name" placeholder="Company Mac"></label>
-          <label>Base URL<input name="base_url" placeholder="http://127.0.0.1:4317" required></label>
-          <label>Token<input name="token" type="password" placeholder="Leave blank to keep existing token"></label>
-          <label>Role<input name="role" placeholder="personal, company-a, finance"></label>
-          <label>Tags<input name="tags" placeholder="personal, coding, finance"></label>
+          <label class="field">Name<input name="name" placeholder="Company Mac"></label>
+          <label class="field">Base URL<input name="base_url" placeholder="http://127.0.0.1:4317" required></label>
+          <label class="field">Token<input name="token" type="password" placeholder="Leave blank to keep existing token"></label>
+          <label class="field">Role<input name="role" placeholder="personal, company-a, finance"></label>
+          <label class="field">Tags<input name="tags" placeholder="personal, coding, finance"></label>
         </div>
         <div class="form-actions">
           <button class="secondary-btn" type="button" data-close-modal>Cancel</button>
@@ -302,18 +450,18 @@
     </div>
 
     <div id="workspaceModal" class="modal-backdrop" hidden>
-      <form id="workspaceForm" class="modal" autocomplete="off">
+      <form id="workspaceForm" class="modal" autocomplete="off" role="dialog" aria-modal="true" aria-labelledby="workspaceFormTitle">
         <div class="modal-head">
           <h2 id="workspaceFormTitle">Add Workspace</h2>
-          <button class="icon-btn close-modal" type="button" data-close-modal>×</button>
+          <button class="icon-btn close-modal" type="button" data-close-modal aria-label="Close">×</button>
         </div>
         <input name="id" type="hidden">
         <div class="form-grid">
-          <label>Worker<select name="worker_id" required></select></label>
-          <label>Key<input name="workspace_key" placeholder="company-a" required></label>
-          <label>Directory<input name="workspace_dir" placeholder="/Users/me/project" required></label>
-          <label>Company<input name="company" placeholder="Company A"></label>
-          <label>Tags<input name="tags" placeholder="backend, ops"></label>
+          <label class="field">Worker<select name="worker_id" required></select></label>
+          <label class="field">Key<input name="workspace_key" placeholder="company-a" required></label>
+          <label class="field">Directory<input name="workspace_dir" placeholder="/Users/me/project" required></label>
+          <label class="field">Company<input name="company" placeholder="Company A"></label>
+          <label class="field">Tags<input name="tags" placeholder="backend, ops"></label>
         </div>
         <div class="form-actions">
           <button class="secondary-btn" type="button" data-close-modal>Cancel</button>
@@ -322,7 +470,7 @@
       </form>
     </div>
 
-    <div id="toast" class="toast" aria-live="polite"></div>
-    <script src="/static/app.js?v=20260628-workflow-m15" type="module"></script>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/static/app.js?v=20260628-ux2" type="module"></script>
   </body>
 </html>

@@ -40,12 +40,12 @@ http://127.0.0.1:8787
 1. Add worker `Reporter`.
 2. Add worker `Anchor`.
 3. Poll both workers.
-4. Show status and route metadata in the sidebar.
+4. Open the **Fleet** view to show worker status and inventory.
 
 Expected result:
 
 - workers show `online`
-- dashboard has worker and workspace inventory
+- the Fleet view lists worker and workspace inventory
 
 ## Demo 2: Routed Job
 
@@ -64,7 +64,7 @@ Steps:
 Expected result:
 
 - job moves through queued/running/succeeded
-- output streams into the Live Stream panel
+- output streams into the live stream in the **Jobs** view
 
 ## Demo 3: Handoff
 
@@ -72,7 +72,7 @@ Steps:
 
 1. Select reporter worker.
 2. Enter the reporter prompt from Demo 2.
-3. Enable `After success`.
+3. Enable `Hand off after success`.
 4. Select anchor worker.
 5. Use this handoff prompt:
 
@@ -96,7 +96,7 @@ Expected result:
 
 Steps:
 
-1. In Workflows, click `New`.
+1. In the **Workflows** view, click `New`.
 2. Name it `News Desk`.
 3. Paste the Reporter To Anchor graph from `docs/workflow-examples.md`.
 4. Paste the policy from the same example.
@@ -110,7 +110,7 @@ Steps:
 }
 ```
 
-8. Click `Run Workflow`.
+8. Click `Run Workflow`. Atlas opens the **Monitor** view.
 
 Expected result:
 
@@ -124,8 +124,8 @@ Expected result:
 
 Steps:
 
-1. Select the `News Desk` workflow.
-2. Create a trigger:
+1. Select the `News Desk` workflow, then open the **Monitor** view.
+2. In the Triggers card, create a trigger:
 
 ```text
 Name: Manual news run
@@ -161,14 +161,14 @@ curl -sS -X POST http://127.0.0.1:8787/api/artifacts \
   -d '{"run_id":"wfr_xxx","key":"demo_note","kind":"json","content":{"ok":true}}'
 ```
 
-Select the run again. The Artifacts panel shows decoded content and metadata.
+Select the run again in the **Monitor** view. The Artifacts card shows decoded content and metadata.
 
 ## Demo 7: Human Approval Gate
 
 1. Create a workflow from `Human Gate Before Publish` in
    `docs/workflow-examples.md`.
 2. Run it with `{"topic":"technology news"}`.
-3. After the reporter succeeds, select the run.
+3. After the reporter succeeds, select the run in the **Monitor** view.
 4. Confirm the run is `waiting_for_human`, the approval is pending, and no
    anchor job exists yet.
 5. Click `Approve`.
