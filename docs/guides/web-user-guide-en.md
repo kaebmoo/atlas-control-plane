@@ -49,6 +49,14 @@ reloads data every 5 seconds and polls workers every 60 seconds.
 For first-time setup, use **Fleet → Command → Jobs**. Use **Workflows → Monitor**
 for multi-step orchestration.
 
+```mermaid
+flowchart TD
+  fleet["Fleet — register workers & workspaces"]
+  fleet --> q{"Single job or multi-step?"}
+  q -->|"single job / handoff"| cmd["Command — submit"] --> jobs["Jobs — watch output & events"]
+  q -->|"multi-step orchestration"| wf["Workflows — build, validate, run"] --> mon["Monitor — runs, approvals, artifacts, triggers"]
+```
+
 ## 3. Fleet: workers and workspaces
 
 ### Add a worker
@@ -113,6 +121,17 @@ The route preview under the Command heading reflects precedence:
 4. Full auto-routing considers online state, workspace key, company, tags, role,
    and prompt hints.
 
+```mermaid
+flowchart TD
+  start(["Job submitted"]) --> ws{"Explicit workspace?"}
+  ws -->|yes| useWs["Use that workspace"]
+  ws -->|no| wk{"Explicit worker?"}
+  wk -->|yes| useWk["Use that worker"]
+  wk -->|no| conv{"Existing conversation binding?"}
+  conv -->|yes| useConv["Reuse bound session"]
+  conv -->|no| auto["Auto-route by online state, workspace key,<br/>company, tags, role, prompt hints"]
+```
+
 Click **Run**. Atlas creates the job, clears Prompt, opens **Jobs**, and selects
 the new job.
 
@@ -143,6 +162,22 @@ events.
 **Cancel** is available while a job is active. Cancellation is best effort at
 the Atlas layer: the job first becomes `cancel_requested`, and the worker may
 already have performed side effects.
+
+```mermaid
+stateDiagram-v2
+  [*] --> queued
+  queued --> running
+  running --> succeeded
+  running --> failed
+  queued --> cancel_requested: Cancel
+  running --> cancel_requested: Cancel
+  cancel_requested --> cancelled
+  cancel_requested --> succeeded: best effort
+  cancel_requested --> failed: best effort
+  succeeded --> [*]
+  failed --> [*]
+  cancelled --> [*]
+```
 
 | State | Meaning |
 | --- | --- |
@@ -209,11 +244,17 @@ Enter **Name**, optional **Description**, and **Graph JSON**. A graph needs
 | `join` | Joins fan-out with `all`, `any`, or `quorum`; creates no job |
 | `human_gate` | Waits for approval or a choice; creates no job |
 
+Join modes: `all` waits for **every** upstream branch, `any` continues after the
+**first** branch finishes, and `quorum` continues once **`quorum`** branches
+finish.
+
 UI-supported conditions are `always`, `artifact_equals`, `artifact_in`,
 `manager_selected`, `human_selected`, and `max_iterations_below`.
 
 Use `{input.topic}` for run input and `{artifact.notes}` for artifacts. See
-[Workflow Examples](../workflow-examples.md) for complete graphs.
+[Workflow Examples](../workflow-examples.md) for complete graphs, and
+[Concepts & Reference](../concepts.md) for full definitions of every node type,
+join mode, condition, artifact kind, policy field, and trigger.
 
 ### Builder Lite
 
@@ -289,6 +330,24 @@ join progress, and full detail JSON.
 - **Cancel** cancels a non-terminal run.
 - **Retry interrupted** is only for `recovery_required` and requires explicit
   confirmation of duplicate-side-effect risk.
+
+```mermaid
+stateDiagram-v2
+  [*] --> running
+  running --> paused: Pause
+  paused --> running: Resume
+  running --> waiting_for_human: human gate reached
+  waiting_for_human --> running: Approve / choose
+  waiting_for_human --> failed: Reject
+  running --> succeeded: all nodes done
+  running --> failed: node failure or guard trips
+  running --> cancelled: Cancel
+  running --> recovery_required: Atlas restart mid-run
+  recovery_required --> running: Retry interrupted
+  succeeded --> [*]
+  failed --> [*]
+  cancelled --> [*]
+```
 
 After an Atlas restart, interrupted worker/manager nodes are not retried
 automatically. Review the warning's node and job IDs before authorizing retry.

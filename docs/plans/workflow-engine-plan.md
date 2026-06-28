@@ -545,6 +545,17 @@ The choice must be declared by the source `human_gate`.
 
 ## Execution Loop
 
+```mermaid
+flowchart TD
+  create["Create workflow_run"] --> enq["Enqueue start node"]
+  enq --> ready["Load ready nodes"]
+  ready --> dispatch["For each ready node:<br/>validate policy, render prompt,<br/>create Atlas job, mark waiting_for_job"]
+  dispatch --> done["On job complete:<br/>extract artifacts,<br/>evaluate outgoing edges,<br/>enqueue next nodes"]
+  done --> more{"Ready nodes or<br/>running jobs left?"}
+  more -->|yes| ready
+  more -->|no| finish(["Mark run succeeded or failed"])
+```
+
 Workflow runner algorithm:
 
 ```text

@@ -2,6 +2,10 @@
 
 Atlas is intentionally outside thClaws. thClaws remains the worker runtime; Atlas owns coordination, routing, state, and the browser control surface.
 
+> For bilingual definitions of every term used here (node types, join modes, edge
+> conditions, artifact kinds, policy, triggers, and states), see
+> [Concepts & Reference](concepts.md).
+
 ```mermaid
 flowchart LR
   UI["Atlas Dashboard"] --> API["Atlas HTTP API"]
@@ -58,6 +62,28 @@ This keeps manual override available while letting Atlas auto-route when the cal
 - `audit_log`: operator and system actions.
 
 ## Workflow Execution
+
+```mermaid
+sequenceDiagram
+  participant UI as Dashboard
+  participant API as Atlas API
+  participant WF as Workflow Runner
+  participant JM as Job Manager
+  participant W as thClaws Worker
+  participant TR as Trigger Service
+  UI->>API: Run workflow
+  API->>WF: Create run (state: running)
+  loop until no ready nodes and no running jobs
+    WF->>JM: Queue ready worker node
+    JM->>W: Dispatch job
+    W-->>JM: SSE output + result
+    JM-->>WF: Job succeeded + artifact
+    WF->>WF: Evaluate edges, joins, guards
+  end
+  WF->>TR: run completed / artifact created
+  TR-->>WF: Fire internal trigger (filtered)
+  WF-->>UI: Run state via SSE
+```
 
 Atlas centrally queues graph nodes. Worker nodes create normal Atlas jobs;
 `join` nodes run only in the control plane. Fan-out queues every matching

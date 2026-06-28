@@ -23,6 +23,8 @@
 
 ## เอกสารอ้างอิง / Reference
 
+- [Concepts & Reference](concepts.md) — นิยามทุกตัวที่ระบบใช้จริง (สองภาษา): node type,
+  join mode, condition, artifact kind, policy, trigger, state ฯลฯ
 - [Architecture](architecture.md) — บทบาท runtime, routing, state และ workflow execution
 - [thClaws Capability Matrix](thclaws-capability-matrix.md) — ความสามารถที่ใช้ได้ทันที,
   workaround และข้อจำกัดของ thClaws
@@ -37,6 +39,8 @@
   implementation checklist
 - [Sovereign Platform Plan (GA Gaps)](plans/sovereign-platform-plan.md) — สิ่งที่ยังขาด
   เพื่อไป GA: auth/RBAC, multi-tenant แบบ silo, metering/billing, fleet provisioning, hardening
+- [Usage Metering & Billing Plan (BYOK)](plans/usage-metering-billing-plan.md) — โมเดล
+  เก็บเงินแบบ BYOK, billing unit, ตารางราคา 2 SKU, schema metering และ milestone MVP→GA
 - [NT AIaaS Business Plan](plans/nt-aiaas-business-plan.md) — แผนธุรกิจและ pitch
   (ไฟล์ local ที่ถูก ignore จาก Git)
 
@@ -60,10 +64,12 @@ docs/
 │   ├── workflow-engine-plan.md
 │   ├── workflow-engine-coding-plan.md
 │   ├── sovereign-platform-plan.md
+│   ├── usage-metering-billing-plan.md
 │   └── nt-aiaas-business-plan.md
 ├── prompts/
 │   ├── workflow-engine-spin-prompts.md
 │   └── sovereign-platform-spin-prompts.md
+├── concepts.md
 ├── architecture.md
 ├── thclaws-capability-matrix.md
 ├── workflow-examples.md

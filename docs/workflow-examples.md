@@ -2,7 +2,19 @@
 
 Copy these into the **Workflows** view.
 
+Each example includes a Mermaid diagram of its graph. Diagram shapes: `[ ]`
+worker · `{{ }}` manager · `{ }` human gate · `(( ))` join · `([ ])` run
+outcome. Edge labels are the condition that must hold to traverse.
+
+For definitions of every node type, join mode, condition, artifact kind, policy
+field, and trigger used below, see [Concepts & Reference](concepts.md).
+
 ## Reporter To Anchor
+
+```mermaid
+flowchart LR
+  reporter["reporter"] --> anchor["anchor"]
+```
 
 Graph:
 
@@ -51,6 +63,12 @@ Run input:
 ## Fact Checker Approved Branch
 
 The fact checker must return JSON.
+
+```mermaid
+flowchart LR
+  reporter["reporter"] --> fact_checker["fact_checker"]
+  fact_checker -->|"fact_check.verdict = approved"| anchor["anchor"]
+```
 
 Graph:
 
@@ -111,6 +129,13 @@ Policy:
 This sends work back to the reporter while `fact_check.verdict` is
 `needs_more_sources`. `policy.max_iterations` is the hard guard if the workflow
 never reaches `approved`.
+
+```mermaid
+flowchart LR
+  reporter["reporter"] --> fact_checker["fact_checker"]
+  fact_checker -->|"verdict = approved"| anchor["anchor"]
+  fact_checker -->|"verdict = needs_more_sources"| reporter
+```
 
 Graph:
 
@@ -186,6 +211,13 @@ two OR branches.
 The gate pauses after the reporter finishes and creates no worker job. Approve
 to run the anchor once, or reject to fail the run.
 
+```mermaid
+flowchart LR
+  reporter["reporter"] --> gate{"publish_approval<br/>human gate"}
+  gate -->|approve| anchor["anchor"]
+  gate -. reject .-> stop(["run fails"])
+```
+
 ```json
 {
   "start": "reporter",
@@ -232,6 +264,15 @@ once before the next worker job after two worker jobs complete; the normal
 
 The fact checker and editor both run after the reporter. The anchor starts only
 after both branches succeed. The join itself does not create a worker job.
+
+```mermaid
+flowchart LR
+  reporter["reporter"] --> fact_checker["fact_checker"]
+  reporter --> editor["editor"]
+  fact_checker --> reviews_join(("reviews_join<br/>join: all"))
+  editor --> reviews_join
+  reviews_join --> anchor["anchor"]
+```
 
 ```json
 {
@@ -298,6 +339,14 @@ The manager chooses only declared outgoing targets. After research, the manager
 can select the writer with `input_artifacts: ["research"]`, or return
 `{"stop":true,"reason":"...","next":[]}`. Atlas validates the proposal before
 creating the selected target job.
+
+```mermaid
+flowchart LR
+  manager{{"manager"}} -->|"selected: researcher"| researcher["researcher"]
+  manager -->|"selected: writer"| writer["writer"]
+  researcher --> manager
+  manager -. "stop: true" .-> done(["run ends"])
+```
 
 ```json
 {
@@ -370,6 +419,24 @@ Manager response selecting the writer:
 ```
 
 ## Human Choice And Quorum
+
+A choice gate routes to one branch per declared choice; a quorum join continues
+once enough upstream branches succeed:
+
+```mermaid
+flowchart LR
+  publish_decision{"publish_decision<br/>choice gate"}
+  publish_decision -->|"choice: publish"| publisher["publisher"]
+  publish_decision -->|"choice: revise"| reviser["reviser"]
+```
+
+```mermaid
+flowchart LR
+  a["review A"] --> reviews(("reviews<br/>quorum 2 of 3"))
+  b["review B"] --> reviews
+  c["review C"] --> reviews
+  reviews --> next["downstream"]
+```
 
 A choice gate declares its options and each branch names one declared choice:
 

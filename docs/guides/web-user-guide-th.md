@@ -60,6 +60,14 @@ Atlas ใช้ SQLite ที่ `data/atlas.sqlite` โดยปริยาย
 ลำดับเริ่มใช้งานที่แนะนำคือ **Fleet → Command → Jobs** และค่อยใช้
 **Workflows → Monitor** เมื่อต้องการงานหลายขั้น
 
+```mermaid
+flowchart TD
+  fleet["Fleet — ลงทะเบียน worker และ workspace"]
+  fleet --> q{"งานเดียวหรือหลายขั้น?"}
+  q -->|"งานเดียว / handoff"| cmd["Command — ส่งงาน"] --> jobs["Jobs — ดู output และ event"]
+  q -->|"งานหลายขั้น"| wf["Workflows — สร้าง ตรวจ รัน"] --> mon["Monitor — run, approval, artifact, trigger"]
+```
+
 ## 3. Fleet: จัดการ worker และ workspace
 
 ### 3.1 เพิ่ม worker
@@ -124,6 +132,17 @@ Atlas ใช้ SQLite ที่ `data/atlas.sqlite` โดยปริยาย
 - Auto ทั้งหมด: Atlas พิจารณาสถานะ online, workspace key, company, tags, role
   และคำใบ้ใน prompt
 
+```mermaid
+flowchart TD
+  start(["ส่ง job"]) --> ws{"ระบุ workspace?"}
+  ws -->|ใช่| useWs["ใช้ workspace นั้น"]
+  ws -->|ไม่| wk{"ระบุ worker?"}
+  wk -->|ใช่| useWk["ใช้ worker นั้น"]
+  wk -->|ไม่| conv{"มี binding ของ conversation เดิม?"}
+  conv -->|ใช่| useConv["ใช้ session ที่ผูกไว้"]
+  conv -->|ไม่| auto["Auto route: สถานะ online, workspace key,<br/>company, tags, role, คำใบ้ใน prompt"]
+```
+
 กด **Run** แล้ว Atlas จะสร้าง job, ล้างช่อง Prompt, เปิดหน้า **Jobs** และเลือก job
 ใหม่ให้อัตโนมัติ
 
@@ -158,6 +177,22 @@ Atlas ใช้ SQLite ที่ `data/atlas.sqlite` โดยปริยาย
 
 ปุ่ม **Cancel** ใช้ได้กับ job ที่ยังไม่จบ การยกเลิกเป็น best effort ที่ชั้น Atlas:
 สถานะจะเปลี่ยนเป็น `cancel_requested` ก่อน และ worker อาจทำ side effect ไปแล้ว
+
+```mermaid
+stateDiagram-v2
+  [*] --> queued
+  queued --> running
+  running --> succeeded
+  running --> failed
+  queued --> cancel_requested: Cancel
+  running --> cancel_requested: Cancel
+  cancel_requested --> cancelled
+  cancel_requested --> succeeded: best effort
+  cancel_requested --> failed: best effort
+  succeeded --> [*]
+  failed --> [*]
+  cancelled --> [*]
+```
 
 สถานะ job ที่พบบ่อย:
 
@@ -227,11 +262,16 @@ Coder → Tester → Reviewer และ Manager-directed loop
 | `join` | รวม fan-out แบบ `all`, `any` หรือ `quorum`; ไม่สร้าง job |
 | `human_gate` | หยุดรอ Approve/Reject หรือ choice; ไม่สร้าง job |
 
+โหมด join: `all` รอ upstream **ทุกตัว**, `any` ไปต่อเมื่อ branch **แรก** เสร็จ และ
+`quorum` ไปต่อเมื่อมี branch เสร็จครบ **`quorum`** ตัว
+
 ชนิด condition ใน UI คือ `always`, `artifact_equals`, `artifact_in`,
 `manager_selected`, `human_selected` และ `max_iterations_below`
 
 Prompt อ้าง input ด้วย `{input.topic}` และ artifact ด้วย `{artifact.notes}` ดู graph
-ฉบับเต็มใน [Workflow Examples](../workflow-examples.md)
+ฉบับเต็มใน [Workflow Examples](../workflow-examples.md) และดูนิยามทุกตัว (node type,
+join mode, condition, artifact kind, policy, trigger) ใน
+[Concepts & Reference](../concepts.md)
 
 ### 6.3 Builder Lite
 
@@ -311,6 +351,24 @@ definition กดการ์ดเพื่อดู state, jobs, budget, node 
 - **Cancel** ยกเลิก run ที่ยังไม่จบ
 - **Retry interrupted** ใช้เฉพาะ `recovery_required` และต้องยืนยันความเสี่ยง side
   effect ซ้ำก่อน
+
+```mermaid
+stateDiagram-v2
+  [*] --> running
+  running --> paused: Pause
+  paused --> running: Resume
+  running --> waiting_for_human: ถึง human gate
+  waiting_for_human --> running: Approve / เลือก choice
+  waiting_for_human --> failed: Reject
+  running --> succeeded: ทุก node เสร็จ
+  running --> failed: node fail หรือ guard ทำงาน
+  running --> cancelled: Cancel
+  running --> recovery_required: Atlas restart กลางคัน
+  recovery_required --> running: Retry interrupted
+  succeeded --> [*]
+  failed --> [*]
+  cancelled --> [*]
+```
 
 หลัง Atlas restart, worker/manager node ที่ขาดช่วงจะไม่ถูก retry อัตโนมัติ ให้ตรวจ
 node/job ใน warning ก่อนอนุญาต **Retry interrupted**
