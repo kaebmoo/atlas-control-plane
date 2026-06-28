@@ -218,9 +218,56 @@ A `manager` node additionally reasons over the run state (`graph`,
 
 ## 9. Artifact kinds
 
-Artifacts are the typed blackboard shared across the nodes of one run. Each
-artifact is `{key, kind, content, metadata}`. Nodes write them; prompts
-(`{artifact.KEY}`), edge conditions, and `artifact_created` triggers read them.
+### The shortest useful definition
+
+**An artifact is a named result saved on a workflow run so another step can use
+it later.**
+
+For example, a `reporter` node returns news notes. Atlas saves the response as an
+artifact named `notes`; a `writer` node then reads `{artifact.notes}` without an
+operator copying output or passing an entire log manually.
+
+```mermaid
+flowchart LR
+  input["Run input<br/>topic"] --> reporter["reporter node"]
+  reporter --> notes["artifact: notes<br/>kind: text"]
+  notes --> writer["writer node<br/>{artifact.notes}"]
+  writer --> script["artifact: script<br/>kind: text"]
+```
+
+Related terms are not interchangeable:
+
+| Item | What it is | How a later node uses it |
+| --- | --- | --- |
+| **Run input** | Data supplied when the run starts, such as `{"topic":"AI"}` | `{input.topic}` |
+| **Job output** | The raw response from one worker job, visible in Jobs | It is not an artifact unless the node declares `outputs` |
+| **Artifact** | A keyed copy of a result persisted on the run | `{artifact.KEY}` or an edge condition |
+| **File artifact (`file_ref`)** | A pointer to binary bytes stored by Atlas | A person downloads it or an external system calls the content API; workers do not read it automatically |
+
+Artifacts are shared only by nodes in the **same run**. Each persisted record is
+`{key, kind, content, metadata}`. Prompts (`{artifact.KEY}`), edge conditions,
+and `artifact_created` triggers read them; **Monitor → Artifacts** displays them
+for inspection.
+
+### How worker output becomes an artifact
+
+A node must declare at least one `outputs` key:
+
+```json
+{
+  "id": "reporter",
+  "type": "worker",
+  "prompt": "Summarize news about {input.topic}",
+  "outputs": ["notes"]
+}
+```
+
+After the job succeeds, Atlas stores its entire `assistant_text` as the `notes`
+artifact with kind `text`. A node without `outputs` can still succeed, but it
+does not produce an artifact.
+
+> The current engine uses only the **first key** in `outputs`. To expose multiple
+> fields, store one `json` artifact and address its fields with dot-paths.
 
 | Kind | Behaviour |
 | --- | --- |
@@ -241,7 +288,8 @@ filter.
 ### Setting the kind
 
 - **Worker output** defaults to `text`; set the node's `output_format: "json"` to
-  store `json`.
+  parse and store the entire response as `json` (the response must be valid JSON
+  only, or the node fails).
 - **Manual** — `POST /api/artifacts` with any `kind` and inline `content`.
 - **File upload** always produces a `file_ref` (below).
 
@@ -257,6 +305,17 @@ recording its filename, size, and SHA-256. Download it with
 > upload is for **people** (a reviewer downloading it at a human gate) or for an
 > **external system** that calls the content API itself, with an integrity hash
 > tying the file to the run.
+
+What Upload and Download actually do:
+
+1. **Upload** copies a browser file into Atlas's upload storage and creates a
+   `file_ref` on the selected run; it does not copy the file into a worker workspace.
+2. **File key**, such as `contract` or `evidence`, is the artifact's lookup name in the run.
+3. **Download** returns the bytes stored by Atlas; it does not expose arbitrary files from a worker.
+
+Use this for contracts reviewed by a person, auditable evidence/final deliverables,
+or files fetched by an external integration. Do not use it expecting a worker to
+parse an uploaded PDF automatically, or as a general-purpose file manager.
 
 ### Example 1 — a `json` artifact drives a branch
 

@@ -253,6 +253,11 @@ Coder → Tester → Reviewer และ Manager-directed loop
 }
 ```
 
+ในตัวอย่างนี้ `outputs: ["notes"]` หมายถึง เมื่อ reporter สำเร็จ Atlas จะเก็บคำตอบ
+ทั้งก้อนเป็น artifact ชื่อ `notes` ของ run นี้ แล้ว writer อ่านด้วย
+`{artifact.notes}` ถ้าไม่ใส่ `outputs` คำตอบยังดูได้ในหน้า Jobs แต่ node ถัดไปจะไม่มี
+artifact ชื่อนี้ให้เรียกใช้ Engine รุ่นปัจจุบันใช้ key ตัวแรกใน `outputs`
+
 ชนิด node:
 
 | Type | หน้าที่ |
@@ -260,7 +265,7 @@ Coder → Tester → Reviewer และ Manager-directed loop
 | `worker` | สร้าง job บน thClaws worker |
 | `manager` | ให้ worker เสนอ node ถัดไปภายใต้ edge/policy ที่กำหนด |
 | `join` | รวม fan-out แบบ `all`, `any` หรือ `quorum`; ไม่สร้าง job |
-| `human_gate` | หยุดรอ Approve/Reject หรือ choice; ไม่สร้าง job |
+| `human_gate` | หยุดรอผู้ใช้อนุมัติ ปฏิเสธ หรือเลือกขั้นตอนถัดไป; ไม่สร้าง job |
 
 โหมด join: `all` รอ upstream **ทุกตัว**, `any` ไปต่อเมื่อ branch **แรก** เสร็จ และ
 `quorum` ไปต่อเมื่อมี branch เสร็จครบ **`quorum`** ตัว
@@ -357,7 +362,7 @@ stateDiagram-v2
   [*] --> running
   running --> paused: Pause
   paused --> running: Resume
-  running --> waiting_for_human: ถึง human gate
+  running --> waiting_for_human: ถึงจุดรอการตัดสินใจ
   waiting_for_human --> running: Approve / เลือก choice
   waiting_for_human --> failed: Reject
   running --> succeeded: ทุก node เสร็จ
@@ -375,18 +380,41 @@ node/job ใน warning ก่อนอนุญาต **Retry interrupted**
 
 ### 7.2 Artifacts
 
-ส่วน Artifacts แสดง artifact และ metadata ของ run ที่เลือก ไฟล์ชนิด `file_ref` มีลิงก์
-ดาวน์โหลดพร้อมขนาดและ SHA-256
+Artifact คือผลลัพธ์ที่ตั้งชื่อและเก็บกับ workflow run เพื่อให้ node ถัดไป, condition,
+trigger หรือคนตรวจสอบนำไปใช้ต่อ ตัวอย่างเช่น reporter สร้าง artifact `notes`, writer
+อ่าน `{artifact.notes}` แล้วสร้าง artifact `script`
+
+ส่วน **Artifacts** แสดง key, kind, content และ metadata ของ run ที่เลือก:
+
+| สิ่งที่เห็น | ความหมาย |
+| --- | --- |
+| `notes` / `script` | key ที่ workflow ใช้อ้างผลลัพธ์ |
+| `text` / `json` | ข้อมูลที่ node ถัดไปอ่านผ่าน `{artifact.KEY}` ได้ |
+| `file_ref` | ตัวชี้ไปไฟล์ binary ที่ Atlas เก็บ ไม่ใช่เนื้อไฟล์ใน prompt |
+| filename, size, SHA-256 | metadata สำหรับตรวจชื่อ ขนาด และความถูกต้องของไฟล์ |
 
 อัปโหลดไฟล์โดยเลือก run, ใส่ **File key**, เลือก **File** แล้วกด **Upload file**
 ค่าเริ่มต้นจำกัด 10 MiB และผู้ดูแลเปลี่ยนได้ด้วย `ATLAS_MAX_UPLOAD_BYTES`
+
+ตัวอย่าง: workflow อนุมัติสัญญาหยุดที่จุดรอการตัดสินใจ (`human_gate`) ผู้ใช้เลือก run, ใส่ key
+`contract`, อัปโหลด `contract.pdf`; ผู้อนุมัติกดลิงก์ดาวน์โหลดจาก Artifacts เพื่ออ่าน
+แล้วจึงกด Approve หรือ Reject
+
+> Upload เป็นการเก็บไฟล์กับ Atlas และผูกไว้กับ run ไม่ได้วางไฟล์ใน workspace ของ worker
+> และ worker จะไม่อ่าน PDF/รูป/ไฟล์นั้นอัตโนมัติ Download คือการรับไฟล์ชิ้นเดิมที่ Atlas
+> เก็บไว้ ไม่ใช่การ browse ไฟล์ในเครื่อง worker
+
+ใช้ file artifact เมื่อให้คนตรวจเอกสาร, เก็บหลักฐานสำหรับ audit หรือส่งมอบไฟล์ให้ระบบ
+ภายนอก ถ้าต้องการให้ worker วิเคราะห์ไฟล์ ต้องเพิ่ม integration ที่ดาวน์โหลดและอ่านไฟล์
+ให้ worker โดยเฉพาะ ดูรายละเอียดและตัวอย่างครบใน
+[Concepts: ชนิด artifact](../concepts-th.md#9-ชนิด-artifact)
 
 ### 7.3 Approvals และ Manager decisions
 
 เมื่อ run อยู่ `waiting_for_human`:
 
-- gate ปกติมี **Approve** และ **Reject**
-- choice gate มีปุ่มตาม choice และ **Reject**
+- จุดอนุมัติแบบปกติมี **Approve** และ **Reject**
+- จุดตัดสินใจแบบมีตัวเลือกมีปุ่มตาม choice และ **Reject**
 - ตัดสินใจได้ครั้งเดียว; downstream จะเริ่มหลังบันทึกการตัดสินใจ
 
 **Manager decisions** แสดง proposal, state และเหตุผลที่ Atlas ยอมรับหรือปฏิเสธ

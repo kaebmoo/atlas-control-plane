@@ -469,7 +469,10 @@ Budget policy example:
 
 Worker/manager nodes default to one unit and may set `"budget_units":2`.
 
-## File Upload And Recovery APIs
+## File Artifact Upload And Download
+
+This attaches a file to an **existing workflow run**. The key `evidence` is the
+artifact name; the upload does not place the file in a worker workspace.
 
 Upload a bounded direct binary body (not multipart or base64):
 
@@ -481,8 +484,16 @@ curl -sS -X POST 'http://127.0.0.1:8787/api/workflow-runs/wfr_xxx/files?key=evid
 ```
 
 Download the resulting `file_ref` with
-`GET /api/artifacts/art_xxx/content`. After restart, retry a
-`recovery_required` run only after reviewing possible duplicate side effects:
+`GET /api/artifacts/art_xxx/content`. It returns the bytes Atlas stored, not an
+arbitrary worker file. A worker does not read the upload automatically. Typical
+uses are human review at a gate, audit evidence, and an external integration
+fetching a deliverable. See [Artifact kinds](concepts-en.md#9-artifact-kinds) or
+[ชนิด artifact](concepts-th.md#9-ชนิด-artifact).
+
+## Restart Recovery API
+
+After restart, retry a `recovery_required` run only after reviewing possible
+duplicate side effects:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8787/api/workflow-runs/wfr_xxx/resume \
@@ -575,6 +586,11 @@ Internal event triggers are fired only by Atlas.
 
 ## Manual Artifact API
 
+Use this when an operator or external system already has structured data that
+must join an existing run. Unlike file upload, the content is stored inline and
+can be read by prompts or edge conditions. This example creates a JSON artifact
+named `invoice_batch`:
+
 ```bash
 curl -sS -X POST http://127.0.0.1:8787/api/artifacts \
   -H 'content-type: application/json' \
@@ -588,7 +604,9 @@ curl -sS -X POST http://127.0.0.1:8787/api/artifacts \
 ```
 
 The response includes the artifact id. Read it later with
-`GET /api/artifacts/{id}`.
+`GET /api/artifacts/{id}`. A later prompt can use
+`{artifact.invoice_batch.invoice_ids}` and an `artifact_created` trigger can
+filter on key `invoice_batch` or kind `json`.
 
 ## Workflow Builder Draft API
 

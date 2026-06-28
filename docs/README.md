@@ -26,6 +26,8 @@
 - [Concepts & Reference (EN)](concepts-en.md) · [นิยามและอ้างอิง (ไทย)](concepts-th.md)
   — นิยามทุกตัวที่ระบบใช้จริง: node type, join mode, condition, artifact kind, policy,
   trigger, state ฯลฯ
+- Artifact โดยเฉพาะ: [ความหมายและตัวอย่าง (ไทย)](concepts-th.md#9-ชนิด-artifact) ·
+  [definition and examples (English)](concepts-en.md#9-artifact-kinds)
 - [Architecture](architecture.md) — บทบาท runtime, routing, state และ workflow execution
 - [thClaws Capability Matrix](thclaws-capability-matrix.md) — ความสามารถที่ใช้ได้ทันที,
   workaround และข้อจำกัดของ thClaws

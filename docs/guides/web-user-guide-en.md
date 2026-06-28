@@ -237,6 +237,12 @@ Enter **Name**, optional **Description**, and **Graph JSON**. A graph needs
 }
 ```
 
+Here, `outputs: ["notes"]` means that after the reporter succeeds, Atlas saves
+its entire response as the run's `notes` artifact. The writer reads it through
+`{artifact.notes}`. Without `outputs`, the response remains visible in Jobs but
+no artifact with that key exists for a later node. The current engine uses the
+first key in `outputs`.
+
 | Node type | Purpose |
 | --- | --- |
 | `worker` | Creates a thClaws job |
@@ -354,12 +360,36 @@ automatically. Review the warning's node and job IDs before authorizing retry.
 
 ### Artifacts
 
-Artifacts and metadata appear for the selected run. `file_ref` artifacts provide
-a download link, byte size, and SHA-256.
+An artifact is a named result saved on a workflow run so a later node, condition,
+trigger, or reviewer can use it. For example, a reporter creates `notes`, a
+writer reads `{artifact.notes}`, and then creates `script`.
+
+**Artifacts** displays the selected run's keys, kinds, content, and metadata:
+
+| Displayed value | Meaning |
+| --- | --- |
+| `notes` / `script` | Keys used by the workflow to address results |
+| `text` / `json` | Data available to later nodes as `{artifact.KEY}` |
+| `file_ref` | A pointer to binary bytes stored by Atlas, not file content inserted into a prompt |
+| filename, size, SHA-256 | Metadata used to identify and verify a file |
 
 To upload, select a run, enter **File key**, choose **File**, and click
 **Upload file**. The default limit is 10 MiB; administrators can change it with
 `ATLAS_MAX_UPLOAD_BYTES`.
+
+Example: a contract-approval workflow pauses at a human gate. Select that run,
+use key `contract`, and upload `contract.pdf`. The reviewer downloads it from
+Artifacts, reads it, and then chooses Approve or Reject.
+
+> Upload stores the file in Atlas and ties it to the run; it does not place the
+> file in a worker workspace, and a worker does not automatically read the PDF,
+> image, or other file. Download returns the exact file Atlas stored; it does not
+> browse a worker's filesystem.
+
+Use file artifacts for human document review, auditable evidence, deliverables,
+or an external integration that fetches the file. Worker-side file analysis
+requires a separate integration that downloads and reads it for the worker. See
+[Concepts: Artifact kinds](../concepts-en.md#9-artifact-kinds) for the full model.
 
 ### Approvals, manager decisions, and timeline
 

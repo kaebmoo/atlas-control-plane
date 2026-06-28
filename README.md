@@ -462,7 +462,13 @@ curl -sS -X POST http://127.0.0.1:8787/api/workflow-runs \
   }'
 ```
 
-Artifacts:
+Artifacts are named workflow-run results. A worker node creates one when it
+declares `outputs`; later nodes read it with `{artifact.KEY}`. They are distinct
+from the raw job output shown in Jobs. See the
+[artifact reference](docs/concepts-en.md#9-artifact-kinds) or
+[คำอธิบายภาษาไทย](docs/concepts-th.md#9-ชนิด-artifact).
+
+List artifacts for a run:
 
 ```bash
 curl -sS http://127.0.0.1:8787/api/workflow-runs/wfr_xxx/artifacts

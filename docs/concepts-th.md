@@ -23,7 +23,7 @@
 10. [นโยบายและ guard](#10-นโยบายและ-guard)
 11. [การตัดสินใจของ manager](#11-การตัดสินใจของ-manager-manager_decision_v1)
 12. [ทริกเกอร์](#12-ทริกเกอร์)
-13. [ประตูคนและการอนุมัติ](#13-ประตูคนและการอนุมัติ)
+13. [การตัดสินใจและการอนุมัติโดยผู้ใช้](#13-การตัดสินใจและการอนุมัติโดยผู้ใช้)
 
 ---
 
@@ -85,7 +85,7 @@ side effect ไปแล้ว
 | --- | --- |
 | `running` | กำลังรัน node |
 | `paused` | ผู้ใช้สั่งหยุด; resume ทำต่อโดยไม่ทำ node ที่เสร็จแล้วซ้ำ |
-| `waiting_for_human` | ติดรอที่ human gate |
+| `waiting_for_human` | หยุดรอการตัดสินใจจากผู้ใช้ที่ `human_gate` |
 | `recovery_required` | Atlas restart กลางคัน; node ที่ค้างต้อง retry เอง |
 | `succeeded` | node ที่ไปถึงได้เสร็จทั้งหมด |
 | `failed` | node ล้มเหลวหรือ guard ทำงาน |
@@ -137,15 +137,16 @@ side effect ไปแล้ว
 
 ### `human_gate`
 
-หยุดรอคน ไม่สร้าง job
+จุดที่ workflow หยุดรอการตัดสินใจจากผู้ใช้ เช่น อนุมัติ ปฏิเสธ หรือเลือกขั้นตอนถัดไป
+โดยไม่สร้าง job
 
 | ฟิลด์ | ความหมาย |
 | --- | --- |
 | `label` | ข้อความที่แสดงให้ผู้ใช้ |
 | `reason` | เหตุผลที่ต้องอนุมัติ |
-| `choices` | สำหรับ choice gate: รายการ `{id, label}` |
+| `choices` | สำหรับจุดตัดสินใจแบบมีตัวเลือก: รายการ `{id, label}` |
 
-ดู [§13](#13-ประตูคนและการอนุมัติ)
+ดู [§13](#13-การตัดสินใจและการอนุมัติโดยผู้ใช้)
 
 ---
 
@@ -207,9 +208,53 @@ node แบบ `manager` ยังพิจารณาสถานะ run (`gra
 
 ## 9. ชนิด artifact
 
-artifact คือกระดานข้อมูลที่ node ทุกตัวใน run เดียวกันใช้ร่วมกัน แต่ละชิ้นคือ
-`{key, kind, content, metadata}` — node เขียนลงไป ส่วน prompt (`{artifact.KEY}`),
-edge condition และ trigger `artifact_created` อ่านออกมา
+### จำแบบสั้นที่สุด
+
+**Artifact คือผลลัพธ์ที่ตั้งชื่อและบันทึกไว้กับ workflow run เพื่อให้ขั้นตอนอื่นนำไปใช้ต่อ**
+
+ตัวอย่าง: node `reporter` ตอบข้อความข่าวออกมา Atlas บันทึกข้อความนั้นเป็น artifact
+ชื่อ `notes` จากนั้น node `writer` อ่านด้วย `{artifact.notes}` โดยไม่ต้องคัดลอก output
+หรือส่ง log ทั้งก้อนด้วยมือ
+
+```mermaid
+flowchart LR
+  input["Run input<br/>topic"] --> reporter["reporter node"]
+  reporter --> notes["artifact: notes<br/>kind: text"]
+  notes --> writer["writer node<br/>{artifact.notes}"]
+  writer --> script["artifact: script<br/>kind: text"]
+```
+
+คำที่คล้ายกันแต่ไม่ใช่สิ่งเดียวกัน:
+
+| สิ่งนี้ | คืออะไร | ใช้ซ้ำใน node ถัดไปอย่างไร |
+| --- | --- | --- |
+| **Run input** | ข้อมูลที่ส่งเข้าตอนเริ่ม run เช่น `{"topic":"AI"}` | `{input.topic}` |
+| **Job output** | คำตอบดิบของ worker หนึ่ง job และข้อความที่เห็นในหน้า Jobs | ยังไม่เป็น artifact ถ้า node ไม่ประกาศ `outputs` |
+| **Artifact** | สำเนาผลลัพธ์ที่ตั้ง key และเก็บกับ run | `{artifact.KEY}` หรือ edge condition |
+| **File artifact (`file_ref`)** | ตัวชี้ไปไฟล์ binary ที่ Atlas เก็บ | คนดาวน์โหลด หรือระบบภายนอกเรียก content API; worker ไม่ได้อ่านอัตโนมัติ |
+
+artifact ใช้ร่วมกันเฉพาะ node ใน **run เดียวกัน** แต่ละชิ้นเก็บเป็น
+`{key, kind, content, metadata}` — prompt (`{artifact.KEY}`), edge condition และ
+trigger `artifact_created` อ่านข้อมูลนี้ได้ และหน้า **Monitor → Artifacts** ใช้ตรวจย้อนหลัง
+
+### Artifact เกิดจาก worker output อย่างไร
+
+node ต้องประกาศ `outputs` อย่างน้อยหนึ่ง key:
+
+```json
+{
+  "id": "reporter",
+  "type": "worker",
+  "prompt": "สรุปข่าวเรื่อง {input.topic}",
+  "outputs": ["notes"]
+}
+```
+
+เมื่อ job สำเร็จ Atlas จะนำ `assistant_text` ทั้งก้อนไปเก็บเป็น artifact `notes`
+ชนิด `text` ถ้าไม่มี `outputs` งานยังสำเร็จได้ แต่จะไม่มี artifact จาก node นั้น
+
+> Engine รุ่นปัจจุบันใช้ **key ตัวแรก** ใน `outputs` เท่านั้น ถ้าต้องการ JSON หลาย field
+> ให้เก็บเป็น artifact `json` หนึ่งชิ้นแล้วอ่านด้วย dot-path
 
 | kind | พฤติกรรม |
 | --- | --- |
@@ -228,7 +273,8 @@ edge condition และ trigger `artifact_created` อ่านออกมา
 
 ### การตั้ง kind
 
-- **output ของ worker** เป็น `text` โดยปริยาย; ตั้ง `output_format: "json"` เพื่อเก็บเป็น `json`
+- **output ของ worker** เป็น `text` โดยปริยาย; ตั้ง `output_format: "json"` เพื่อ parse
+  คำตอบทั้งก้อนและเก็บเป็น `json` (คำตอบต้องเป็น JSON ที่ถูกต้องล้วน ๆ มิฉะนั้น node fail)
 - **สร้างเอง** — `POST /api/artifacts` ระบุ `kind` และ `content` ได้เลย
 - **การอัปโหลดไฟล์** ได้ `file_ref` เสมอ (ดูด้านล่าง)
 
@@ -240,8 +286,20 @@ filename, ขนาด, SHA-256 ดาวน์โหลดด้วย `GET /ap
 (`ATLAS_MAX_UPLOAD_BYTES`)
 
 > **สำคัญ:** worker จะ **ไม่** อ่านไฟล์ที่อัปโหลดให้อัตโนมัติ — `{artifact.KEY}` ของ
-> `file_ref` ได้แค่ตัวชี้ ไม่ใช่เนื้อไฟล์ การอัปโหลดมีไว้ให้ **คน** (รีวิวเวอร์ดาวน์โหลดดูตอน
-> human gate) หรือ **ระบบภายนอก** ที่เรียก content API เอง โดยมี hash ผูกไฟล์กับ run ไว้ตรวจสอบ
+> `file_ref` ได้แค่ตัวชี้ ไม่ใช่เนื้อไฟล์ การอัปโหลดมีไว้ให้ **คน** (ผู้ตรวจสอบดาวน์โหลดดู
+> ตอน workflow หยุดที่ `human_gate`) หรือ **ระบบภายนอก** ที่เรียก content API เอง
+> โดยมี hash ผูกไฟล์กับ run ไว้ตรวจสอบ
+
+สิ่งที่ Upload/Download ทำจริง:
+
+1. **Upload** คัดลอกไฟล์จาก browser ไปเก็บในพื้นที่ upload ของ Atlas แล้วสร้าง
+   `file_ref` ผูกกับ run ที่เลือก; ไม่ได้คัดลอกไฟล์เข้า workspace ของ worker
+2. **File key** เช่น `contract` หรือ `evidence` คือชื่อที่ใช้หา artifact ใน run
+3. **Download** ส่ง byte ของไฟล์ที่ Atlas เก็บกลับมา; ไม่ได้อ่านไฟล์อื่นจากเครื่อง worker
+
+เหมาะกับการแนบสัญญาให้คนอนุมัติ, เก็บหลักฐาน/ไฟล์ผลลัพธ์เพื่อ audit หรือให้ระบบภายนอก
+มารับไฟล์ ไม่เหมาะกับการอัปโหลด PDF แล้วคาดหวังให้ worker อ่านเอง หรือใช้แทน file manager
+ทั่วไป
 
 ### ตัวอย่าง 1 — artifact `json` ใช้ตัดสินเส้นทาง
 
@@ -258,11 +316,11 @@ Atlas เก็บเป็น artifact `json` ทำให้ edge ขาออ
 
 ### ตัวอย่าง 2 — อัปโหลด `file_ref` ให้คนรีวิว
 
-run อนุมัติสัญญาหยุดที่ human gate มีคนอัปโหลดไฟล์สัญญา รีวิวเวอร์ดาวน์โหลดไปดูแล้ว
-กดอนุมัติ — worker ไม่ได้อ่าน PDF เลย คนเป็นคนอ่าน
+run อนุมัติสัญญาหยุดที่จุดรอการตัดสินใจ (`human_gate`) มีคนอัปโหลดไฟล์สัญญา
+ผู้ตรวจสอบดาวน์โหลดไปดูแล้วกดอนุมัติ — worker ไม่ได้อ่าน PDF เลย คนเป็นคนอ่าน
 
 ```bash
-# 1) run ค้างที่ human gate (waiting_for_human)
+# 1) run รอการตัดสินใจจากผู้ใช้ (waiting_for_human)
 curl -sS -X POST 'http://127.0.0.1:8787/api/workflow-runs/wfr_xxx/files?key=contract' \
   -H 'content-type: application/pdf' \
   -H 'x-filename: contract.pdf' \
@@ -346,17 +404,17 @@ trigger event ไล่สถานะ `received` → `started` หรือ `ig
 
 ---
 
-## 13. ประตูคนและการอนุมัติ
+## 13. การตัดสินใจและการอนุมัติโดยผู้ใช้
 
-node `human_gate` ทำให้ run เป็น `waiting_for_human` และไม่สร้าง job ตัดสินใจได้
-**ครั้งเดียว**
+node `human_gate` คือจุดที่ workflow หยุดรอการตัดสินใจจากผู้ใช้ ทำให้ run เป็น
+`waiting_for_human` และไม่สร้าง job ผู้ใช้ตัดสินใจได้ **ครั้งเดียว**
 
-- **gate ปกติ** → **Approve** (สถานะ `approved`, ไปต่อ) หรือ **Reject** (สถานะ
+- **จุดอนุมัติแบบปกติ** → **Approve** (สถานะ `approved`, ไปต่อ) หรือ **Reject** (สถานะ
   `rejected`, run fail)
-- **choice gate** → ปุ่มตามแต่ละ `choice`; id ที่เลือกจับคู่กับ edge `human_selected`
+- **จุดตัดสินใจแบบมีตัวเลือก** → ปุ่มตามแต่ละ `choice`; id ที่เลือกจับคู่กับ edge `human_selected`
   พร้อมปุ่ม **Reject**
 - policy `requires_human_after_iterations` เพิ่มจุดรออนุมัติหนึ่งครั้งหลัง job เริ่มครบจำนวน
-  ที่กำหนด แยกจาก node gate ที่ประกาศไว้
+  ที่กำหนด แยกจาก node `human_gate` ที่ประกาศไว้
 
 สถานะ approval: `pending` → `approved` / `rejected` (หรือ choice ที่เลือก) ถ้า run
 ถูกยกเลิก approval ที่ค้างจะถูกยกเลิกด้วย
