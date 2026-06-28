@@ -61,14 +61,16 @@ Coder worker    -> Reviewer worker
 ```
 
 The workflow implementation checklist is in
-[docs/workflow-engine-coding-plan.md](docs/workflow-engine-coding-plan.md).
+[docs/plans/workflow-engine-coding-plan.md](docs/plans/workflow-engine-coding-plan.md).
 
 ## User Documentation
 
-- [User Guide](docs/user-guide.md)
+- [Documentation Index](docs/README.md)
+- [คู่มือใช้งานผ่านเว็บ (ภาษาไทย)](docs/guides/web-user-guide-th.md)
+- [Web User Guide (English)](docs/guides/web-user-guide-en.md)
 - [Workflow Examples](docs/workflow-examples.md)
 - [Demo Script](docs/demo-script.md)
-- [Workflow Engine Coding Plan](docs/workflow-engine-coding-plan.md)
+- [Workflow Engine Coding Plan](docs/plans/workflow-engine-coding-plan.md)
 
 ## Core Concepts
 

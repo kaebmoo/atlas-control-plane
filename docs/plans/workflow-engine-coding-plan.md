@@ -1,7 +1,7 @@
 # Workflow Engine Coding Plan
 
 This is the implementation checklist to finish everything in
-`docs/workflow-engine-plan.md` from the current workflow MVP.
+`docs/plans/workflow-engine-plan.md` from the current workflow MVP.
 
 ## Current Base
 

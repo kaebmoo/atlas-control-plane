@@ -3,7 +3,7 @@
 ใช้ไฟล์นี้เป็นชุด prompt สำหรับเปิด new chat แล้วสั่ง coding ต่อทีละ spin.
 
 > Historical: spins ชุดนี้ถูกทำครบและถูกแทนที่ด้วย milestone checklist ใน
-> `docs/workflow-engine-coding-plan.md` แล้ว อย่าใช้ Recommended Order ด้านล่าง
+> `docs/plans/workflow-engine-coding-plan.md` แล้ว อย่าใช้ Recommended Order ด้านล่าง
 > เป็นสถานะปัจจุบันของระบบ.
 
 ## Prompt ตั้งต้นทุก Spin
@@ -11,7 +11,7 @@
 ```text
 Repo: /Users/seal/Documents/GitHub/atlas-control-plane
 
-อ่าน README.md, docs/workflow-engine-plan.md, atlas/db.py, atlas/app.py,
+อ่าน README.md, docs/plans/workflow-engine-plan.md, atlas/db.py, atlas/app.py,
 atlas/jobs.py ก่อนแก้
 
 ห้ามแก้ thClaws repo
@@ -26,7 +26,7 @@ atlas/jobs.py ก่อนแก้
 ```text
 ทำ Phase 1 เริ่มจาก database layer ก่อน
 
-เพิ่มตารางตาม docs/workflow-engine-plan.md:
+เพิ่มตารางตาม docs/plans/workflow-engine-plan.md:
 - workflow_definitions
 - workflow_runs
 - workflow_nodes
