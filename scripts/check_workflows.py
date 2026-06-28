@@ -36,10 +36,25 @@ def main() -> None:
     assert_raises("unsupported condition", validate_workflow_graph, bad_condition, {})
 
     bad_join = dict(graph, nodes=graph["nodes"] + [{"id": "join", "type": "join", "mode": "quorum"}])
-    assert_raises("mode must be all or any", validate_workflow_graph, bad_join, {})
+    assert_raises("quorum must be a positive integer", validate_workflow_graph, bad_join, {})
 
     human_gate = {"start": "gate", "nodes": [{"id": "gate", "type": "human_gate", "label": "Approve"}], "edges": []}
     assert validate_workflow_graph(human_gate, {}) is human_gate
+    choice_gate = {
+        "start": "gate",
+        "nodes": [
+            {"id": "gate", "type": "human_gate", "choices": [{"id": "left", "label": "Left"}]},
+            {"id": "left", "type": "worker"},
+        ],
+        "edges": [{"from": "gate", "to": "left", "condition": {"type": "human_selected", "choice": "left"}}],
+    }
+    assert validate_workflow_graph(choice_gate, {}) is choice_gate
+    assert_raises(
+        "choice is not declared",
+        validate_workflow_graph,
+        dict(choice_gate, edges=[{"from": "gate", "to": "left", "condition": {"type": "human_selected", "choice": "missing"}}]),
+        {},
+    )
 
     bad_artifact_condition = dict(graph, edges=[{"from": "reporter", "to": "anchor", "condition": {"type": "artifact_equals"}}])
     assert_raises("artifact_equals requires artifact", validate_workflow_graph, bad_artifact_condition, {})
@@ -73,8 +88,10 @@ def main() -> None:
     check_joins_and_fan_out()
     check_condition_runner()
     check_managers()
+    check_budget_and_failure_policy()
     check_human_gates()
     check_hardening()
+    check_recovery()
     print("workflow validation/render check ok")
 
 
@@ -193,6 +210,50 @@ def check_joins_and_fan_out() -> None:
         wait_for_runner_stopped(resume_runner, paused["id"])
         assert resume_jobs.prompts == ["second"]
         assert resumed["counters"]["completed_nodes"] == ["first", "second"]
+
+        quorum_nodes = [
+            {"id": "root", "type": "worker", "worker_id": worker["id"], "prompt": "root"},
+            {"id": "left", "type": "worker", "worker_id": worker["id"], "prompt": "left"},
+            {"id": "right", "type": "worker", "worker_id": worker["id"], "prompt": "right"},
+            {"id": "third", "type": "worker", "worker_id": worker["id"], "prompt": "third"},
+            {"id": "quorum", "type": "join", "mode": "quorum", "quorum": 2},
+            {"id": "done", "type": "worker", "worker_id": worker["id"], "prompt": "done"},
+        ]
+        quorum_edges = [
+            {"from": "root", "to": "left"}, {"from": "root", "to": "right"}, {"from": "root", "to": "third"},
+            {"from": "left", "to": "quorum"}, {"from": "left", "to": "quorum"},
+            {"from": "right", "to": "quorum"}, {"from": "third", "to": "quorum"},
+            {"from": "quorum", "to": "done"},
+        ]
+        quorum_jobs = FakeJobService(db, worker["id"])
+        quorum_run = WorkflowRunner(db, quorum_jobs, poll_interval_seconds=0).run_graph(
+            {"start": "root", "nodes": quorum_nodes, "edges": quorum_edges}
+        )
+        assert quorum_run["state"] == "succeeded"
+        assert quorum_jobs.prompts == ["root", "left", "right", "done", "third"]
+        quorum_state = quorum_run["counters"]["join_states"]["quorum"]
+        assert quorum_state["completed_upstreams"] == ["left", "right", "third"]
+        assert quorum_run["counters"]["node_counts"]["done"] == 1
+
+        impossible_jobs = SelectiveFailJobService(db, worker["id"], {"left"})
+        impossible_graph = {
+            "start": "root",
+            "nodes": [dict(node, quorum=3) if node["id"] == "quorum" else node for node in quorum_nodes],
+            "edges": [edge for index, edge in enumerate(quorum_edges) if index != 4],
+        }
+        impossible = WorkflowRunner(db, impossible_jobs, poll_interval_seconds=0).run_graph(
+            impossible_graph, {"stop_on_first_failure": False}
+        )
+        assert impossible["state"] == "failed" and "done" not in impossible_jobs.prompts
+        assert impossible["counters"]["join_states"]["quorum"]["state"] == "failed"
+        assert any(event["event_type"] == "join_quorum_impossible" for event in db.list_workflow_events(impossible["id"]))
+
+        oversized = {
+            "start": "root",
+            "nodes": [dict(node, quorum=4) if node["id"] == "quorum" else node for node in quorum_nodes],
+            "edges": [edge for index, edge in enumerate(quorum_edges) if index != 4],
+        }
+        assert_raises("quorum exceeds distinct incoming", validate_workflow_graph, oversized, {})
 
 
 def check_role_routing() -> None:
@@ -516,6 +577,85 @@ def check_hardening() -> None:
         assert not db.list_jobs()
 
 
+def check_budget_and_failure_policy() -> None:
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+        worker = db.upsert_worker({"name": "Fake", "base_url": "http://127.0.0.1:1"})
+        graph = {
+            "start": "one",
+            "nodes": [
+                {"id": "one", "type": "worker", "worker_id": worker["id"], "prompt": "one", "budget_units": 1},
+                {"id": "two", "type": "worker", "worker_id": worker["id"], "prompt": "two", "budget_units": 2},
+                {"id": "three", "type": "worker", "worker_id": worker["id"], "prompt": "three"},
+            ],
+            "edges": [{"from": "one", "to": "two"}, {"from": "two", "to": "three"}],
+        }
+        jobs = FakeJobService(db, worker["id"])
+        run = WorkflowRunner(db, jobs, poll_interval_seconds=0).run_graph(graph, {"max_budget_units": 3})
+        assert run["state"] == "failed" and "max_budget_units exceeded" in run["error"]
+        assert jobs.prompts == ["one", "two"] and run["counters"]["budget_units_spent"] == 3
+
+        failed_jobs = SelectiveFailJobService(db, worker["id"], {"one"})
+        failed = WorkflowRunner(db, failed_jobs, poll_interval_seconds=0).run_graph(
+            {"start": "one", "nodes": [graph["nodes"][0]], "edges": []}, {"max_budget_units": 2}
+        )
+        assert failed["state"] == "failed" and failed["counters"]["budget_units_spent"] == 1
+
+        fanout = {
+            "start": "root",
+            "nodes": [
+                {"id": "root", "type": "worker", "worker_id": worker["id"], "prompt": "root"},
+                {"id": "left", "type": "worker", "worker_id": worker["id"], "prompt": "left"},
+                {"id": "right", "type": "worker", "worker_id": worker["id"], "prompt": "right"},
+                {"id": "from_left", "type": "worker", "worker_id": worker["id"], "prompt": "must not run"},
+            ],
+            "edges": [
+                {"from": "root", "to": "left"},
+                {"from": "root", "to": "right"},
+                {"from": "left", "to": "from_left"},
+            ],
+        }
+        stop_jobs = SelectiveFailJobService(db, worker["id"], {"left"})
+        stopped = WorkflowRunner(db, stop_jobs, poll_interval_seconds=0).run_graph(fanout)
+        assert stopped["state"] == "failed" and stop_jobs.prompts == ["root", "left"]
+
+        continue_jobs = SelectiveFailJobService(db, worker["id"], {"left"})
+        continued = WorkflowRunner(db, continue_jobs, poll_interval_seconds=0).run_graph(
+            fanout, {"stop_on_first_failure": False}
+        )
+        assert continued["state"] == "failed" and continue_jobs.prompts == ["root", "left", "right"]
+        assert continued["counters"]["failure_summary"] == {"count": 1, "nodes": ["left"]}
+        assert not any(edge["from_node"] == "left" for edge in db.list_workflow_edges(continued["id"]))
+
+        manager = {"id": "manager", "type": "manager", "worker_id": worker["id"], "schema": "manager_decision_v1", "budget_units": 1}
+        targets = [
+            {"id": "a", "type": "worker", "worker_id": worker["id"], "prompt": "a", "budget_units": 2},
+            {"id": "b", "type": "worker", "worker_id": worker["id"], "prompt": "b", "budget_units": 2},
+        ]
+        decision = json.dumps({
+            "stop": False,
+            "reason": "both",
+            "next": [
+                {"node": "a", "input_artifacts": [], "instructions": ""},
+                {"node": "b", "input_artifacts": [], "instructions": ""},
+            ],
+        })
+        manager_jobs = FakeJobService(db, worker["id"], lambda prompt: decision if "Manager context JSON:" in prompt else "ok")
+        manager_run = WorkflowRunner(db, manager_jobs, poll_interval_seconds=0).run_graph(
+            {
+                "start": "manager",
+                "nodes": [manager, *targets],
+                "edges": [
+                    {"from": "manager", "to": "a", "condition": {"type": "manager_selected", "target": "a"}},
+                    {"from": "manager", "to": "b", "condition": {"type": "manager_selected", "target": "b"}},
+                ],
+            },
+            {"max_budget_units": 4},
+        )
+        assert manager_run["state"] == "failed" and "max_budget_units exceeded" in manager_run["error"]
+        assert manager_jobs.prompts == [manager_jobs.prompts[0]]
+
+
 def check_human_gates() -> None:
     with TemporaryDirectory() as tmp:
         db = Database(Path(tmp) / "atlas.sqlite")
@@ -534,7 +674,7 @@ def check_human_gates() -> None:
 
         waiting = runner.run_workflow(definition["id"])
         assert waiting["state"] == "waiting_for_human"
-        assert waiting["current_nodes"] == ["publish"]
+        assert waiting["current_nodes"] == []
         assert not jobs.prompts and not db.list_jobs()
         approval = db.list_approvals(state="pending", run_id=waiting["id"])[0]
         gate_node = db.list_workflow_nodes(waiting["id"])[0]
@@ -563,6 +703,40 @@ def check_human_gates() -> None:
         db = Database(Path(tmp) / "atlas.sqlite")
         worker = db.upsert_worker({"name": "Fake", "base_url": "http://127.0.0.1:1"})
         graph = {
+            "start": "gate",
+            "nodes": [
+                {
+                    "id": "gate",
+                    "type": "human_gate",
+                    "label": "Choose branch",
+                    "choices": [{"id": "left", "label": "Left"}, {"id": "right", "label": "Right"}],
+                },
+                {"id": "left", "type": "worker", "worker_id": worker["id"], "prompt": "left"},
+                {"id": "right", "type": "worker", "worker_id": worker["id"], "prompt": "right"},
+            ],
+            "edges": [
+                {"from": "gate", "to": "left", "condition": {"type": "human_selected", "choice": "left"}},
+                {"from": "gate", "to": "right", "condition": {"type": "human_selected", "choice": "right"}},
+            ],
+        }
+        definition = db.create_workflow_definition({"name": "Choice", "graph": graph})
+        jobs = FakeJobService(db, worker["id"])
+        runner = WorkflowRunner(db, jobs, poll_interval_seconds=0)
+        waiting = runner.run_workflow(definition["id"])
+        approval = db.list_approvals(state="pending", run_id=waiting["id"])[0]
+        assert approval["choices"][0]["id"] == "left" and not db.list_workflow_edges(waiting["id"])
+        runner.choose_approval(approval["id"], "right")
+        chosen = wait_for_run(db, waiting["id"], "succeeded")
+        wait_for_runner_stopped(runner, waiting["id"])
+        assert jobs.prompts == ["right"]
+        assert db.get_approval(approval["id"])["selected_choice"] == "right"
+        assert [edge["to_node"] for edge in db.list_workflow_edges(chosen["id"])] == ["right"]
+        assert_raises("already chosen", runner.choose_approval, approval["id"], "right")
+
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+        worker = db.upsert_worker({"name": "Fake", "base_url": "http://127.0.0.1:1"})
+        graph = {
             "start": "loop",
             "nodes": [{"id": "loop", "type": "worker", "worker_id": worker["id"], "prompt": "loop"}],
             "edges": [{"from": "loop", "to": "loop", "condition": {"type": "max_iterations_below", "node": "loop", "max": 3}}],
@@ -585,6 +759,86 @@ def check_human_gates() -> None:
         assert len(db.list_approvals(run_id=waiting["id"])) == 1
 
 
+def check_recovery() -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "atlas.sqlite"
+        db = Database(path)
+        worker = db.upsert_worker({"name": "Fake", "base_url": "http://127.0.0.1:1"})
+        graph = {
+            "start": "first",
+            "nodes": [
+                {"id": "first", "type": "worker", "worker_id": worker["id"], "prompt": "first"},
+                {"id": "second", "type": "worker", "worker_id": worker["id"], "prompt": "second"},
+            ],
+            "edges": [{"from": "first", "to": "second"}],
+        }
+        definition = db.create_workflow_definition({"name": "Recovery", "graph": graph})
+        run = db.create_workflow_run(
+            {
+                "workflow_definition_id": definition["id"],
+                "state": "running",
+                "current_nodes": ["second"],
+                "counters": {
+                    "jobs_started": 1,
+                    "budget_units_spent": 1,
+                    "node_counts": {"first": 1, "second": 1},
+                    "completed_nodes": ["first"],
+                    "failed_nodes": [],
+                },
+                "started_at": now_iso(),
+            }
+        )
+        db.create_workflow_node({"run_id": run["id"], "node_key": "first", "state": "succeeded", "attempt": 1})
+        old_job = db.create_job({"worker_id": worker["id"], "prompt": "second", "state": "running"})
+        interrupted_node = db.create_workflow_node(
+            {"run_id": run["id"], "node_key": "second", "state": "running", "attempt": 1, "job_id": old_job["id"]}
+        )
+
+        reopened = Database(path)
+        jobs = FakeJobService(reopened, worker["id"])
+        runner = WorkflowRunner(reopened, jobs, poll_interval_seconds=0)
+        runner.reconcile_runs()
+        recovered = reopened.get_workflow_run(run["id"])
+        assert recovered["state"] == "recovery_required" and len(reopened.list_jobs()) == 1
+        assert reopened.get_workflow_node(interrupted_node["id"])["state"] == "interrupted"
+        assert recovered["counters"]["recovery"]["interrupted"][0]["job_id"] == old_job["id"]
+        assert_raises("retry_interrupted authorization", runner.resume_run, run["id"])
+        runner.resume_run(run["id"], retry_interrupted=True)
+        retried = wait_for_run(reopened, run["id"], "succeeded")
+        wait_for_runner_stopped(runner, run["id"])
+        assert jobs.prompts == ["second"] and retried["counters"]["completed_nodes"] == ["first", "second"]
+        assert len(reopened.list_jobs()) == 2
+        event_types = [event["event_type"] for event in reopened.list_workflow_events(run["id"])]
+        assert event_types.index("recovery_required") < event_types.index("recovery_retry_authorized")
+        assert any(entry["action"] == "workflow.recovery_required" for entry in reopened.list_audit())
+
+        control_definition = reopened.create_workflow_definition(
+            {"name": "Control recovery", "graph": {"start": "done", "nodes": [{"id": "done", "type": "join", "mode": "all"}], "edges": []}}
+        )
+        control_run = reopened.create_workflow_run(
+            {"workflow_definition_id": control_definition["id"], "state": "running", "current_nodes": ["done"], "started_at": now_iso()}
+        )
+        runner.reconcile_runs()
+        assert wait_for_run(reopened, control_run["id"], "succeeded")["state"] == "succeeded"
+
+        gate_definition = reopened.create_workflow_definition(
+            {
+                "name": "Pending gate",
+                "graph": {
+                    "start": "gate",
+                    "nodes": [{"id": "gate", "type": "human_gate"}, {"id": "done", "type": "join", "mode": "all"}],
+                    "edges": [{"from": "gate", "to": "done"}],
+                },
+            }
+        )
+        waiting = runner.run_workflow(gate_definition["id"])
+        approval = reopened.list_approvals(state="pending", run_id=waiting["id"])[0]
+        runner.reconcile_runs()
+        assert reopened.get_workflow_run(waiting["id"])["state"] == "waiting_for_human"
+        runner.approve_approval(approval["id"])
+        assert wait_for_run(reopened, waiting["id"], "succeeded")["state"] == "succeeded"
+
+
 class FakeJobService:
     def __init__(self, db: Database, worker_id: str, responder=None):
         self.db = db
@@ -600,6 +854,25 @@ class FakeJobService:
         job = self.db.create_job({"worker_id": self.worker_id, "prompt": prompt, "state": "running"})
         self.db.append_job_text(job["id"], self.responder(prompt) if self.responder else f"result: {prompt}")
         self.db.update_job(job["id"], state="succeeded", finished_at=now_iso())
+        return self.db.get_job(job["id"]) or job
+
+
+class SelectiveFailJobService(FakeJobService):
+    def __init__(self, db: Database, worker_id: str, failing_prompts: set[str]):
+        super().__init__(db, worker_id)
+        self.failing_prompts = failing_prompts
+
+    def submit(self, payload: dict) -> dict:
+        prompt = payload["prompt"]
+        self.payloads.append(dict(payload))
+        self.prompts.append(prompt)
+        state = "failed" if prompt in self.failing_prompts else "succeeded"
+        job = self.db.create_job({"worker_id": self.worker_id, "prompt": prompt, "state": state})
+        if state == "succeeded":
+            self.db.append_job_text(job["id"], f"result: {prompt}")
+        else:
+            self.db.update_job(job["id"], error=f"failed: {prompt}")
+        self.db.update_job(job["id"], state=state, finished_at=now_iso())
         return self.db.get_job(job["id"]) or job
 
 

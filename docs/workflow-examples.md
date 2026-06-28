@@ -369,6 +369,60 @@ Manager response selecting the writer:
 }
 ```
 
+## Human Choice And Quorum
+
+A choice gate declares its options and each branch names one declared choice:
+
+```json
+{
+  "id": "publish_decision",
+  "type": "human_gate",
+  "label": "Choose publication path",
+  "choices": [
+    {"id": "publish", "label": "Publish"},
+    {"id": "revise", "label": "Revise"}
+  ]
+}
+```
+
+```json
+{"from":"publish_decision","to":"publisher","condition":{"type":"human_selected","choice":"publish"}}
+```
+
+A 2-of-3 join is `{"id":"reviews","type":"join","mode":"quorum","quorum":2}`.
+Incoming sources are counted once even if duplicate edges exist. With
+`"stop_on_first_failure":false`, independent ready branches continue; failed
+nodes never traverse outgoing edges and the run still finishes failed.
+
+Budget policy example:
+
+```json
+{"max_budget_units":6,"stop_on_first_failure":false}
+```
+
+Worker/manager nodes default to one unit and may set `"budget_units":2`.
+
+## File Upload And Recovery APIs
+
+Upload a bounded direct binary body (not multipart or base64):
+
+```bash
+curl -sS -X POST 'http://127.0.0.1:8787/api/workflow-runs/wfr_xxx/files?key=evidence' \
+  -H 'content-type: application/pdf' \
+  -H 'x-filename: evidence.pdf' \
+  --data-binary @evidence.pdf
+```
+
+Download the resulting `file_ref` with
+`GET /api/artifacts/art_xxx/content`. After restart, retry a
+`recovery_required` run only after reviewing possible duplicate side effects:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/workflow-runs/wfr_xxx/resume \
+  -H 'content-type: application/json' \
+  -d '{"retry_interrupted":true}'
+```
+
 ## Manual Trigger API
 
 ```bash

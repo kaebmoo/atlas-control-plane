@@ -15,6 +15,7 @@ def main() -> None:
         db = Database(Path(tmp) / "atlas.sqlite")
         with db.connect() as conn:
             tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            approval_columns = {row["name"] for row in conn.execute("PRAGMA table_info(approvals)")}
         assert {
             "workflow_definitions",
             "workflow_runs",
@@ -26,6 +27,7 @@ def main() -> None:
             "workflow_triggers",
             "workflow_trigger_events",
         } <= tables
+        assert {"choices", "selected_choice"} <= approval_columns
 
         definition = db.create_workflow_definition(
             {
@@ -71,6 +73,17 @@ def main() -> None:
             assert "already approved" in str(exc)
         else:
             raise AssertionError("deciding an approval twice must fail")
+
+        choice_approval = db.create_approval(
+            {
+                "run_id": run["id"],
+                "node_key": "choose",
+                "approval_key": "human_gate:choose:1",
+                "choices": [{"id": "left", "label": "Left"}, {"id": "right", "label": "Right"}],
+            }
+        )
+        chosen = db.choose_approval(choice_approval["id"], "right")
+        assert chosen["state"] == "chosen" and chosen["selected_choice"] == "right"
 
         trigger = db.create_workflow_trigger({"workflow_definition_id": definition["id"], "name": "Manual", "type": "manual"})
         event = db.append_workflow_trigger_event(trigger["id"], "received", {"topic": "x"}, run_id=run["id"], dedupe_key="one")

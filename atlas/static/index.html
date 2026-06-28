@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Atlas Control Plane</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260627-workflow-controls">
+    <link rel="stylesheet" href="/static/styles.css?v=20260628-workflow-m15">
   </head>
   <body>
     <div class="app-shell">
@@ -108,6 +108,8 @@
             <div class="head-actions">
               <button id="newWorkflowBtn" class="secondary-btn" type="button">New</button>
               <button id="validateWorkflowBtn" class="secondary-btn" type="button">Validate</button>
+              <button id="explainWorkflowBtn" class="secondary-btn" type="button">Explain</button>
+              <button id="repairWorkflowBtn" class="secondary-btn" type="button">Repair</button>
               <button id="saveWorkflowBtn" class="primary-btn" type="button">Save</button>
             </div>
           </div>
@@ -138,7 +140,10 @@
                 <label>Role / label<input id="builderNodeRoleInput" placeholder="reviewer"></label>
                 <label>Prompt / reason<input id="builderNodePromptInput" placeholder="Review {artifact.draft}"></label>
                 <label>Outputs<input id="builderNodeOutputsInput" placeholder="review"></label>
-                <label>Join mode<select id="builderJoinModeSelect"><option value="all">all</option><option value="any">any</option></select></label>
+                <label>Budget units<input id="builderNodeBudgetInput" type="number" min="1" value="1"></label>
+                <label>Human choices<input id="builderHumanChoicesInput" placeholder="publish:Publish, revise:Revise"></label>
+                <label>Join mode<select id="builderJoinModeSelect"><option value="all">all</option><option value="any">any</option><option value="quorum">quorum</option></select></label>
+                <label>Join quorum<input id="builderJoinQuorumInput" type="number" min="1" value="2"></label>
                 <button id="builderAddNodeBtn" class="secondary-btn" type="button">Add Node</button>
               </div>
               <div class="form-grid two-col">
@@ -149,6 +154,7 @@
                   <option value="artifact_equals">artifact_equals</option>
                   <option value="artifact_in">artifact_in</option>
                   <option value="manager_selected">manager_selected</option>
+                  <option value="human_selected">human_selected</option>
                   <option value="max_iterations_below">max_iterations_below</option>
                 </select></label>
                 <label>Artifact / node<input id="builderConditionSubjectInput" placeholder="fact_check"></label>
@@ -157,12 +163,33 @@
                 <button id="builderAddEdgeBtn" class="secondary-btn" type="button">Add Edge</button>
               </div>
               <label>Graph JSON<textarea id="workflowGraphInput" rows="12"></textarea></label>
+              <div class="item-actions">
+                <button id="suggestWorkersBtn" class="secondary-btn" type="button">Suggest Workers</button>
+              </div>
+              <div id="workerSuggestionList" class="workflow-list short-list"></div>
+              <div class="subhead">Policy</div>
+              <div id="workflowPolicyForm" class="form-grid two-col">
+                <label>Max jobs<input id="policyMaxJobsInput" type="number" min="1"></label>
+                <label>Max iterations<input id="policyMaxIterationsInput" type="number" min="1"></label>
+                <label>Max attempts / node<input id="policyMaxAttemptsInput" type="number" min="1"></label>
+                <label>Max minutes<input id="policyMaxMinutesInput" type="number" min="1"></label>
+                <label>Human after iterations<input id="policyHumanAfterInput" type="number" min="1"></label>
+                <label>Max budget units<input id="policyMaxBudgetInput" type="number" min="1"></label>
+                <label>Allowed worker IDs<input id="policyAllowedWorkersInput" placeholder="wrk_one, wrk_two"></label>
+                <label>Allowed workspace IDs<input id="policyAllowedWorkspacesInput" placeholder="wsp_one, wsp_two"></label>
+                <label class="toggle-row"><input id="policyStopOnFailureInput" type="checkbox" checked><span>Stop on first failure</span></label>
+              </div>
               <label>Policy JSON<textarea id="workflowPolicyInput" rows="4"></textarea></label>
+              <pre id="workflowExplanation" class="compact-pre"></pre>
               <div class="form-grid two-col">
                 <label>Run Input JSON<textarea id="workflowRunInput" rows="4">{}</textarea></label>
                 <div class="workflow-actions">
                   <button id="runWorkflowBtn" class="primary-btn" type="button">Run Workflow</button>
                   <div class="subhead">Artifacts</div>
+                  <label>File key<input id="workflowFileKeyInput" placeholder="attachment"></label>
+                  <label>Upload file<input id="workflowFileInput" type="file"></label>
+                  <button id="uploadWorkflowFileBtn" class="secondary-btn" type="button">Upload File</button>
+                  <div id="workflowArtifactDownloads" class="workflow-list short-list"></div>
                   <pre id="workflowArtifactList" class="compact-pre"></pre>
                 </div>
               </div>
@@ -179,8 +206,10 @@
               <div id="workflowRunControls" class="item-actions">
                 <button id="pauseWorkflowRunBtn" class="secondary-btn" type="button" disabled>Pause</button>
                 <button id="resumeWorkflowRunBtn" class="secondary-btn" type="button" disabled>Resume</button>
+                <button id="retryInterruptedRunBtn" class="danger-btn" type="button" disabled>Retry Interrupted</button>
                 <button id="cancelWorkflowRunBtn" class="danger-btn" type="button" disabled>Cancel</button>
               </div>
+              <div id="workflowRecoveryWarning" class="item-sub"></div>
               <div class="subhead">Approvals</div>
               <div id="approvalList" class="workflow-list short-list"></div>
               <pre id="workflowRunDetail" class="compact-pre"></pre>
@@ -294,6 +323,6 @@
     </div>
 
     <div id="toast" class="toast" aria-live="polite"></div>
-    <script src="/static/app.js?v=20260627-manager" type="module"></script>
+    <script src="/static/app.js?v=20260628-workflow-m15" type="module"></script>
   </body>
 </html>

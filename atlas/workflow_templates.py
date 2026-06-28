@@ -24,7 +24,7 @@ _TEMPLATES: list[dict[str, Any]] = [
                 {"from": "editor", "to": "anchor", "condition": {"type": "always"}},
             ],
         },
-        "policy": {"max_jobs": 10, "max_iterations": 3, "max_attempts_per_node": 3},
+        "policy": {"max_jobs": 10, "max_iterations": 3, "max_attempts_per_node": 3, "max_budget_units": 10},
     },
     {
         "id": "research_writer_reviewer",
@@ -42,7 +42,7 @@ _TEMPLATES: list[dict[str, Any]] = [
                 {"from": "writer", "to": "reviewer", "condition": {"type": "always"}},
             ],
         },
-        "policy": {"max_jobs": 3, "max_iterations": 3, "max_attempts_per_node": 1},
+        "policy": {"max_jobs": 3, "max_iterations": 3, "max_attempts_per_node": 1, "max_budget_units": 3},
     },
     {
         "id": "coder_tester_reviewer",
@@ -60,7 +60,7 @@ _TEMPLATES: list[dict[str, Any]] = [
                 {"from": "tester", "to": "reviewer", "condition": {"type": "always"}},
             ],
         },
-        "policy": {"max_jobs": 3, "max_iterations": 3, "max_attempts_per_node": 1},
+        "policy": {"max_jobs": 3, "max_iterations": 3, "max_attempts_per_node": 1, "max_budget_units": 3},
     },
     {
         "id": "manager_loop_max_3",
@@ -69,7 +69,7 @@ _TEMPLATES: list[dict[str, Any]] = [
         "graph": {
             "start": "manager",
             "nodes": [
-                {"id": "manager", "type": "manager", "role": "manager", "schema": "manager_decision_v1", "prompt": "Choose research, review, or stop."},
+                {"id": "manager", "type": "manager", "role": "manager", "schema": "manager_decision_v1", "prompt": "Choose research, review, or stop.", "budget_units": 1},
                 {"id": "researcher", "type": "worker", "role": "researcher", "prompt": "Research {input.topic}.", "outputs": ["research"]},
                 {"id": "reviewer", "type": "worker", "role": "reviewer", "prompt": "Review {artifact.research}.", "outputs": ["review"]},
             ],
@@ -79,7 +79,7 @@ _TEMPLATES: list[dict[str, Any]] = [
                 {"from": "researcher", "to": "manager", "condition": {"type": "always"}},
             ],
         },
-        "policy": {"max_jobs": 3, "max_iterations": 3, "max_attempts_per_node": 3, "max_minutes": 30},
+        "policy": {"max_jobs": 3, "max_iterations": 3, "max_attempts_per_node": 3, "max_minutes": 30, "max_budget_units": 3},
     },
 ]
 

@@ -20,11 +20,14 @@ class Config:
     api_token: str | None
     request_timeout_seconds: float
     enable_loopback_without_token: bool
+    upload_dir: Path | None = None
+    max_upload_bytes: int = 10 * 1024 * 1024
 
     @classmethod
     def from_env(cls) -> "Config":
         root = Path(os.getenv("ATLAS_HOME", Path.cwd())).resolve()
         db_path = Path(os.getenv("ATLAS_DB", root / "data" / "atlas.sqlite")).resolve()
+        upload_dir = Path(os.getenv("ATLAS_UPLOAD_DIR", db_path.parent / "uploads")).resolve()
         return cls(
             host=os.getenv("ATLAS_HOST", "127.0.0.1"),
             port=int(os.getenv("ATLAS_PORT", "8787")),
@@ -32,6 +35,8 @@ class Config:
             api_token=os.getenv("ATLAS_API_TOKEN") or None,
             request_timeout_seconds=float(os.getenv("ATLAS_REQUEST_TIMEOUT", "30")),
             enable_loopback_without_token=_bool_env("ATLAS_LOOPBACK_NO_AUTH", True),
+            upload_dir=upload_dir,
+            max_upload_bytes=int(os.getenv("ATLAS_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))),
         )
 
     @property

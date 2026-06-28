@@ -38,7 +38,7 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     data = dict(row)
-    list_fields = {"tags", "current_nodes", "input_artifacts", "output_artifacts"}
+    list_fields = {"tags", "current_nodes", "input_artifacts", "output_artifacts", "choices"}
     json_fields = {
         "agent_info",
         "condition_result",
@@ -235,6 +235,8 @@ CREATE TABLE IF NOT EXISTS approvals (
   approval_key TEXT NOT NULL,
   label TEXT NOT NULL DEFAULT '',
   reason TEXT NOT NULL DEFAULT '',
+  choices TEXT NOT NULL DEFAULT '[]',
+  selected_choice TEXT,
   state TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL,
   decided_at TEXT,
@@ -347,6 +349,14 @@ class Database:
         }
         for column, sql in migrations.items():
             if column not in columns:
+                conn.execute(sql)
+        approval_columns = {row["name"] for row in conn.execute("PRAGMA table_info(approvals)").fetchall()}
+        approval_migrations = {
+            "choices": "ALTER TABLE approvals ADD COLUMN choices TEXT NOT NULL DEFAULT '[]'",
+            "selected_choice": "ALTER TABLE approvals ADD COLUMN selected_choice TEXT",
+        }
+        for column, sql in approval_migrations.items():
+            if column not in approval_columns:
                 conn.execute(sql)
 
     def audit(self, action: str, resource_type: str, resource_id: str, details: Any = None, actor: str = "local") -> None:
@@ -625,9 +635,9 @@ class Database:
                 """
                 INSERT OR IGNORE INTO approvals(
                   id, run_id, workflow_node_id, node_key, approval_key, label,
-                  reason, state, created_at, updated_at
+                  reason, choices, state, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
                 (
                     approval_id,
@@ -637,6 +647,7 @@ class Database:
                     payload["approval_key"],
                     payload.get("label") or "Human approval required",
                     payload.get("reason") or "",
+                    encode_json(payload.get("choices") or []),
                     now,
                     now,
                 ),
@@ -693,6 +704,26 @@ class Database:
                 (decision, now, now, approval_id),
             )
         self.audit(f"approval.{decision}", "approval", approval_id, {"run_id": approval["run_id"], "node_key": approval["node_key"]})
+        return self.get_approval(approval_id) or {}
+
+    def choose_approval(self, approval_id: str, choice: str) -> dict[str, Any]:
+        now = now_iso()
+        with self._lock, self.connect() as conn:
+            approval = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+            if not approval:
+                raise ValueError(f"Unknown approval_id: {approval_id}")
+            if approval["state"] != "pending":
+                raise ValueError(f"approval {approval_id} already {approval['state']}")
+            choices = decode_json(approval["choices"], [])
+            if choice not in {item.get("id") for item in choices if isinstance(item, dict)}:
+                raise ValueError(f"unknown approval choice: {choice}")
+            cursor = conn.execute(
+                "UPDATE approvals SET state = 'chosen', selected_choice = ?, decided_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'",
+                (choice, now, now, approval_id),
+            )
+            if not cursor.rowcount:
+                raise ValueError(f"approval {approval_id} was already decided")
+        self.audit("approval.chosen", "approval", approval_id, {"run_id": approval["run_id"], "node_key": approval["node_key"], "choice": choice})
         return self.get_approval(approval_id) or {}
 
     def cancel_pending_approvals(self, run_id: str) -> int:

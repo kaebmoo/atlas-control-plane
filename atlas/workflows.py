@@ -52,8 +52,25 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
             raise ValueError(f"workflow manager node {node_id} schema must be {_MANAGER_SCHEMA}")
         if node["type"] == "join":
             mode = node.get("mode", "all")
-            if not isinstance(mode, str) or mode not in {"all", "any"}:
-                raise ValueError(f"workflow join node {node_id} mode must be all or any")
+            if not isinstance(mode, str) or mode not in {"all", "any", "quorum"}:
+                raise ValueError(f"workflow join node {node_id} mode must be all, any, or quorum")
+            if mode == "quorum" and (not isinstance(node.get("quorum"), int) or node["quorum"] <= 0):
+                raise ValueError(f"workflow join node {node_id} quorum must be a positive integer")
+        if node["type"] == "human_gate" and "choices" in node:
+            choices = node["choices"]
+            if not isinstance(choices, list) or not choices:
+                raise ValueError(f"workflow human_gate node {node_id} choices must be a non-empty list")
+            choice_ids = []
+            for choice in choices:
+                if not isinstance(choice, dict) or not isinstance(choice.get("id"), str) or not choice["id"].strip():
+                    raise ValueError(f"workflow human_gate node {node_id} choice requires id")
+                if not isinstance(choice.get("label"), str) or not choice["label"].strip():
+                    raise ValueError(f"workflow human_gate node {node_id} choice {choice['id']} requires label")
+                choice_ids.append(choice["id"])
+            if len(choice_ids) != len(set(choice_ids)):
+                raise ValueError(f"workflow human_gate node {node_id} choice ids must be unique")
+        if "budget_units" in node and (not isinstance(node["budget_units"], int) or node["budget_units"] <= 0):
+            raise ValueError(f"workflow node {node_id} budget_units must be a positive integer")
 
     start = graph.get("start")
     if not isinstance(start, str) or not start.strip():
@@ -74,6 +91,22 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
                 raise ValueError(f"workflow edge at index {index} manager_selected requires manager source")
             if condition.get("target") != edge["to"]:
                 raise ValueError(f"workflow edge at index {index} manager_selected target must match edge target")
+        if condition.get("type") == "human_selected":
+            source = node_map[edge["from"]]
+            if source["type"] != "human_gate":
+                raise ValueError(f"workflow edge at index {index} human_selected requires human_gate source")
+            choices = {choice["id"] for choice in source.get("choices") or []}
+            if condition.get("choice") not in choices:
+                raise ValueError(f"workflow edge at index {index} human_selected choice is not declared by source gate")
+        if node_map[edge["from"]]["type"] == "human_gate" and node_map[edge["from"]].get("choices") and condition.get("type") != "human_selected":
+            raise ValueError(f"workflow human_gate edge at index {index} requires human_selected condition")
+
+    incoming = {node_id: set() for node_id in node_ids}
+    for edge in edges:
+        incoming[edge["to"]].add(edge["from"])
+    for node in nodes:
+        if node.get("type") == "join" and node.get("mode", "all") == "quorum" and node["quorum"] > len(incoming[node["id"]]):
+            raise ValueError(f"workflow join node {node['id']} quorum exceeds distinct incoming upstream count")
 
     if _has_cycle(node_ids, edges) and not _has_loop_guard(policy or {}, edges):
         raise ValueError("workflow graph has a cycle; policy.max_iterations or max_iterations_below is required")
@@ -152,11 +185,34 @@ class WorkflowRunner:
             self.db.append_workflow_event(run_id, "run_paused")
         return self.db.get_workflow_run(run_id) or run
 
-    def resume_run(self, run_id: str) -> dict[str, Any]:
+    def resume_run(self, run_id: str, retry_interrupted: bool = False) -> dict[str, Any]:
         with self._thread_lock:
             run = self.db.get_workflow_run(run_id)
             if not run:
                 raise ValueError(f"Unknown workflow_run_id: {run_id}")
+            if run["state"] == "recovery_required":
+                if not retry_interrupted:
+                    raise ValueError("workflow run requires explicit retry_interrupted authorization")
+                definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
+                if not definition:
+                    raise ValueError("workflow definition is unavailable; run cannot be recovered")
+                counters = run.get("counters") or {}
+                completed = set(counters.get("completed_nodes") or [])
+                recovery = counters.get("recovery") or {}
+                interrupted = [item.get("node_key") for item in recovery.get("interrupted") or [] if item.get("node_key")]
+                ready = []
+                for node_key in [*interrupted, *(run.get("current_nodes") or [])]:
+                    if node_key not in completed and node_key not in ready:
+                        ready.append(node_key)
+                if not ready:
+                    raise ValueError("workflow run has no incomplete nodes to retry")
+                recovery["retry_authorized_at"] = now_iso()
+                counters["recovery"] = recovery
+                self.db.update_workflow_run(run_id, state="running", current_nodes=ready, counters=counters, error=None, finished_at=None)
+                self.db.append_workflow_event(run_id, "recovery_retry_authorized", {"nodes": ready})
+                self.db.audit("workflow.recovery_retry_authorized", "workflow_run", run_id, {"nodes": ready})
+                self._spawn_thread(run_id, definition["graph"], definition.get("policy") or {}, run.get("input") or {})
+                return self.db.get_workflow_run(run_id) or run
             if run["state"] != "paused":
                 raise ValueError(f"workflow run {run_id} cannot be resumed from {run['state']}")
             definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
@@ -168,6 +224,66 @@ class WorkflowRunner:
             if not active or not active.is_alive():
                 self._spawn_thread(run_id, definition["graph"], definition.get("policy") or {}, run.get("input") or {})
         return self.db.get_workflow_run(run_id) or run
+
+    def reconcile_runs(self) -> None:
+        with self._thread_lock:
+            for run in self.db.list_workflow_runs(limit=10000):
+                if run["state"] in {"succeeded", "failed", "cancelled", "paused", "waiting_for_human", "recovery_required"}:
+                    continue
+                active = self._threads.get(run["id"])
+                if active and active.is_alive():
+                    continue
+                definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
+                if not definition:
+                    self._mark_recovery_required(run, [], "workflow definition is unavailable")
+                    continue
+                node_map = {node["id"]: node for node in definition["graph"]["nodes"]}
+                completed = set((run.get("counters") or {}).get("completed_nodes") or [])
+                runtime_nodes = self.db.list_workflow_nodes(run["id"])
+                interrupted = []
+                for runtime_node in runtime_nodes:
+                    node = node_map.get(runtime_node["node_key"], {})
+                    if runtime_node["state"] == "running" and node.get("type") in {"worker", "manager"}:
+                        interrupted.append(
+                            {
+                                "workflow_node_id": runtime_node["id"],
+                                "node_key": runtime_node["node_key"],
+                                "job_id": runtime_node.get("job_id"),
+                                "attempt": runtime_node.get("attempt"),
+                            }
+                        )
+                        self.db.update_workflow_node(runtime_node["id"], state="interrupted", error="Atlas restarted during worker execution")
+                for node_key in run.get("current_nodes") or []:
+                    node = node_map.get(node_key, {})
+                    if node_key in completed or node.get("type") not in {"worker", "manager"}:
+                        continue
+                    if not any(item["node_key"] == node_key for item in interrupted):
+                        interrupted.append({"workflow_node_id": None, "node_key": node_key, "job_id": None, "attempt": None})
+                if interrupted:
+                    self._mark_recovery_required(run, interrupted)
+                    continue
+                ready = [node for node in run.get("current_nodes") or [] if node not in completed]
+                if ready:
+                    self.db.append_workflow_event(run["id"], "recovery_control_plane_resumed", {"nodes": ready})
+                    self.db.audit("workflow.recovery_control_plane_resumed", "workflow_run", run["id"], {"nodes": ready})
+                    self._spawn_thread(run["id"], definition["graph"], definition.get("policy") or {}, run.get("input") or {})
+                else:
+                    counters = run.get("counters") or {}
+                    self._finish_run(run["id"], "failed" if counters.get("failed_nodes") else "succeeded", counters, run.get("error"))
+
+    def _mark_recovery_required(
+        self,
+        run: dict[str, Any],
+        interrupted: list[dict[str, Any]],
+        reason: str = "Atlas restarted while worker work may have been in progress",
+    ) -> None:
+        warning = "Retry may duplicate external worker side effects; verify the interrupted job before authorizing."
+        counters = run.get("counters") or {}
+        counters["recovery"] = {"interrupted": interrupted, "reason": reason, "warning": warning}
+        self.db.update_workflow_run(run["id"], state="recovery_required", counters=counters, error=reason)
+        payload = {"interrupted": interrupted, "reason": reason, "warning": warning}
+        self.db.append_workflow_event(run["id"], "recovery_required", payload)
+        self.db.audit("workflow.recovery_required", "workflow_run", run["id"], payload)
 
     def cancel_run(self, run_id: str) -> dict[str, Any]:
         with self._thread_lock:
@@ -189,6 +305,8 @@ class WorkflowRunner:
     def approve_approval(self, approval_id: str) -> dict[str, Any]:
         with self._thread_lock:
             approval, run = self._pending_approval_context(approval_id)
+            if approval.get("choices"):
+                raise ValueError("approval requires a branch choice")
             definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
             if not definition:
                 raise ValueError("workflow definition is unavailable; approval cannot resume the run")
@@ -206,23 +324,71 @@ class WorkflowRunner:
                 node_key=approval["node_key"],
             )
             if runtime_node:
-                self.db.update_workflow_node(runtime_node["id"], state="succeeded", finished_at=now_iso())
-                completed_nodes = counters.setdefault("completed_nodes", [])
-                if approval["node_key"] not in completed_nodes:
-                    completed_nodes.append(approval["node_key"])
-                self.db.append_workflow_event(
-                    run["id"],
-                    "node_succeeded",
-                    {"approval_id": approval_id},
-                    node_key=approval["node_key"],
-                )
+                self._continue_human_gate_decision(approval, run, definition, runtime_node, None)
             else:
                 counters["requires_human_after_iterations_approved"] = True
-            self.db.update_workflow_run(run["id"], state="running", counters=counters, error=None, finished_at=None)
-            active = self._threads.get(run["id"])
-            if not active or not active.is_alive():
-                self._spawn_thread(run["id"], definition["graph"], definition.get("policy") or {}, run.get("input") or {})
+                self.db.update_workflow_run(run["id"], state="running", counters=counters, error=None, finished_at=None)
+                active = self._threads.get(run["id"])
+                if not active or not active.is_alive():
+                    self._spawn_thread(run["id"], definition["graph"], definition.get("policy") or {}, run.get("input") or {})
         return {"approval": approval, "run": self.db.get_workflow_run(run["id"]) or run}
+
+    def choose_approval(self, approval_id: str, choice: str) -> dict[str, Any]:
+        with self._thread_lock:
+            approval, run = self._pending_approval_context(approval_id)
+            if not approval.get("choices"):
+                raise ValueError("approval does not declare branch choices")
+            definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
+            if not definition:
+                raise ValueError("workflow definition is unavailable; approval cannot resume the run")
+            runtime_node = self.db.get_workflow_node(approval.get("workflow_node_id") or "")
+            if not runtime_node or runtime_node["state"] != "waiting_for_human":
+                raise ValueError("approval workflow node is unavailable")
+            approval = self.db.choose_approval(approval_id, choice)
+            self.db.append_workflow_event(
+                run["id"], "approval_chosen", {"approval_id": approval_id, "choice": choice}, node_key=approval["node_key"]
+            )
+            self._continue_human_gate_decision(approval, run, definition, runtime_node, choice)
+        return {"approval": approval, "run": self.db.get_workflow_run(run["id"]) or run}
+
+    def _continue_human_gate_decision(
+        self,
+        approval: dict[str, Any],
+        run: dict[str, Any],
+        definition: dict[str, Any],
+        runtime_node: dict[str, Any],
+        choice: str | None,
+    ) -> None:
+        graph = definition["graph"]
+        node_map = {node["id"]: node for node in graph["nodes"]}
+        gate = node_map[approval["node_key"]]
+        counters = run.get("counters") or {}
+        completed_nodes = counters.setdefault("completed_nodes", [])
+        completed = set(completed_nodes)
+        if approval["node_key"] not in completed:
+            completed.add(approval["node_key"])
+            completed_nodes.append(approval["node_key"])
+        ready = list(run.get("current_nodes") or [])
+        join_states = counters.setdefault("join_states", _initial_join_states(graph))
+        artifacts = self._load_artifacts(run["id"])
+        cycle_edges = _cycle_edges(graph.get("edges", []))
+        for edge in _outgoing_edges(graph.get("edges", [])).get(approval["node_key"], []):
+            result = _evaluate_condition(edge.get("condition", {"type": "always"}), artifacts, counters, human_choice=choice)
+            event_type = "edge_taken" if result["matched"] else "condition_skipped"
+            self.db.append_workflow_event(
+                run["id"], event_type, {"to": edge["to"], "condition_result": result}, node_key=approval["node_key"]
+            )
+            if result["matched"]:
+                self.db.append_workflow_edge(run["id"], edge["from"], edge["to"], result)
+                _schedule_node(edge, ready, completed, completed_nodes, node_map, join_states, cycle_edges)
+        self.db.update_workflow_node(runtime_node["id"], state="succeeded", finished_at=now_iso())
+        self.db.append_workflow_event(
+            run["id"], "node_succeeded", {"approval_id": approval["id"], "choice": choice}, node_key=approval["node_key"]
+        )
+        self.db.update_workflow_run(run["id"], state="running", current_nodes=ready, counters=counters, error=None, finished_at=None)
+        active = self._threads.get(run["id"])
+        if not active or not active.is_alive():
+            self._spawn_thread(run["id"], graph, definition.get("policy") or {}, run.get("input") or {})
 
     def reject_approval(self, approval_id: str) -> dict[str, Any]:
         with self._thread_lock:
@@ -284,8 +450,10 @@ class WorkflowRunner:
                 "current_nodes": [graph["start"]],
                 "counters": {
                     "jobs_started": 0,
+                    "budget_units_spent": 0,
                     "node_counts": {},
                     "completed_nodes": [],
+                    "failed_nodes": [],
                     "join_states": _initial_join_states(graph),
                 },
                 "started_at": now_iso(),
@@ -345,7 +513,9 @@ class WorkflowRunner:
         artifacts = self._load_artifacts(run_id)
         counters = run.get("counters") or {"jobs_started": 0, "node_counts": {}}
         counters.setdefault("jobs_started", 0)
+        counters.setdefault("budget_units_spent", 0)
         counters.setdefault("node_counts", {})
+        failed_nodes = counters.setdefault("failed_nodes", [])
         restore_completed_nodes = "completed_nodes" not in counters
         completed_nodes = counters.setdefault("completed_nodes", [])
         if restore_completed_nodes:
@@ -389,6 +559,32 @@ class WorkflowRunner:
                         "condition_skipped",
                         {"to": edge["to"], "condition_result": condition_result},
                         node_key=node_key,
+                    )
+
+        def record_join_failure(node_key: str) -> None:
+            for join_key, state in join_states.items():
+                if state.get("mode") != "quorum" or node_key not in state.get("upstream_nodes", []):
+                    continue
+                failed = state.setdefault("failed_upstreams", [])
+                if node_key not in failed:
+                    failed.append(node_key)
+                    self.db.append_workflow_event(
+                        run_id, "join_upstream_failed", {"join": join_key, "upstream": node_key}, node_key=join_key
+                    )
+                possible = len(state["upstream_nodes"]) - len(failed)
+                if possible < state["quorum"] and len(state["completed_upstreams"]) < state["quorum"]:
+                    state["state"] = "failed"
+                    while join_key in ready:
+                        ready.remove(join_key)
+                    self.db.append_workflow_event(
+                        run_id,
+                        "join_quorum_impossible",
+                        {
+                            "quorum": state["quorum"],
+                            "completed_upstreams": list(state["completed_upstreams"]),
+                            "failed_upstreams": list(failed),
+                        },
+                        node_key=join_key,
                     )
 
         try:
@@ -451,10 +647,10 @@ class WorkflowRunner:
                                     "approval_key": f"human_gate:{node_key}:{node_counts[node_key]}",
                                     "label": node.get("label") or f"Approve {node_key}",
                                     "reason": node.get("reason") or "Workflow reached a human gate",
+                                    "choices": node.get("choices") or [],
                                 }
                             )
                             self.db.update_workflow_node(runtime_node["id"], state="waiting_for_human")
-                            schedule_outgoing(node_key, node)
                             self._wait_for_human(run_id, ready, counters, approval)
                             return self.db.get_workflow_run(run_id) or run
                         if node_type in {"worker", "manager"}:
@@ -516,14 +712,30 @@ class WorkflowRunner:
                     if runtime_node:
                         self.db.update_workflow_node(runtime_node["id"], state="failed", error=str(exc), finished_at=now_iso())
                         self.db.append_workflow_event(run_id, "node_failed", {"error": str(exc)}, node_key=node_key)
-                    raise
+                        record_join_failure(node_key)
+                    if not runtime_node or policy.get("stop_on_first_failure", True):
+                        raise
+                    failure = {"node": node_key, "error": str(exc)}
+                    if not any(item.get("node") == node_key for item in failed_nodes):
+                        failed_nodes.append(failure)
+                    counters["failure_summary"] = {
+                        "count": len(failed_nodes),
+                        "nodes": [item["node"] for item in failed_nodes],
+                    }
+                    self.db.append_workflow_event(run_id, "failure_recorded", failure, node_key=node_key)
+                    self.db.update_workflow_run(run_id, current_nodes=ready, counters=counters)
+                    continue
 
                 schedule_outgoing(node_key, node, manager_decision)
                 self.db.update_workflow_run(run_id, current_nodes=ready, counters=counters)
 
             if (self.db.get_workflow_run(run_id) or {}).get("state") == "cancelled":
                 return self.db.get_workflow_run(run_id) or run
-            self._finish_run(run_id, "succeeded", counters)
+            if failed_nodes:
+                summary = counters.get("failure_summary") or {"count": len(failed_nodes), "nodes": [item["node"] for item in failed_nodes]}
+                self._finish_run(run_id, "failed", counters, f"workflow nodes failed: {', '.join(summary['nodes'])}")
+            else:
+                self._finish_run(run_id, "succeeded", counters)
         except _WorkflowCancelled:
             return self.db.get_workflow_run(run_id) or run
         except _WorkflowGuardTripped as exc:
@@ -562,7 +774,12 @@ class WorkflowRunner:
         self.db.append_workflow_event(
             run_id,
             "approval_created",
-            {"approval_id": approval["id"], "label": approval["label"], "reason": approval["reason"]},
+            {
+                "approval_id": approval["id"],
+                "label": approval["label"],
+                "reason": approval["reason"],
+                "choices": approval.get("choices") or [],
+            },
             node_key=approval["node_key"],
         )
         if self._threads.get(run_id) is threading.current_thread():
@@ -664,6 +881,20 @@ class WorkflowRunner:
                 errors.append(exc)
                 item_results.append({"node": target, "accepted": False, "reason": str(exc)})
 
+        if not errors:
+            combined_budget = sum(
+                _node_budget_units(node_map[target])
+                for target in selected_nodes
+                if node_map[target].get("type") in {"worker", "manager"}
+            )
+            try:
+                _check_budget(policy, int(counters.get("budget_units_spent") or 0), combined_budget)
+            except _WorkflowGuardTripped as exc:
+                errors.append(exc)
+                for item in item_results:
+                    if item["accepted"]:
+                        item.update(accepted=False, reason=str(exc))
+
         if errors:
             reason = "; ".join(str(error) for error in errors)
             for item in item_results:
@@ -719,7 +950,19 @@ class WorkflowRunner:
         graph: dict[str, Any],
         counters: dict[str, Any],
     ) -> dict[str, Any]:
-        return self.job_service.submit(self._prepare_worker_node_payload(run, node, input, artifacts, policy, graph, counters))
+        payload = self._prepare_worker_node_payload(run, node, input, artifacts, policy, graph, counters)
+        cost = _node_budget_units(node)
+        _check_budget(policy, int(counters.get("budget_units_spent") or 0), cost)
+        job = self.job_service.submit(payload)
+        counters["budget_units_spent"] = int(counters.get("budget_units_spent") or 0) + cost
+        self.db.update_workflow_run(run["id"], counters=counters)
+        self.db.append_workflow_event(
+            run["id"],
+            "budget_reserved",
+            {"job_id": job["id"], "budget_units": cost, "budget_units_spent": counters["budget_units_spent"]},
+            node_key=node["id"],
+        )
+        return job
 
     def _prepare_worker_node_payload(
         self,
@@ -1008,6 +1251,10 @@ def _validate_condition(condition: Any, edge_index: int, node_ids: set[str]) -> 
         if condition.get("target") not in node_ids:
             raise ValueError(f"workflow edge at index {edge_index} manager_selected references missing target")
         return
+    if condition_type == "human_selected":
+        if not isinstance(condition.get("choice"), str) or not condition["choice"].strip():
+            raise ValueError(f"workflow edge at index {edge_index} human_selected requires choice")
+        return
     if condition_type == "max_iterations_below":
         if condition.get("node") not in node_ids:
             raise ValueError(f"workflow edge at index {edge_index} max_iterations_below references missing node")
@@ -1054,7 +1301,7 @@ def _initial_join_states(graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
         sources = incoming.setdefault(edge["to"], [])
         if edge["from"] not in sources:
             sources.append(edge["from"])
-    return {
+    states = {
         node["id"]: {
             "mode": node.get("mode") or "all",
             "state": "ready" if node["id"] == graph.get("start") else "waiting",
@@ -1064,6 +1311,11 @@ def _initial_join_states(graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
         for node in graph.get("nodes", [])
         if node.get("type") == "join"
     }
+    for node in graph.get("nodes", []):
+        if node.get("type") == "join" and node.get("mode") == "quorum":
+            states[node["id"]]["quorum"] = node["quorum"]
+            states[node["id"]]["failed_upstreams"] = []
+    return states
 
 
 def _cycle_edges(edges: list[dict[str, Any]]) -> set[tuple[str, str]]:
@@ -1104,6 +1356,8 @@ def _schedule_node(
         if target in join_states:
             join_states[target]["state"] = "waiting"
             join_states[target]["completed_upstreams"] = []
+            if "failed_upstreams" in join_states[target]:
+                join_states[target]["failed_upstreams"] = []
 
     if node_map[target].get("type") == "join":
         state = join_states[target]
@@ -1112,7 +1366,11 @@ def _schedule_node(
         satisfied = (
             bool(state["completed_upstreams"])
             if state["mode"] == "any"
-            else set(state["upstream_nodes"]) <= set(state["completed_upstreams"])
+            else (
+                len(state["completed_upstreams"]) >= state["quorum"]
+                if state["mode"] == "quorum"
+                else set(state["upstream_nodes"]) <= set(state["completed_upstreams"])
+            )
         )
         if target in completed or not satisfied:
             return
@@ -1131,6 +1389,20 @@ def _check_limit(policy: dict[str, Any], key: str, count: int) -> None:
     value = policy.get(key)
     if isinstance(value, int) and value > 0 and count >= value:
         raise _WorkflowGuardTripped(f"workflow policy {key} exceeded")
+
+
+def _node_budget_units(node: dict[str, Any]) -> int:
+    if node.get("type") not in {"worker", "manager"}:
+        return 0
+    return int(node.get("budget_units", 1))
+
+
+def _check_budget(policy: dict[str, Any], spent: int, additional: int) -> None:
+    maximum = policy.get("max_budget_units")
+    if isinstance(maximum, int) and maximum > 0 and spent + additional > maximum:
+        raise _WorkflowGuardTripped(
+            f"workflow policy max_budget_units exceeded: {spent} spent + {additional} requested > {maximum}"
+        )
 
 
 def _requires_human_after_iterations(policy: dict[str, Any], counters: dict[str, Any]) -> bool:
@@ -1262,6 +1534,7 @@ def _evaluate_condition(
     artifacts: dict[str, Any],
     counters: dict[str, Any],
     manager_selected: set[str] | None = None,
+    human_choice: str | None = None,
 ) -> dict[str, Any]:
     condition_type = condition.get("type") or "always"
     if condition_type == "always":
@@ -1275,6 +1548,9 @@ def _evaluate_condition(
     if condition_type == "manager_selected":
         target = condition.get("target")
         return {"type": condition_type, "matched": target in (manager_selected or set()), "target": target}
+    if condition_type == "human_selected":
+        choice = condition.get("choice")
+        return {"type": condition_type, "matched": choice == human_choice, "choice": choice}
     if condition_type == "max_iterations_below":
         count = int((counters.get("node_counts") or {}).get(condition["node"]) or 0)
         return {"type": condition_type, "matched": count < int(condition["max"]), "actual": count}

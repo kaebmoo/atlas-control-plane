@@ -17,6 +17,7 @@ const state = {
   workflowArtifacts: [],
   workflowEvents: [],
   workflowTriggerEvents: [],
+  workerSuggestions: [],
   eventSource: null,
   workflowEditorDirty: false,
   streamText: "",
@@ -108,6 +109,64 @@ function defaultWorkflowGraph() {
   };
 }
 
+const POLICY_FORM_FIELDS = [
+  ["max_jobs", "#policyMaxJobsInput", "number"],
+  ["max_iterations", "#policyMaxIterationsInput", "number"],
+  ["max_attempts_per_node", "#policyMaxAttemptsInput", "number"],
+  ["max_minutes", "#policyMaxMinutesInput", "number"],
+  ["requires_human_after_iterations", "#policyHumanAfterInput", "number"],
+  ["max_budget_units", "#policyMaxBudgetInput", "number"],
+  ["allowed_worker_ids", "#policyAllowedWorkersInput", "list"],
+  ["allowed_workspace_ids", "#policyAllowedWorkspacesInput", "list"],
+  ["stop_on_first_failure", "#policyStopOnFailureInput", "boolean"],
+];
+
+function syncPolicyFormFromJson() {
+  let policy;
+  try {
+    policy = parseJsonField("#workflowPolicyInput");
+  } catch {
+    return false;
+  }
+  if (!policy || Array.isArray(policy) || typeof policy !== "object") return false;
+  for (const [key, selector, type] of POLICY_FORM_FIELDS) {
+    const value = policy[key];
+    if (type === "boolean") {
+      $(selector).checked = value !== false;
+    } else {
+      $(selector).value = type === "list" ? (Array.isArray(value) ? value.join(", ") : "") : (value ?? "");
+    }
+  }
+  return true;
+}
+
+function syncPolicyJsonFromForm() {
+  let policy;
+  try {
+    policy = parseJsonField("#workflowPolicyInput");
+  } catch {
+    return false;
+  }
+  if (!policy || Array.isArray(policy) || typeof policy !== "object") return false;
+  for (const [key, selector, type] of POLICY_FORM_FIELDS) {
+    if (type === "boolean") {
+      policy[key] = $(selector).checked;
+      continue;
+    }
+    const raw = $(selector).value.trim();
+    if (!raw) {
+      delete policy[key];
+    } else if (type === "number") {
+      policy[key] = Number.parseInt(raw, 10);
+    } else {
+      policy[key] = raw.split(",").map((value) => value.trim()).filter(Boolean);
+    }
+  }
+  $("#workflowPolicyInput").value = prettyJson(policy);
+  state.workflowEditorDirty = true;
+  return true;
+}
+
 function addBuilderNode() {
   const graph = parseJsonField("#workflowGraphInput");
   const id = $("#builderNodeIdInput").value.trim();
@@ -116,20 +175,28 @@ function addBuilderNode() {
   if ((graph.nodes || []).some((node) => node.id === id)) throw new Error(`Duplicate node ID: ${id}`);
   const role = $("#builderNodeRoleInput").value.trim();
   const prompt = $("#builderNodePromptInput").value.trim();
+  const budgetUnits = Number.parseInt($("#builderNodeBudgetInput").value, 10);
   let node;
   if (type === "manager") {
     node = { id, type, schema: "manager_decision_v1", prompt: prompt || "Choose the next bounded workflow action." };
     if (role) node.role = role;
   } else if (type === "join") {
     node = { id, type, mode: $("#builderJoinModeSelect").value };
+    if (node.mode === "quorum") node.quorum = Number.parseInt($("#builderJoinQuorumInput").value, 10);
   } else if (type === "human_gate") {
     node = { id, type, label: role || id, reason: prompt };
+    const choices = $("#builderHumanChoicesInput").value.split(",").map((item) => item.trim()).filter(Boolean).map((item) => {
+      const [choiceId, ...labelParts] = item.split(":");
+      return { id: choiceId.trim(), label: (labelParts.join(":").trim() || choiceId.trim()) };
+    });
+    if (choices.length) node.choices = choices;
   } else {
     node = { id, type, prompt };
     if (role) node.role = role;
     const outputs = $("#builderNodeOutputsInput").value.split(",").map((value) => value.trim()).filter(Boolean);
     if (outputs.length) node.outputs = outputs;
   }
+  if (["worker", "manager"].includes(type) && Number.isInteger(budgetUnits) && budgetUnits > 0) node.budget_units = budgetUnits;
   graph.nodes = [...(graph.nodes || []), node];
   graph.edges ||= [];
   graph.start ||= id;
@@ -153,6 +220,8 @@ function addBuilderEdge() {
     condition = { type, artifact: subject, path: $("#builderConditionPathInput").value.trim(), values: value.split(",").map((item) => item.trim()).filter(Boolean) };
   } else if (type === "manager_selected") {
     condition = { type, target: to };
+  } else if (type === "human_selected") {
+    condition = { type, choice: value || subject };
   } else if (type === "max_iterations_below") {
     condition = { type, node: subject, max: Number.parseInt(value, 10) };
   }
@@ -410,7 +479,20 @@ function renderWorkflowEditor(force = false) {
   $("#workflowDescriptionInput").value = workflow?.description || "";
   $("#workflowGraphInput").value = prettyJson(workflow?.graph || defaultWorkflowGraph());
   $("#workflowPolicyInput").value = prettyJson(workflow?.policy || { max_jobs: 5, max_iterations: 10 });
+  syncPolicyFormFromJson();
   if (!$("#workflowRunInput").value.trim()) $("#workflowRunInput").value = "{}";
+  renderWorkerSuggestions();
+}
+
+function renderWorkerSuggestions() {
+  $("#workerSuggestionList").innerHTML = state.workerSuggestions.length ? state.workerSuggestions.map((item) => `
+    <article class="workflow-run-item">
+      <div class="item-title"><span>${escapeHtml(item.node_id)} · ${escapeHtml(item.role || "no role")}</span><span>${escapeHtml(item.state)}</span></div>
+      <div class="item-sub">${escapeHtml(item.reason)}</div>
+      <div class="item-sub">${escapeHtml(item.worker_id || "no worker")} ${item.workspace_id ? `· ${escapeHtml(item.workspace_id)}` : ""}</div>
+      ${item.worker_id || item.workspace_id ? `<button class="secondary-btn apply-worker-suggestion" type="button" data-node-id="${escapeHtml(item.node_id)}">Apply To JSON</button>` : ""}
+    </article>
+  `).join("") : "";
 }
 
 function renderWorkflowRuns() {
@@ -436,10 +518,20 @@ function renderWorkflowRuns() {
     ...state.workflowRunDetail,
   }) : "";
   $("#workflowArtifactList").textContent = state.workflowArtifacts.length ? prettyJson(state.workflowArtifacts) : "";
+  const files = state.workflowArtifacts.filter((artifact) => artifact.kind === "file_ref");
+  $("#workflowArtifactDownloads").innerHTML = files.map((artifact) => `
+    <a class="workflow-run-item" href="/api/artifacts/${encodeURIComponent(artifact.id)}/content">
+      <span>${escapeHtml(artifact.metadata?.filename || artifact.key)}</span>
+      <span class="item-sub">${escapeHtml(artifact.metadata?.size ?? 0)} bytes · ${escapeHtml(artifact.metadata?.sha256 || "")}</span>
+    </a>
+  `).join("");
   const selectedRun = state.workflowRunDetail?.run;
   $("#pauseWorkflowRunBtn").disabled = selectedRun?.state !== "running";
   $("#resumeWorkflowRunBtn").disabled = selectedRun?.state !== "paused";
+  $("#retryInterruptedRunBtn").disabled = selectedRun?.state !== "recovery_required";
   $("#cancelWorkflowRunBtn").disabled = !selectedRun || ["succeeded", "failed", "cancelled"].includes(selectedRun.state);
+  const recovery = selectedRun?.counters?.recovery;
+  $("#workflowRecoveryWarning").textContent = recovery ? `${recovery.warning} Interrupted: ${(recovery.interrupted || []).map((item) => `${item.node_key}${item.job_id ? ` (${item.job_id})` : ""}`).join(", ")}` : "";
   $("#workflowEventList").innerHTML = state.workflowEvents.length ? state.workflowEvents.map((event) => `
     <article class="event-item">
       <div class="item-title">
@@ -480,7 +572,8 @@ function renderApprovals() {
       <div class="item-sub">${escapeHtml(approval.node_key)} · run ${shortId(approval.run_id)} · ${formatTime(approval.created_at)}</div>
       <div class="item-sub">${escapeHtml(approval.reason)}</div>
       <div class="item-actions">
-        <button class="primary-btn approve-approval" type="button" data-approval-id="${escapeHtml(approval.id)}">Approve</button>
+        ${(approval.choices || []).map((choice) => `<button class="primary-btn choose-approval" type="button" data-approval-id="${escapeHtml(approval.id)}" data-choice="${escapeHtml(choice.id)}">${escapeHtml(choice.label)}</button>`).join("")}
+        ${approval.choices?.length ? "" : `<button class="primary-btn approve-approval" type="button" data-approval-id="${escapeHtml(approval.id)}">Approve</button>`}
         <button class="danger-btn reject-approval" type="button" data-approval-id="${escapeHtml(approval.id)}">Reject</button>
       </div>
     </article>
@@ -508,6 +601,7 @@ function renderWorkflowTriggers() {
       <div class="item-sub">${trigger.enabled ? "enabled" : "disabled"} · next ${escapeHtml(formatTime(trigger.next_fire_at) || "manual")} · ${shortId(trigger.id)}</div>
       <div class="item-sub">last ${escapeHtml(trigger.last_event_state || "never")} ${escapeHtml(formatTime(trigger.last_event_at))}${trigger.last_event_error ? ` · ${escapeHtml(trigger.last_event_error)}` : ""}</div>
       <div class="item-actions">
+        <button class="secondary-btn toggle-trigger" data-trigger-id="${escapeHtml(trigger.id)}" data-enabled="${trigger.enabled ? "false" : "true"}">${trigger.enabled ? "Disable" : "Enable"}</button>
         ${["manual", "schedule", "webhook"].includes(trigger.type) ? `<button class="secondary-btn fire-trigger" data-trigger-id="${escapeHtml(trigger.id)}">Fire</button>` : ""}
         <button class="danger-btn delete-trigger" data-trigger-id="${escapeHtml(trigger.id)}">Delete</button>
       </div>
@@ -692,8 +786,10 @@ function newWorkflow() {
   state.workflowArtifacts = [];
   state.workflowEvents = [];
   state.workflowTriggerEvents = [];
+  state.workerSuggestions = [];
   state.workflowEditorDirty = false;
   $("#draftResult").textContent = "";
+  $("#workflowExplanation").textContent = "";
   $("#workflowRunInput").value = "{}";
   renderWorkflowEditor(true);
   renderWorkflowList();
@@ -708,8 +804,10 @@ function selectWorkflow(workflowId) {
   state.workflowArtifacts = [];
   state.workflowEvents = [];
   state.workflowTriggerEvents = [];
+  state.workerSuggestions = [];
   state.workflowEditorDirty = false;
   $("#draftResult").textContent = "";
+  $("#workflowExplanation").textContent = "";
   renderWorkflowEditor(true);
   renderWorkflows();
 }
@@ -742,6 +840,68 @@ async function validateWorkflow() {
     body: JSON.stringify({ graph: parseJsonField("#workflowGraphInput"), policy: parseJsonField("#workflowPolicyInput") }),
   });
   toast("Workflow valid");
+}
+
+async function explainWorkflow() {
+  const workflowId = $("#workflowNameInput").dataset.workflowId;
+  if (!workflowId) throw new Error("Save before explaining");
+  const data = await api(`/api/workflows/${workflowId}/explain`, { method: "POST" });
+  $("#workflowExplanation").textContent = data.explanation || "";
+  toast("Explanation ready; workflow unchanged");
+}
+
+async function repairWorkflow() {
+  const workflowId = $("#workflowNameInput").dataset.workflowId;
+  if (!workflowId) throw new Error("Save before repairing");
+  const data = await api(`/api/workflows/${workflowId}/repair`, {
+    method: "POST",
+    body: JSON.stringify({
+      graph: parseJsonField("#workflowGraphInput"),
+      policy: parseJsonField("#workflowPolicyInput"),
+      triggers: [],
+    }),
+  });
+  const draft = data.draft || {};
+  $("#workflowGraphInput").value = prettyJson(draft.graph || {});
+  $("#workflowPolicyInput").value = prettyJson(draft.policy || {});
+  syncPolicyFormFromJson();
+  $("#workflowExplanation").textContent = draft.explanation || "";
+  $("#draftResult").textContent = prettyJson({ warnings: draft.warnings || [], triggers: draft.triggers || [] });
+  const firstTrigger = (draft.triggers || [])[0];
+  if (firstTrigger) {
+    $("#triggerNameInput").value = firstTrigger.name || "Repaired trigger";
+    $("#triggerTypeSelect").value = firstTrigger.type || "manual";
+    $("#triggerConfigInput").value = prettyJson(firstTrigger.config || {});
+    $("#triggerEnabledInput").checked = firstTrigger.enabled !== false;
+  }
+  state.workflowEditorDirty = true;
+  toast("Validated repair copied to previews; not saved");
+}
+
+async function suggestWorkers() {
+  const data = await api("/api/workflows/suggest-workers", {
+    method: "POST",
+    body: JSON.stringify({
+      graph: parseJsonField("#workflowGraphInput"),
+      policy: parseJsonField("#workflowPolicyInput"),
+    }),
+  });
+  state.workerSuggestions = data.suggestions || [];
+  renderWorkerSuggestions();
+  toast(state.workerSuggestions.length ? "Worker suggestions ready" : "No unresolved worker nodes");
+}
+
+function applyWorkerSuggestion(nodeId) {
+  const suggestion = state.workerSuggestions.find((item) => item.node_id === nodeId);
+  if (!suggestion) throw new Error("Worker suggestion is no longer available");
+  const graph = parseJsonField("#workflowGraphInput");
+  const node = (graph.nodes || []).find((item) => item.id === nodeId);
+  if (!node) throw new Error(`Node no longer exists: ${nodeId}`);
+  if (suggestion.worker_id) node.worker_id = suggestion.worker_id;
+  if (suggestion.workspace_id) node.workspace_id = suggestion.workspace_id;
+  $("#workflowGraphInput").value = prettyJson(graph);
+  state.workflowEditorDirty = true;
+  toast("Suggestion applied to Graph JSON; not saved");
 }
 
 async function draftWorkflow() {
@@ -799,6 +959,22 @@ async function runWorkflow() {
   toast(`Workflow ${data.run.state}`);
 }
 
+async function uploadWorkflowFile() {
+  if (!state.selectedWorkflowRunId) throw new Error("Select a workflow run first");
+  const file = $("#workflowFileInput").files[0];
+  const key = $("#workflowFileKeyInput").value.trim();
+  if (!file || !key) throw new Error("File and file key are required");
+  await api(`/api/workflow-runs/${state.selectedWorkflowRunId}/files?key=${encodeURIComponent(key)}`, {
+    method: "POST",
+    headers: { "Content-Type": file.type || "application/octet-stream", "X-Filename": file.name },
+    body: file,
+  });
+  await loadWorkflowRunDetail(state.selectedWorkflowRunId);
+  renderWorkflowRuns();
+  $("#workflowFileInput").value = "";
+  toast("File artifact uploaded");
+}
+
 async function selectWorkflowRun(runId) {
   state.selectedWorkflowRunId = runId;
   await loadWorkflowRunDetail(runId);
@@ -828,12 +1004,35 @@ async function controlWorkflowRun(action) {
   toast(`Workflow ${action} requested`);
 }
 
+async function retryInterruptedRun() {
+  if (!state.selectedWorkflowRunId) return;
+  const warning = state.workflowRunDetail?.run?.counters?.recovery?.warning || "Retry may duplicate worker side effects.";
+  if (!confirm(`${warning}\n\nAuthorize retry of interrupted nodes?`)) return;
+  await api(`/api/workflow-runs/${state.selectedWorkflowRunId}/resume`, {
+    method: "POST",
+    body: JSON.stringify({ retry_interrupted: true }),
+  });
+  await loadAll();
+  toast("Interrupted-node retry authorized");
+}
+
 async function decideApproval(approvalId, action) {
   const approval = state.approvals.find((item) => item.id === approvalId);
   if (approval) state.selectedWorkflowRunId = approval.run_id;
   const data = await api(`/api/approvals/${approvalId}/${action}`, { method: "POST" });
   await loadAll();
   toast(`Approval ${data.approval.state}`);
+}
+
+async function chooseApproval(approvalId, choice) {
+  const approval = state.approvals.find((item) => item.id === approvalId);
+  if (approval) state.selectedWorkflowRunId = approval.run_id;
+  const data = await api(`/api/approvals/${approvalId}/choose`, {
+    method: "POST",
+    body: JSON.stringify({ choice }),
+  });
+  await loadAll();
+  toast(`Selected ${data.approval.selected_choice}`);
 }
 
 async function saveTrigger() {
@@ -885,6 +1084,16 @@ async function fireTrigger(triggerId) {
   await selectWorkflowTrigger(triggerId);
   if (data.run?.id) await selectWorkflowRun(data.run.id);
   toast(data.event?.state === "ignored" ? "Trigger ignored" : "Trigger fired");
+}
+
+async function toggleTrigger(triggerId, enabled) {
+  const data = await api(`/api/workflow-triggers/${triggerId}`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
+  state.workflowTriggers = state.workflowTriggers.map((trigger) => trigger.id === triggerId ? data.trigger : trigger);
+  renderWorkflowTriggers();
+  toast(`Trigger ${enabled ? "enabled" : "disabled"}`);
 }
 
 async function selectWorkflowTrigger(triggerId) {
@@ -1005,6 +1214,11 @@ document.addEventListener("click", async (event) => {
       return;
     }
   }
+  const applyWorkerButton = event.target.closest(".apply-worker-suggestion");
+  if (applyWorkerButton) {
+    try { applyWorkerSuggestion(applyWorkerButton.dataset.nodeId); } catch (error) { toast(error.message); }
+    return;
+  }
   const approveButton = event.target.closest(".approve-approval");
   if (approveButton) {
     await decideApproval(approveButton.dataset.approvalId, "approve").catch((error) => toast(error.message));
@@ -1015,9 +1229,19 @@ document.addEventListener("click", async (event) => {
     await decideApproval(rejectButton.dataset.approvalId, "reject").catch((error) => toast(error.message));
     return;
   }
+  const chooseButton = event.target.closest(".choose-approval");
+  if (chooseButton) {
+    await chooseApproval(chooseButton.dataset.approvalId, chooseButton.dataset.choice).catch((error) => toast(error.message));
+    return;
+  }
   const fireTriggerButton = event.target.closest(".fire-trigger");
   if (fireTriggerButton) {
     await fireTrigger(fireTriggerButton.dataset.triggerId).catch((error) => toast(error.message));
+    return;
+  }
+  const toggleTriggerButton = event.target.closest(".toggle-trigger");
+  if (toggleTriggerButton) {
+    await toggleTrigger(toggleTriggerButton.dataset.triggerId, toggleTriggerButton.dataset.enabled === "true").catch((error) => toast(error.message));
     return;
   }
   const deleteTriggerButton = event.target.closest(".delete-trigger");
@@ -1045,6 +1269,9 @@ $("#cancelJobBtn").addEventListener("click", () => cancelSelectedJob().catch((er
 $("#newWorkflowBtn").addEventListener("click", () => newWorkflow());
 $("#saveWorkflowBtn").addEventListener("click", () => saveWorkflow().catch((error) => toast(error.message)));
 $("#validateWorkflowBtn").addEventListener("click", () => validateWorkflow().catch((error) => toast(error.message)));
+$("#explainWorkflowBtn").addEventListener("click", () => explainWorkflow().catch((error) => toast(error.message)));
+$("#repairWorkflowBtn").addEventListener("click", () => repairWorkflow().catch((error) => toast(error.message)));
+$("#suggestWorkersBtn").addEventListener("click", () => suggestWorkers().catch((error) => toast(error.message)));
 $("#draftWorkflowBtn").addEventListener("click", () => draftWorkflow().catch((error) => toast(error.message)));
 $("#applyWorkflowTemplateBtn").addEventListener("click", () => {
   try { applyWorkflowTemplate(); } catch (error) { toast(error.message); }
@@ -1056,8 +1283,10 @@ $("#builderAddEdgeBtn").addEventListener("click", () => {
   try { addBuilderEdge(); } catch (error) { toast(error.message); }
 });
 $("#runWorkflowBtn").addEventListener("click", () => runWorkflow().catch((error) => toast(error.message)));
+$("#uploadWorkflowFileBtn").addEventListener("click", () => uploadWorkflowFile().catch((error) => toast(error.message)));
 $("#pauseWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("pause").catch((error) => toast(error.message)));
 $("#resumeWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("resume").catch((error) => toast(error.message)));
+$("#retryInterruptedRunBtn").addEventListener("click", () => retryInterruptedRun().catch((error) => toast(error.message)));
 $("#cancelWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("cancel").catch((error) => toast(error.message)));
 $("#saveTriggerBtn").addEventListener("click", () => saveTrigger().catch((error) => toast(error.message)));
 $("#applyTriggerQuickBtn").addEventListener("click", () => {
@@ -1082,6 +1311,10 @@ $("#workerForm").addEventListener("submit", (event) => saveWorker(event).catch((
 $("#workspaceForm").addEventListener("submit", (event) => saveWorkspace(event).catch((error) => toast(error.message)));
 for (const selector of ["#workflowNameInput", "#workflowDescriptionInput", "#workflowGraphInput", "#workflowPolicyInput"]) {
   $(selector).addEventListener("input", () => { state.workflowEditorDirty = true; });
+}
+$("#workflowPolicyInput").addEventListener("input", () => { syncPolicyFormFromJson(); });
+for (const [, selector] of POLICY_FORM_FIELDS) {
+  $(selector).addEventListener("input", () => { syncPolicyJsonFromForm(); });
 }
 
 loadAll()

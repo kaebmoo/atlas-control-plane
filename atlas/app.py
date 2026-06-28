@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import mimetypes
+import os
+import re
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from .config import Config
-from .db import ARTIFACT_KINDS, Database
+from .db import ARTIFACT_KINDS, Database, new_id
 from .jobs import JobManager, TERMINAL_STATES
 from .router import Router
 from .workflow_templates import workflow_templates
@@ -32,12 +35,14 @@ _WORKFLOW_POLICY_LIMITS = {
     "max_attempts_per_node": 25,
     "max_minutes": 1440,
     "requires_human_after_iterations": 100,
+    "max_budget_units": 1000000,
 }
 _WORKFLOW_POLICY_DEFAULTS = {
     "max_jobs": 20,
     "max_iterations": 5,
     "max_attempts_per_node": 3,
     "max_minutes": 30,
+    "stop_on_first_failure": True,
 }
 
 
@@ -45,10 +50,13 @@ class AtlasRuntime:
     def __init__(self, config: Config):
         self.config = config
         self.db = Database(config.db_path)
+        self.upload_dir = (config.upload_dir or config.db_path.parent / "uploads").resolve()
+        self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.jobs = JobManager(self.db, config.request_timeout_seconds)
         self.router = Router(self.db)
         self.workflows = WorkflowRunner(self.db, self.jobs)
         self.triggers = WorkflowTriggerService(self.db, self.workflows)
+        self.workflows.reconcile_runs()
 
 
 class AtlasHttpServer(ThreadingHTTPServer):
@@ -242,6 +250,10 @@ class AtlasHandler(BaseHTTPRequestHandler):
             self._json({"draft": _build_workflow_draft(runtime, self._read_json())}, HTTPStatus.CREATED)
             return
 
+        if parts == ["api", "workflows", "suggest-workers"] and method == "POST":
+            self._json({"suggestions": _suggest_workflow_workers(runtime, self._read_json())})
+            return
+
         if len(parts) == 3 and parts[:2] == ["api", "workflows"]:
             workflow_id = parts[2]
             workflow = runtime.db.get_workflow_definition(workflow_id)
@@ -331,6 +343,12 @@ class AtlasHandler(BaseHTTPRequestHandler):
             self._json({"artifacts": [_public_artifact(artifact) for artifact in runtime.db.list_artifacts(run_id=parts[2])]})
             return
 
+        if len(parts) == 4 and parts[:2] == ["api", "workflow-runs"] and parts[3] == "files" and method == "POST":
+            artifact = self._upload_workflow_file(parts[2], query)
+            runtime.triggers.artifact_created(artifact)
+            self._json({"artifact": _public_artifact(artifact)}, HTTPStatus.CREATED)
+            return
+
         if parts == ["api", "artifacts"] and method == "POST":
             payload = self._read_json()
             _validate_artifact_payload(runtime, payload)
@@ -346,6 +364,10 @@ class AtlasHandler(BaseHTTPRequestHandler):
             self._json({"artifact": _public_artifact(artifact)})
             return
 
+        if len(parts) == 4 and parts[:2] == ["api", "artifacts"] and parts[3] == "content" and method == "GET":
+            self._download_artifact(parts[2])
+            return
+
         if len(parts) == 4 and parts[:2] == ["api", "workflow-runs"] and parts[3] == "events" and method == "GET":
             if not runtime.db.get_workflow_run(parts[2]):
                 raise FileNotFoundError()
@@ -359,7 +381,11 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 self._json({"run": runtime.workflows.pause_run(parts[2])})
                 return
             if action == "resume":
-                self._json({"run": runtime.workflows.resume_run(parts[2])}, HTTPStatus.ACCEPTED)
+                payload = self._read_json()
+                self._json(
+                    {"run": runtime.workflows.resume_run(parts[2], retry_interrupted=payload.get("retry_interrupted") is True)},
+                    HTTPStatus.ACCEPTED,
+                )
                 return
             if action == "cancel":
                 self._json({"run": runtime.workflows.cancel_run(parts[2])})
@@ -378,6 +404,12 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 return
             if parts[3] == "reject":
                 self._json(runtime.workflows.reject_approval(parts[2]))
+                return
+            if parts[3] == "choose":
+                choice = self._read_json().get("choice")
+                if not isinstance(choice, str) or not choice:
+                    raise ValueError("choice is required")
+                self._json(runtime.workflows.choose_approval(parts[2], choice), HTTPStatus.ACCEPTED)
                 return
 
         if parts == ["api", "workflow-triggers"]:
@@ -466,6 +498,84 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
+    def _upload_workflow_file(self, run_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
+        runtime = self.server.runtime
+        if not runtime.db.get_workflow_run(run_id):
+            raise ValueError(f"Unknown workflow_run_id: {run_id}")
+        key = query.get("key", [""])[0]
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", key):
+            raise ValueError("file artifact key is invalid")
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            raise ValueError("Content-Length is required")
+        try:
+            length = int(raw_length)
+        except ValueError as exc:
+            raise ValueError("Content-Length must be an integer") from exc
+        if length < 0 or length > runtime.config.max_upload_bytes:
+            raise ValueError(f"file upload exceeds maximum of {runtime.config.max_upload_bytes} bytes")
+        filename = _safe_download_filename(self.headers.get("X-Filename") or "upload.bin")
+        media_type = (self.headers.get("Content-Type") or "application/octet-stream").split(";", 1)[0].strip()
+        opaque_id = new_id("file")
+        target = runtime.upload_dir / opaque_id
+        temporary = runtime.upload_dir / f".{opaque_id}.tmp"
+        digest = hashlib.sha256()
+        remaining = length
+        try:
+            with temporary.open("xb") as output:
+                while remaining:
+                    chunk = self.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        raise ValueError("file upload body is incomplete")
+                    output.write(chunk)
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, target)
+            artifact = runtime.db.create_artifact(
+                {
+                    "run_id": run_id,
+                    "key": key,
+                    "kind": "file_ref",
+                    "content": opaque_id,
+                    "metadata": {
+                        "filename": filename,
+                        "media_type": media_type or "application/octet-stream",
+                        "size": length,
+                        "sha256": digest.hexdigest(),
+                    },
+                }
+            )
+            return artifact
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            target.unlink(missing_ok=True)
+            raise
+
+    def _download_artifact(self, artifact_id: str) -> None:
+        runtime = self.server.runtime
+        artifact = runtime.db.get_artifact(artifact_id)
+        if not artifact:
+            raise FileNotFoundError()
+        if artifact.get("kind") != "file_ref":
+            raise ValueError("artifact is not a file_ref")
+        root = runtime.upload_dir.resolve()
+        target = (root / str(artifact.get("content") or "")).resolve()
+        if target.parent != root or not target.is_file():
+            raise ValueError("file_ref is outside the upload root or missing")
+        content = target.read_bytes()
+        metadata = artifact.get("metadata") or {}
+        filename = _safe_download_filename(metadata.get("filename") or "download.bin")
+        disposition = f"attachment; filename=\"download\"; filename*=UTF-8''{quote(filename, safe='')}"
+        self.send_response(HTTPStatus.OK)
+        self._cors_headers()
+        self.send_header("Content-Type", metadata.get("media_type") or "application/octet-stream")
+        self.send_header("Content-Disposition", disposition)
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
     def _stream_job_events(self, job_id: str, after: int) -> None:
         runtime = self.server.runtime
         if not runtime.db.get_job(job_id):
@@ -522,7 +632,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
     def _cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "authorization, content-type")
+        self.send_header("Access-Control-Allow-Headers", "authorization, content-type, x-filename")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 
     def _is_authorized(self) -> bool:
@@ -556,6 +666,12 @@ def _public_worker(worker: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
+def _safe_download_filename(value: Any) -> str:
+    filename = Path(str(value or "download.bin").replace("\\", "/")).name
+    filename = filename.replace("\r", "").replace("\n", "").replace('"', "").strip()
+    return filename[:255] or "download.bin"
+
+
 def _public_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
     public = dict(artifact)
     if public.get("kind") == "json":
@@ -586,7 +702,12 @@ def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any]) -
     _validate_workflow_draft_triggers(payload.get("triggers") or [])
 
 
-def _validate_workflow_references(runtime: AtlasRuntime, graph: dict[str, Any], policy: dict[str, Any]) -> None:
+def _validate_workflow_references(
+    runtime: AtlasRuntime,
+    graph: dict[str, Any],
+    policy: dict[str, Any],
+    allow_unresolved_roles: bool = False,
+) -> None:
     workers = {worker["id"]: worker for worker in runtime.db.list_workers()}
     workspaces = {workspace["id"]: workspace for workspace in runtime.db.list_workspaces()}
     allowed_worker_ids = set(_string_list(policy.get("allowed_worker_ids"), "policy.allowed_worker_ids"))
@@ -614,7 +735,13 @@ def _validate_workflow_references(runtime: AtlasRuntime, graph: dict[str, Any], 
             if allowed_worker_ids and workspace["worker_id"] not in allowed_worker_ids:
                 raise ValueError(f"workflow node {node_id} workspace worker is not allowed by policy")
 
-        if role and not worker_id and not workspace_id and not any(_worker_matches_role(worker, role) for worker in workers.values()):
+        if (
+            role
+            and not worker_id
+            and not workspace_id
+            and not allow_unresolved_roles
+            and not any(_worker_matches_role(worker, role) for worker in workers.values())
+        ):
             raise ValueError(f"workflow node {node_id} role has no matching worker: {role}")
 
 
@@ -625,6 +752,8 @@ def _validate_workflow_policy(policy: dict[str, Any]) -> None:
         value = policy[key]
         if not isinstance(value, int) or value <= 0 or value > maximum:
             raise ValueError(f"workflow policy {key} must be an integer between 1 and {maximum}")
+    if "stop_on_first_failure" in policy and not isinstance(policy["stop_on_first_failure"], bool):
+        raise ValueError("workflow policy stop_on_first_failure must be boolean")
 
 
 def _validate_workflow_draft_triggers(triggers: Any) -> None:
@@ -716,6 +845,130 @@ def _suggest_workflow_triggers(
     return triggers
 
 
+def _suggest_workflow_workers(runtime: AtlasRuntime, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    graph = payload.get("graph")
+    policy = payload.get("policy") or {}
+    validate_workflow_graph(graph, policy)
+    _validate_workflow_policy(policy)
+    _validate_workflow_references(runtime, graph, policy, allow_unresolved_roles=True)
+    unresolved = [
+        node for node in graph["nodes"]
+        if node.get("type") in {"worker", "manager"} and not node.get("worker_id") and not node.get("workspace_id")
+    ]
+    if not unresolved:
+        return []
+    if _workflow_builder_worker(runtime.db.list_workers()):
+        result = _run_workflow_builder(
+            runtime,
+            "Return only a JSON object with key suggestions. Return exactly one item for each unresolved node. "
+            "Each item has node_id, role, optional worker_id, optional workspace_id, reason, and state "
+            "(matched, fallback, or unavailable). Do not invent ids.\n\n"
+            f"Builder context JSON:\n{json.dumps(_builder_context(runtime), ensure_ascii=True)}\n\n"
+            f"Graph JSON:\n{json.dumps(graph, ensure_ascii=True)}\n\n"
+            f"Policy JSON:\n{json.dumps(policy, ensure_ascii=True)}",
+        )
+        suggestions = result.get("suggestions")
+    else:
+        suggestions = _local_worker_suggestions(runtime, unresolved, policy)
+    return _validate_worker_suggestions(runtime, unresolved, policy, suggestions)
+
+
+def _local_worker_suggestions(
+    runtime: AtlasRuntime,
+    unresolved: list[dict[str, Any]],
+    policy: dict[str, Any],
+) -> list[dict[str, Any]]:
+    allowed_workers = set(_string_list(policy.get("allowed_worker_ids"), "policy.allowed_worker_ids"))
+    workers = sorted(runtime.db.list_workers(), key=lambda worker: worker["id"])
+    if allowed_workers:
+        workers = [worker for worker in workers if worker["id"] in allowed_workers]
+    suggestions = []
+    for node in unresolved:
+        role = str(node.get("role") or "").strip().lower()
+        match = next((worker for worker in workers if role and _worker_matches_role(worker, role)), None)
+        if match:
+            suggestions.append(
+                {
+                    "node_id": node["id"],
+                    "role": role,
+                    "worker_id": match["id"],
+                    "reason": f"Exact role/tag match for {role}",
+                    "state": "matched",
+                }
+            )
+        else:
+            suggestions.append(
+                {
+                    "node_id": node["id"],
+                    "role": role,
+                    "reason": f"No configured worker matches role {role or '(missing)'}; configure a worker or apply an explicit id",
+                    "state": "unavailable",
+                }
+            )
+    return suggestions
+
+
+def _validate_worker_suggestions(
+    runtime: AtlasRuntime,
+    unresolved: list[dict[str, Any]],
+    policy: dict[str, Any],
+    suggestions: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(suggestions, list):
+        raise ValueError("workflow_builder suggestions must be a list")
+    expected = {node["id"]: str(node.get("role") or "").strip().lower() for node in unresolved}
+    workers = {worker["id"]: worker for worker in runtime.db.list_workers()}
+    workspaces = {workspace["id"]: workspace for workspace in runtime.db.list_workspaces()}
+    allowed_workers = set(_string_list(policy.get("allowed_worker_ids"), "policy.allowed_worker_ids"))
+    allowed_workspaces = set(_string_list(policy.get("allowed_workspace_ids"), "policy.allowed_workspace_ids"))
+    normalized = []
+    seen = set()
+    for item in suggestions:
+        if not isinstance(item, dict):
+            raise ValueError("workflow_builder suggestion items must be objects")
+        node_id = item.get("node_id")
+        if node_id not in expected or node_id in seen:
+            raise ValueError(f"workflow_builder suggestion references unexpected node_id: {node_id}")
+        seen.add(node_id)
+        role = str(item.get("role") or "").strip().lower()
+        if role != expected[node_id]:
+            raise ValueError(f"workflow_builder suggestion role does not match node {node_id}")
+        state = item.get("state")
+        if state not in {"matched", "fallback", "unavailable"}:
+            raise ValueError(f"workflow_builder suggestion for {node_id} has invalid state")
+        worker_id = item.get("worker_id") or None
+        workspace_id = item.get("workspace_id") or None
+        if worker_id and worker_id not in workers:
+            raise ValueError(f"workflow_builder invented worker_id: {worker_id}")
+        if worker_id and allowed_workers and worker_id not in allowed_workers:
+            raise ValueError(f"workflow_builder suggested policy-forbidden worker_id: {worker_id}")
+        if workspace_id:
+            workspace = workspaces.get(workspace_id)
+            if not workspace:
+                raise ValueError(f"workflow_builder invented workspace_id: {workspace_id}")
+            if worker_id and workspace["worker_id"] != worker_id:
+                raise ValueError(f"workflow_builder workspace_id does not belong to worker_id for {node_id}")
+            if allowed_workspaces and workspace_id not in allowed_workspaces:
+                raise ValueError(f"workflow_builder suggested policy-forbidden workspace_id: {workspace_id}")
+            if allowed_workers and workspace["worker_id"] not in allowed_workers:
+                raise ValueError(f"workflow_builder suggested workspace owned by a forbidden worker for {node_id}")
+        if state != "unavailable" and not worker_id and not workspace_id:
+            raise ValueError(f"workflow_builder suggestion for {node_id} must include a worker_id or workspace_id")
+        normalized.append(
+            {
+                "node_id": node_id,
+                "role": role,
+                **({"worker_id": worker_id} if worker_id else {}),
+                **({"workspace_id": workspace_id} if workspace_id else {}),
+                "reason": str(item.get("reason") or ""),
+                "state": state,
+            }
+        )
+    if seen != set(expected):
+        raise ValueError("workflow_builder must return exactly one suggestion per unresolved node")
+    return normalized
+
+
 def _run_workflow_builder(runtime: AtlasRuntime, prompt: str) -> dict[str, Any]:
     worker = _workflow_builder_worker(runtime.db.list_workers())
     if not worker:
@@ -743,12 +996,12 @@ def _builder_context(runtime: AtlasRuntime) -> dict[str, Any]:
         "workers": [_public_worker(worker) for worker in runtime.db.list_workers()],
         "workspaces": runtime.db.list_workspaces(),
         "node_types": {
-            "worker": {"fields": ["id", "prompt", "worker_id", "workspace_id", "role", "outputs", "output_format"]},
-            "manager": {"fields": ["id", "prompt", "worker_id", "workspace_id", "role", "schema"], "schema": "manager_decision_v1"},
-            "join": {"fields": ["id", "mode"], "modes": ["all", "any"]},
-            "human_gate": {"fields": ["id", "label", "reason"]},
+            "worker": {"fields": ["id", "prompt", "worker_id", "workspace_id", "role", "outputs", "output_format", "budget_units"]},
+            "manager": {"fields": ["id", "prompt", "worker_id", "workspace_id", "role", "schema", "budget_units"], "schema": "manager_decision_v1"},
+            "join": {"fields": ["id", "mode", "quorum"], "modes": ["all", "any", "quorum"]},
+            "human_gate": {"fields": ["id", "label", "reason", "choices"]},
         },
-        "condition_types": ["always", "artifact_equals", "artifact_in", "manager_selected", "max_iterations_below"],
+        "condition_types": ["always", "artifact_equals", "artifact_in", "manager_selected", "human_selected", "max_iterations_below"],
         "trigger_types": ["manual", "schedule", "webhook", "workflow_run_completed", "artifact_created", "worker_status_changed"],
         "schedule_configs": [{"interval_minutes": 15}, {"daily_time": "09:30"}],
         "artifact_kinds": sorted(ARTIFACT_KINDS),
@@ -812,12 +1065,16 @@ def main(argv: list[str] | None = None) -> None:
 
     config = Config.from_env()
     if args.host or args.port or args.db:
+        db_path = Path(args.db).resolve() if args.db else config.db_path
+        upload_dir = db_path.parent / "uploads" if args.db and "ATLAS_UPLOAD_DIR" not in os.environ else config.upload_dir
         config = Config(
             host=args.host or config.host,
             port=args.port or config.port,
-            db_path=Path(args.db).resolve() if args.db else config.db_path,
+            db_path=db_path,
             api_token=config.api_token,
             request_timeout_seconds=config.request_timeout_seconds,
             enable_loopback_without_token=config.enable_loopback_without_token,
+            upload_dir=upload_dir,
+            max_upload_bytes=config.max_upload_bytes,
         )
     run_server(config)

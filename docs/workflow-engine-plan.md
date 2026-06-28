@@ -16,11 +16,15 @@ coordination.
 
 ## Implementation Status
 
-Coding-plan Milestones 1–8 are implemented: workflow lifecycle controls and
+Coding-plan Milestones 1–15 are implemented: workflow lifecycle controls and
 events, fan-out with `all`/`any` joins, duplicate-schedule prevention,
 webhook/internal event triggers, first-class artifact APIs, human gates with
 approvals, bounded manager nodes with proposal validation and audit, validated
 builder tools/forms, and built-in templates.
+
+The completed follow-up adds dashboard controls, validated worker suggestions,
+budget/failure policy, human branch selection, quorum joins, bounded file
+uploads, and explicit restart recovery.
 
 ## Goals
 
@@ -226,6 +230,7 @@ succeeded
 failed
 cancelled
 paused
+recovery_required
 ```
 
 ### workflow_nodes
@@ -473,7 +478,8 @@ Modes:
 
 - `all`: all upstream nodes must succeed.
 - `any`: first successful upstream continues.
-- `quorum`: future.
+- `quorum`: continue after the declared positive count of distinct upstreams;
+  fail explicitly when the quorum becomes impossible.
 
 Join nodes execute in Atlas and do not create worker jobs. Run counters expose
 upstream completion and join state to the dashboard.
@@ -528,6 +534,14 @@ Use a small JSON condition DSL.
   "max": 3
 }
 ```
+
+### human_selected
+
+```json
+{"type":"human_selected","choice":"publish"}
+```
+
+The choice must be declared by the source `human_gate`.
 
 ## Execution Loop
 
@@ -710,6 +724,7 @@ IT staff can still edit JSON directly when precision is needed.
 - `POST /api/workflows/{id}/explain`
 - `POST /api/workflows/{id}/repair`
 - `POST /api/workflows/{id}/suggest-triggers`
+- `POST /api/workflows/suggest-workers`
 
 ### Workflow Triggers
 
@@ -729,18 +744,21 @@ IT staff can still edit JSON directly when precision is needed.
 - `POST /api/workflow-runs/{id}/resume`
 - `POST /api/workflow-runs/{id}/cancel`
 - `GET /api/workflow-runs/{id}/events`
+- `POST /api/workflow-runs/{id}/files?key=...`
 
 ### Artifacts
 
 - `GET /api/workflow-runs/{id}/artifacts`
 - `GET /api/artifacts/{id}`
 - `POST /api/artifacts`
+- `GET /api/artifacts/{id}/content`
 
 ### Human Gates
 
 - `GET /api/approvals`
 - `POST /api/approvals/{id}/approve`
 - `POST /api/approvals/{id}/reject`
+- `POST /api/approvals/{id}/choose`
 
 `GET /api/approvals` accepts optional `state` and `run_id` filters. A
 `human_gate` creates no worker job; it creates one pending approval and changes
@@ -792,6 +810,11 @@ Views:
    - list schedules and webhooks
    - enable/disable triggers
    - inspect last fire, next fire, and errors
+
+The implemented dashboard also keeps the policy form synchronized with raw
+JSON, applies builder repairs/suggestions only to unsaved previews, exposes
+human choices/quorum/budget fields, uploads file artifacts, and requires an
+explicit warning-backed action for `recovery_required` retries.
 
 ## Implementation Phases
 

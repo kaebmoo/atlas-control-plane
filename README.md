@@ -44,6 +44,13 @@ Atlas currently supports:
 - A validated workflow builder for draft, explain, repair, and trigger
   suggestions, with simple node/condition/trigger forms and raw JSON editing.
 - Four built-in workflow templates that copy into the editor without saving.
+- Policy form/JSON synchronization, non-saving Explain/Repair previews, trigger
+  enable/disable controls, and validated worker suggestions.
+- Integer budget-unit enforcement, configurable failure continuation, human
+  branch choices, and quorum joins.
+- Bounded binary file artifacts with SHA-256 metadata and secure downloads.
+- Explicit restart recovery that never retries an interrupted worker job
+  without operator authorization.
 
 This is enough to run simple real workflows such as:
 
@@ -494,6 +501,9 @@ curl -sS -X POST http://127.0.0.1:8787/api/approvals/apr_xxx/reject
 Approval resumes the staged outgoing edges. Rejection fails the run. Repeated
 decisions return an error and do not schedule downstream nodes again.
 
+Choice gates declare `choices` and use `human_selected` edges. Decide them with
+`POST /api/approvals/{id}/choose` and `{"choice":"publish"}`.
+
 ### Run A Manager Node
 
 A `manager` node uses a normal worker job but must return only the
@@ -579,6 +589,7 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 - `GET /api/workflows`
 - `POST /api/workflows`
 - `POST /api/workflows/draft`
+- `POST /api/workflows/suggest-workers`
 - `GET /api/workflows/{id}`
 - `PUT /api/workflows/{id}`
 - `DELETE /api/workflows/{id}`
@@ -591,6 +602,7 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 - `POST /api/workflow-runs`
 - `GET /api/workflow-runs/{id}`
 - `GET /api/workflow-runs/{id}/artifacts`
+- `POST /api/workflow-runs/{id}/files?key=...`
 - `GET /api/workflow-runs/{id}/events`
 - `POST /api/workflow-runs/{id}/pause`
 - `POST /api/workflow-runs/{id}/resume`
@@ -598,7 +610,9 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 - `GET /api/approvals`
 - `POST /api/approvals/{id}/approve`
 - `POST /api/approvals/{id}/reject`
+- `POST /api/approvals/{id}/choose`
 - `GET /api/artifacts/{id}`
+- `GET /api/artifacts/{id}/content`
 - `POST /api/artifacts`
 - `GET /api/workflow-triggers`
 - `POST /api/workflow-triggers`
@@ -620,6 +634,8 @@ ATLAS_DB=./data/atlas.sqlite
 ATLAS_API_TOKEN=
 ATLAS_LOOPBACK_NO_AUTH=true
 ATLAS_REQUEST_TIMEOUT=30
+ATLAS_UPLOAD_DIR=./data/uploads
+ATLAS_MAX_UPLOAD_BYTES=10485760
 ```
 
 Optional API auth:
@@ -732,6 +748,10 @@ Current missing native surfaces include:
 - No native thClaws stream resume cursor.
 - No structured HTTP API for thClaws team graph operations.
 
+After restart, Atlas marks interrupted workflow worker/manager nodes as
+`recovery_required`. It cannot inspect or resume the old thClaws stream, so an
+operator must verify possible side effects and explicitly authorize retry.
+
 Atlas handles these at the control-plane layer where possible. See
 [docs/thclaws-capability-matrix.md](docs/thclaws-capability-matrix.md).
 
@@ -782,6 +802,8 @@ python3 -B -m atlas --host 127.0.0.1 --port 8787
 ## Roadmap
 
 The deterministic workflow engine now includes graph execution, conditions,
-fan-out, joins, loop/time/job guards, artifacts, lifecycle controls, event
-triggers, human approvals, bounded manager-directed routing, the validated
-builder surface, and built-in templates. Milestones 1–8 are complete.
+fan-out, all/any/quorum joins, loop/time/job/budget guards, text/JSON/file
+artifacts, lifecycle and restart-recovery controls, event triggers, human
+approval/choice gates, bounded manager-directed routing, the validated builder
+surface, worker suggestions, and built-in templates. Milestones 1–15 are
+complete.

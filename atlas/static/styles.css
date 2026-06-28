@@ -737,4 +737,14 @@ textarea:focus {
   .rail {
     grid-template-columns: 1fr;
   }
+
+  .workflow-panel > .panel-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .workflow-panel > .panel-head .head-actions {
+    flex-wrap: wrap;
+    width: 100%;
+  }
 }

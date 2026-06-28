@@ -154,6 +154,12 @@ Policy:
 }
 ```
 
+The policy form and raw Policy JSON stay synchronized while the JSON is valid.
+Invalid raw JSON is left untouched. Optional policy fields include
+`max_budget_units`, `stop_on_first_failure`, worker/workspace allowlists, and
+the existing job/attempt/time/human limits. Worker and manager nodes may set a
+positive `budget_units`; the default is `1` per created job.
+
 ## 8. Run A Workflow
 
 In `Run Input JSON`, enter:
@@ -185,6 +191,8 @@ branches at a join node when downstream work must wait:
 
 - `all` waits for every upstream node that reaches the join.
 - `any` continues after the first successful upstream.
+- `quorum` continues after its positive `quorum` count of distinct upstreams
+  succeeds and fails explicitly when that count becomes impossible.
 - A join node does not create a worker job.
 - Resume skips node keys already recorded as completed.
 
@@ -209,6 +217,11 @@ curl -sS -X POST http://127.0.0.1:8787/api/artifacts \
 Read it with `GET /api/artifacts/{id}`. Supported kinds are `text`, `json`,
 `markdown`, `file_ref`, `summary`, and `decision`.
 
+For files, select a run, enter a file key, and use **Upload File**. Atlas sends
+the browser `File` directly as a bounded binary body, records byte size and
+SHA-256, and shows a secure download link. The server never uses the client
+filename as a storage path.
+
 ### Human Gates And Approvals
 
 Place a `human_gate` between worker nodes when a person must decide whether the
@@ -227,6 +240,10 @@ The gate creates no worker job. The run changes to `waiting_for_human`, and its
 pending approval appears beside the run detail. `Approve` resumes from the
 gate's outgoing edges; `Reject` fails the run. A second decision is rejected and
 does not execute downstream nodes again.
+
+A choice gate declares unique `{id,label}` choices. Each outgoing choice edge
+uses `{"type":"human_selected","choice":"..."}`. The dashboard shows one
+button per choice; Atlas stages no outgoing edge until the decision is stored.
 
 API equivalents:
 
@@ -297,6 +314,12 @@ remain available. Explain uses the builder when configured and a deterministic
 local summary otherwise. Repair and trigger suggestions require a
 `workflow_builder` worker and are validated before display.
 
+**Suggest Workers** accepts the unsaved graph, returns deterministic local
+role diagnostics when no builder is configured, and validates all proposed
+worker/workspace IDs and policy allowlists. **Apply To JSON** changes only the
+preview. Explain is display-only; Repair copies validated previews and never
+saves automatically. Trigger cards can be enabled or disabled in place.
+
 ### Built-In Templates
 
 Choose a template and click `Copy Template To Editor`. Atlas copies its name,
@@ -349,6 +372,17 @@ show a `Fire` button for them. Trigger cards show the last state and error;
 click a card for the full `received`, `started`, `ignored`, or `failed` history.
 Atlas blocks an internal trigger from starting its own source workflow to avoid
 an unbounded self-trigger loop.
+
+## 11. Restart Recovery
+
+On startup, Atlas leaves paused runs and pending human approvals intact.
+Interrupted worker/manager nodes become `recovery_required`; Atlas does not
+create a replacement job automatically because the old worker may already have
+performed side effects. Review the interrupted node/job IDs and warning, then
+use **Retry Interrupted** to send explicit `{"retry_interrupted":true}`
+authorization. Completed nodes and accepted approvals are not repeated. Cancel
+remains available. Native active-stream resume still requires thClaws remote
+job status/resume support.
 
 ## Troubleshooting
 

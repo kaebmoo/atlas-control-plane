@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import http.client
 import json
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -27,6 +29,8 @@ def main() -> None:
                 api_token=None,
                 request_timeout_seconds=1,
                 enable_loopback_without_token=True,
+                upload_dir=Path(tmp) / "uploads",
+                max_upload_bytes=32,
             )
         )
         server = AtlasHttpServer(("127.0.0.1", 0), runtime)
@@ -111,6 +115,7 @@ def main() -> None:
 
             draft_error = request_error(base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "make a news workflow"})
             assert "workflow_builder" in draft_error["error"]
+            check_milestones_9_and_10(base_url)
             check_milestone_7(runtime, base_url, workflow_id)
             check_milestone_8(base_url)
 
@@ -147,8 +152,11 @@ def main() -> None:
             assert schedule["next_fire_at"]
             disabled = request(base_url, "PUT", f"/api/workflow-triggers/{schedule['id']}", {"enabled": False})["trigger"]
             assert not disabled["enabled"]
+            assert schedule["id"] not in {item["id"] for item in runtime.db.list_workflow_triggers(enabled=True)}
             check_milestones_3_and_4(base_url, workflow_id)
             check_milestone_5(base_url)
+            check_milestone_14(runtime, base_url)
+            check_milestones_13_and_15(runtime, base_url)
             assert request(base_url, "DELETE", f"/api/workflow-triggers/{schedule['id']}")["deleted"]
             assert request(base_url, "DELETE", f"/api/workflow-triggers/{trigger['id']}")["deleted"]
             assert request(base_url, "DELETE", f"/api/workflows/{workflow_id}")["deleted"]
@@ -330,6 +338,61 @@ def check_milestone_5(base_url: str) -> None:
     event_types = {event["event_type"] for event in request(base_url, "GET", f"/api/workflow-runs/{rejected_run['id']}/events")["events"]}
     assert {"approval_created", "approval_rejected", "node_failed", "run_finished"} <= event_types
 
+    choice_workflow = request(
+        base_url,
+        "POST",
+        "/api/workflows",
+        {
+            "name": "Choice gate",
+            "graph": {
+                "start": "gate",
+                "nodes": [
+                    {"id": "gate", "type": "human_gate", "choices": [{"id": "finish", "label": "Finish"}]},
+                    {"id": "done", "type": "join", "mode": "all"},
+                ],
+                "edges": [{"from": "gate", "to": "done", "condition": {"type": "human_selected", "choice": "finish"}}],
+            },
+        },
+    )["workflow"]
+    choice_run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": choice_workflow["id"]})["run"]
+    choice_approval = wait_for_pending_approval(base_url, choice_run["id"])
+    assert choice_approval["choices"] == [{"id": "finish", "label": "Finish"}]
+    chosen = request(base_url, "POST", f"/api/approvals/{choice_approval['id']}/choose", {"choice": "finish"})
+    assert chosen["approval"]["selected_choice"] == "finish"
+    assert wait_for_api_run(base_url, choice_run["id"], "succeeded")["state"] == "succeeded"
+    duplicate_choice = request_error(base_url, "POST", f"/api/approvals/{choice_approval['id']}/choose", {"choice": "finish"})
+    assert "already chosen" in duplicate_choice["error"]
+
+
+def check_milestones_9_and_10(base_url: str) -> None:
+    reporter = request(
+        base_url,
+        "POST",
+        "/api/workers",
+        {"name": "Suggestion Reporter", "base_url": "http://127.0.0.1:40", "tags": ["reporter"]},
+    )["worker"]
+    graph = {
+        "start": "report",
+        "nodes": [
+            {"id": "report", "type": "worker", "role": "reporter", "prompt": "report"},
+            {"id": "missing", "type": "worker", "role": "not_configured", "prompt": "missing"},
+        ],
+        "edges": [{"from": "report", "to": "missing"}],
+    }
+    suggestions = request(
+        base_url,
+        "POST",
+        "/api/workflows/suggest-workers",
+        {"graph": graph, "policy": {"allowed_worker_ids": [reporter["id"]]}},
+    )["suggestions"]
+    assert suggestions[0]["state"] == "matched" and suggestions[0]["worker_id"] == reporter["id"]
+    assert suggestions[1]["state"] == "unavailable" and "No configured worker" in suggestions[1]["reason"]
+
+    html = request_text(base_url, "/")
+    javascript = request_text(base_url, "/static/app.js")
+    assert all(marker in html for marker in ["workflowPolicyForm", "explainWorkflowBtn", "repairWorkflowBtn", "suggestWorkersBtn"])
+    assert all(marker in javascript for marker in ["syncPolicyFormFromJson", "Validated repair copied", "applyWorkerSuggestion", "toggleTrigger"])
+
 
 def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) -> None:
     builder = runtime.db.upsert_worker(
@@ -414,6 +477,29 @@ def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) ->
             {"plain_language_prompt": "run each morning"},
         )["triggers"]
         assert suggestions == [{"name": "Morning", "type": "schedule", "config": {"daily_time": "09:30"}}]
+
+        unresolved_graph = {
+            "start": "report",
+            "nodes": [{"id": "report", "type": "worker", "role": "reporter", "prompt": "report"}],
+            "edges": [],
+        }
+        response["text"] = json.dumps(
+            {"suggestions": [{"node_id": "report", "role": "reporter", "worker_id": "wrk_invented", "reason": "x", "state": "matched"}]}
+        )
+        assert "invented worker_id" in request_error(
+            base_url, "POST", "/api/workflows/suggest-workers", {"graph": unresolved_graph}
+        )["error"]
+
+        response["text"] = json.dumps(
+            {"suggestions": [{"node_id": "report", "role": "reporter", "worker_id": builder["id"], "reason": "x", "state": "fallback"}]}
+        )
+        allowed = next(worker for worker in runtime.db.list_workers() if "reporter" in (worker.get("tags") or []))
+        assert "policy-forbidden worker_id" in request_error(
+            base_url,
+            "POST",
+            "/api/workflows/suggest-workers",
+            {"graph": unresolved_graph, "policy": {"allowed_worker_ids": [allowed["id"]]}},
+        )["error"]
     finally:
         runtime.jobs.submit = original_submit
 
@@ -457,11 +543,173 @@ def check_milestone_8(base_url: str) -> None:
     assert "template.graph" in javascript and "template.policy" in javascript
 
 
+def check_milestone_14(runtime: AtlasRuntime, base_url: str) -> None:
+    control_graph = {"start": "done", "nodes": [{"id": "done", "type": "join", "mode": "all"}], "edges": []}
+    source = request(base_url, "POST", "/api/workflows", {"name": "Upload source", "graph": control_graph})["workflow"]
+    target = request(base_url, "POST", "/api/workflows", {"name": "Upload target", "graph": control_graph})["workflow"]
+    run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": source["id"]})["run"]
+    wait_for_api_run(base_url, run["id"], "succeeded")
+    trigger = request(
+        base_url,
+        "POST",
+        "/api/workflow-triggers",
+        {
+            "workflow_definition_id": target["id"],
+            "name": "Uploaded",
+            "type": "artifact_created",
+            "config": {"source_workflow_definition_id": source["id"], "key": "attachment", "kind": "file_ref"},
+        },
+    )["trigger"]
+
+    content = b"\x00atlas-file\xff"
+    uploaded = request_binary(
+        base_url,
+        "POST",
+        f"/api/workflow-runs/{run['id']}/files?key=attachment",
+        content,
+        {"Content-Type": "application/octet-stream", "X-Filename": "../../evidence.bin"},
+    )["json"]["artifact"]
+    assert uploaded["kind"] == "file_ref" and uploaded["metadata"]["filename"] == "evidence.bin"
+    assert uploaded["metadata"]["size"] == len(content) and len(uploaded["metadata"]["sha256"]) == 64
+    downloaded = request_binary(base_url, "GET", f"/api/artifacts/{uploaded['id']}/content")
+    assert downloaded["body"] == content and "evidence.bin" in downloaded["headers"]["Content-Disposition"]
+    wait_for_trigger_event(base_url, trigger["id"], "started")
+    events = request(base_url, "GET", f"/api/workflow-triggers/{trigger['id']}/events")["events"]
+    assert sum(event["state"] == "received" for event in events) == 1
+
+    oversized = request_binary(
+        base_url,
+        "POST",
+        f"/api/workflow-runs/{run['id']}/files?key=large",
+        b"x" * 33,
+        {"Content-Type": "application/octet-stream", "X-Filename": "large.bin"},
+        expect_error=True,
+    )
+    assert "exceeds maximum" in oversized["json"]["error"]
+    manual = request(
+        base_url, "POST", "/api/artifacts", {"run_id": run["id"], "key": "text", "kind": "text", "content": "not a file"}
+    )["artifact"]
+    assert "not a file_ref" in request_error(base_url, "GET", f"/api/artifacts/{manual['id']}/content")["error"]
+
+    parsed = urllib.parse.urlparse(base_url)
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=2)
+    connection.putrequest("POST", f"/api/workflow-runs/{run['id']}/files?key=incomplete")
+    connection.putheader("Content-Length", "10")
+    connection.putheader("Content-Type", "application/octet-stream")
+    connection.endheaders()
+    connection.send(b"short")
+    connection.sock.shutdown(1)
+    response = connection.getresponse()
+    incomplete = json.loads(response.read())
+    connection.close()
+    assert "incomplete" in incomplete["error"]
+    assert not any(path.name.endswith(".tmp") for path in runtime.upload_dir.iterdir())
+
+
+def check_milestones_13_and_15(runtime: AtlasRuntime, base_url: str) -> None:
+    invalid_quorum = request_error(
+        base_url,
+        "POST",
+        "/api/workflows",
+        {
+            "name": "Invalid quorum",
+            "graph": {
+                "start": "join",
+                "nodes": [{"id": "join", "type": "join", "mode": "quorum", "quorum": 1}],
+                "edges": [],
+            },
+        },
+    )
+    assert "quorum exceeds distinct incoming" in invalid_quorum["error"]
+
+    worker = runtime.db.list_workers()[0]
+    definition = runtime.db.create_workflow_definition(
+        {
+            "name": "API recovery",
+            "graph": {
+                "start": "work",
+                "nodes": [{"id": "work", "type": "worker", "worker_id": worker["id"], "prompt": "recover"}],
+                "edges": [],
+            },
+        }
+    )
+
+    def interrupted_run() -> dict:
+        run = runtime.db.create_workflow_run(
+            {
+                "workflow_definition_id": definition["id"],
+                "state": "running",
+                "current_nodes": ["work"],
+                "counters": {"jobs_started": 0, "budget_units_spent": 0, "node_counts": {}, "completed_nodes": []},
+                "started_at": now_iso(),
+            }
+        )
+        job = runtime.db.create_job({"worker_id": worker["id"], "prompt": "old", "state": "running"})
+        runtime.db.create_workflow_node({"run_id": run["id"], "node_key": "work", "state": "running", "job_id": job["id"], "attempt": 1})
+        return run
+
+    run = interrupted_run()
+    runtime.workflows.reconcile_runs()
+    detail = request(base_url, "GET", f"/api/workflow-runs/{run['id']}")
+    assert detail["run"]["state"] == "recovery_required"
+    assert detail["run"]["counters"]["recovery"]["interrupted"][0]["job_id"]
+    assert "retry_interrupted authorization" in request_error(
+        base_url, "POST", f"/api/workflow-runs/{run['id']}/resume", {}
+    )["error"]
+
+    original_submit = runtime.jobs.submit
+
+    def submit(payload: dict) -> dict:
+        job = runtime.db.create_job({"worker_id": worker["id"], "prompt": payload["prompt"], "state": "running"})
+        runtime.db.append_job_text(job["id"], "recovered")
+        runtime.db.update_job(job["id"], state="succeeded", finished_at=now_iso())
+        return runtime.db.get_job(job["id"]) or job
+
+    runtime.jobs.submit = submit
+    try:
+        request(base_url, "POST", f"/api/workflow-runs/{run['id']}/resume", {"retry_interrupted": True})
+        assert wait_for_api_run(base_url, run["id"], "succeeded")["state"] == "succeeded"
+    finally:
+        runtime.jobs.submit = original_submit
+
+    cancelled = interrupted_run()
+    runtime.workflows.reconcile_runs()
+    assert request(base_url, "POST", f"/api/workflow-runs/{cancelled['id']}/cancel")["run"]["state"] == "cancelled"
+    html = request_text(base_url, "/")
+    javascript = request_text(base_url, "/static/app.js")
+    assert 'id="retryInterruptedRunBtn"' in html and "retry_interrupted: true" in javascript
+
+
 def request(base_url: str, method: str, path: str, payload: dict | None = None) -> dict:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(base_url + path, data=body, method=method, headers={"content-type": "application/json"})
     with urllib.request.urlopen(req, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def request_binary(
+    base_url: str,
+    method: str,
+    path: str,
+    body: bytes | None = None,
+    headers: dict[str, str] | None = None,
+    expect_error: bool = False,
+) -> dict:
+    req = urllib.request.Request(base_url + path, data=body, method=method, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            raw = response.read()
+            content_type = response.headers.get("Content-Type", "")
+            return {
+                "body": raw,
+                "json": json.loads(raw) if raw and "json" in content_type else {},
+                "headers": dict(response.headers),
+            }
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        if not expect_error:
+            raise
+        return {"body": raw, "json": json.loads(raw), "headers": dict(exc.headers)}
 
 
 def request_error(base_url: str, method: str, path: str, payload: dict | None = None) -> dict:
@@ -485,6 +733,16 @@ def wait_for_api_run(base_url: str, run_id: str, state: str) -> dict:
             return run
         time.sleep(0.02)
     raise AssertionError(f"workflow run {run_id} did not reach {state}")
+
+
+def wait_for_pending_approval(base_url: str, run_id: str) -> dict:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        approvals = request(base_url, "GET", f"/api/approvals?state=pending&run_id={run_id}")["approvals"]
+        if approvals:
+            return approvals[0]
+        time.sleep(0.01)
+    raise AssertionError(f"workflow run {run_id} did not create an approval")
 
 
 def wait_for_trigger_event(base_url: str, trigger_id: str, state: str) -> dict:
