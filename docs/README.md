@@ -35,6 +35,8 @@
   API และ dashboard design
 - [Workflow Engine Coding Plan](plans/workflow-engine-coding-plan.md) — milestone และ
   implementation checklist
+- [Sovereign Platform Plan (GA Gaps)](plans/sovereign-platform-plan.md) — สิ่งที่ยังขาด
+  เพื่อไป GA: auth/RBAC, multi-tenant แบบ silo, metering/billing, fleet provisioning, hardening
 - [NT AIaaS Business Plan](plans/nt-aiaas-business-plan.md) — แผนธุรกิจและ pitch
   (ไฟล์ local ที่ถูก ignore จาก Git)
 
@@ -43,6 +45,8 @@
 ไฟล์ใน [`prompts/`](prompts/) ใช้เป็น prompt สำหรับงานพัฒนา:
 
 - [Workflow Engine Coding Spin Prompts](prompts/workflow-engine-spin-prompts.md)
+- [Sovereign Platform Spin Prompts](prompts/sovereign-platform-spin-prompts.md) —
+  prompts สำหรับ implement ตาม sovereign platform plan (M1–M3 พร้อมรัน)
 
 ## โครงสร้าง
 
@@ -55,9 +59,11 @@ docs/
 ├── plans/
 │   ├── workflow-engine-plan.md
 │   ├── workflow-engine-coding-plan.md
+│   ├── sovereign-platform-plan.md
 │   └── nt-aiaas-business-plan.md
 ├── prompts/
-│   └── workflow-engine-spin-prompts.md
+│   ├── workflow-engine-spin-prompts.md
+│   └── sovereign-platform-spin-prompts.md
 ├── architecture.md
 ├── thclaws-capability-matrix.md
 ├── workflow-examples.md
