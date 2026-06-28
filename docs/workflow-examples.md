@@ -7,7 +7,7 @@ worker · `{{ }}` manager · `{ }` human gate · `(( ))` join · `([ ])` run
 outcome. Edge labels are the condition that must hold to traverse.
 
 For definitions of every node type, join mode, condition, artifact kind, policy
-field, and trigger used below, see [Concepts & Reference](concepts.md).
+field, and trigger used below, see [Concepts & Reference](concepts-en.md).
 
 ## Reporter To Anchor
 

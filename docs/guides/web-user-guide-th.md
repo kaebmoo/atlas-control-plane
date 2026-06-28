@@ -271,7 +271,7 @@ Coder → Tester → Reviewer และ Manager-directed loop
 Prompt อ้าง input ด้วย `{input.topic}` และ artifact ด้วย `{artifact.notes}` ดู graph
 ฉบับเต็มใน [Workflow Examples](../workflow-examples.md) และดูนิยามทุกตัว (node type,
 join mode, condition, artifact kind, policy, trigger) ใน
-[Concepts & Reference](../concepts.md)
+[Concepts & Reference](../concepts-th.md)
 
 ### 6.3 Builder Lite
 

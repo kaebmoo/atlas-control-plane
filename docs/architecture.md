@@ -2,9 +2,9 @@
 
 Atlas is intentionally outside thClaws. thClaws remains the worker runtime; Atlas owns coordination, routing, state, and the browser control surface.
 
-> For bilingual definitions of every term used here (node types, join modes, edge
+> For definitions of every term used here (node types, join modes, edge
 > conditions, artifact kinds, policy, triggers, and states), see
-> [Concepts & Reference](concepts.md).
+> [Concepts & Reference](concepts-en.md).
 
 ```mermaid
 flowchart LR

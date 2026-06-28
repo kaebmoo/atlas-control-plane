@@ -253,7 +253,7 @@ UI-supported conditions are `always`, `artifact_equals`, `artifact_in`,
 
 Use `{input.topic}` for run input and `{artifact.notes}` for artifacts. See
 [Workflow Examples](../workflow-examples.md) for complete graphs, and
-[Concepts & Reference](../concepts.md) for full definitions of every node type,
+[Concepts & Reference](../concepts-en.md) for full definitions of every node type,
 join mode, condition, artifact kind, policy field, and trigger.
 
 ### Builder Lite

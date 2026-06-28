@@ -1,0 +1,362 @@
+# Atlas — นิยามและเอกสารอ้างอิง
+
+[English](concepts-en.md) · **ภาษาไทย**
+
+เอกสารนี้เป็นจุดอ้างอิงเดียวสำหรับนิยามทุกตัวที่ระบบ Atlas ใช้จริง ค่าที่แสดง
+(ชนิด node, mode, condition, kind, policy, state) คือค่าตรงตัวที่ API รับและ engine
+ตรวจสอบ ทุกค่าดึงมาจากซอร์สโค้ดจริง ไม่ใช่การคาดเดา
+
+> ดูเพิ่ม: [ตัวอย่าง Workflow](workflow-examples.md) ·
+> [Architecture](architecture.md) · [คู่มือเว็บ (ไทย)](guides/web-user-guide-th.md)
+
+## สารบัญ
+
+1. [วัตถุหลัก](#1-วัตถุหลัก)
+2. [ลำดับการ route](#2-ลำดับการ-route)
+3. [สถานะ job](#3-สถานะ-job)
+4. [สถานะ workflow run](#4-สถานะ-workflow-run)
+5. [ชนิด node](#5-ชนิด-node)
+6. [โหมด join](#6-โหมด-join)
+7. [เงื่อนไข edge](#7-เงื่อนไข-edge)
+8. [ตัวแปรใน prompt](#8-ตัวแปรใน-prompt)
+9. [ชนิด artifact](#9-ชนิด-artifact)
+10. [นโยบายและ guard](#10-นโยบายและ-guard)
+11. [การตัดสินใจของ manager](#11-การตัดสินใจของ-manager-manager_decision_v1)
+12. [ทริกเกอร์](#12-ทริกเกอร์)
+13. [ประตูคนและการอนุมัติ](#13-ประตูคนและการอนุมัติ)
+
+---
+
+## 1. วัตถุหลัก
+
+Atlas เป็น control plane ส่วน thClaws worker เป็นตัวทำงานจริง ด้านล่างคือเรกคอร์ดที่
+Atlas เก็บใน SQLite
+
+| วัตถุ | ความหมาย |
+| --- | --- |
+| **worker** | thClaws API หนึ่ง endpoint ต่อหนึ่งเครื่อง/รันไทม์ |
+| **workspace** | directory ของโปรเจกต์จริงที่ผูกกับ worker |
+| **conversation** | ตัวระบุบทสนทนาในระดับ Atlas |
+| **session binding** | จับคู่ conversation ของ Atlas กับ `session_id` ของ thClaws |
+| **job** | การรันหนึ่งครั้งที่ถูก route ไปยัง worker |
+| **job event** | event แบบเขียนต่อท้าย เก็บจากสตรีม SSE ของ worker |
+| **workflow definition** | graph + policy JSON ที่มีเวอร์ชัน |
+| **workflow run** | การรัน definition หนึ่งครั้ง |
+| **workflow node / edge** | สถานะรันไทม์ของ node และ edge ในกราฟ |
+| **workflow event** | ไทม์ไลน์ lifecycle ของ run แบบเขียนต่อท้าย |
+| **artifact** | ข้อมูลผลลัพธ์แบบมี kind บนกระดาน (blackboard) ของ workflow |
+| **trigger / trigger event** | แหล่ง automation และประวัติการ dedupe/รัน |
+| **audit log** | บันทึก action ของผู้ใช้และระบบ |
+
+---
+
+## 2. ลำดับการ route
+
+เมื่อมีการส่ง job, Atlas เลือก worker/workspace ตามลำดับนี้ กฎข้อแรกที่ตอบได้คือผู้ชนะ
+
+1. ระบุ `workspace_id` ตรง ๆ
+2. ระบุ `worker_id` ตรง ๆ
+3. ใช้ session binding ของ conversation เดิม
+4. route อัตโนมัติจากสถานะ online, workspace key, company, tags, role และคำใบ้ใน prompt
+
+ดู flowchart ได้ใน [คู่มือเว็บ §4](guides/web-user-guide-th.md#4-command-ส่งงานเดี่ยวและ-handoff)
+
+---
+
+## 3. สถานะ job
+
+| สถานะ | ความหมาย |
+| --- | --- |
+| `queued` | รอเริ่ม |
+| `running` | worker กำลังทำงาน |
+| `cancel_requested` | Atlas รับคำขอยกเลิกแล้ว |
+| `succeeded` | สำเร็จ |
+| `failed` | ล้มเหลว; ดู event/error |
+| `cancelled` | ยกเลิกแล้ว |
+
+การยกเลิกเป็น best effort: job จะเป็น `cancel_requested` ก่อน และ worker อาจทำ
+side effect ไปแล้ว
+
+---
+
+## 4. สถานะ workflow run
+
+| สถานะ | ความหมาย |
+| --- | --- |
+| `running` | กำลังรัน node |
+| `paused` | ผู้ใช้สั่งหยุด; resume ทำต่อโดยไม่ทำ node ที่เสร็จแล้วซ้ำ |
+| `waiting_for_human` | ติดรอที่ human gate |
+| `recovery_required` | Atlas restart กลางคัน; node ที่ค้างต้อง retry เอง |
+| `succeeded` | node ที่ไปถึงได้เสร็จทั้งหมด |
+| `failed` | node ล้มเหลวหรือ guard ทำงาน |
+| `cancelled` | ผู้ใช้ยกเลิก |
+
+หลัง restart, node ที่ค้างจะ **ไม่** ถูก retry อัตโนมัติ — ใช้ **Retry interrupted**
+หลังตรวจความเสี่ยง side effect ซ้ำเท่านั้น ดู diagram lifecycle ได้ใน
+[คู่มือเว็บ §7](guides/web-user-guide-th.md#7-monitor-ติดตาม-workflow)
+
+---
+
+## 5. ชนิด node
+
+ทุก node มี `id` และ `type` เฉพาะ `worker` และ `manager` ที่สร้าง job บน thClaws และ
+ใช้ budget ส่วน `join` และ `human_gate` ทำงานในชั้น control plane เท่านั้น
+
+### `worker`
+
+สร้าง job บน thClaws worker
+
+| ฟิลด์ | ความหมาย |
+| --- | --- |
+| `role` | role สำหรับ route เช่น `reporter` |
+| `worker_id` / `workspace_id` | ระบุ worker/workspace ตรง ๆ |
+| `prompt` | งานที่สั่ง; ใช้ตัวแปร prompt ได้ |
+| `outputs` | คีย์ artifact ที่ node นี้เขียน |
+| `output_format` | `json` จะ parse คำตอบเป็น JSON (parse ไม่ได้ = node fail) |
+| `budget_units` | ต้นทุนเทียบ `max_budget_units` (ค่าเริ่มต้น `1`) |
+
+คำตอบถูกเก็บไว้ที่คีย์ `outputs` **ตัวแรก** (เป็น JSON ที่ parse แล้วถ้าตั้ง
+`output_format: json`)
+
+### `manager`
+
+เสนอ node ถัดไปภายใต้ข้อจำกัด; Atlas ตรวจสอบและตัดสิน
+
+| ฟิลด์ | ความหมาย |
+| --- | --- |
+| `worker_id` | worker ที่รัน manager |
+| `schema` | สัญญา output — `manager_decision_v1` |
+| `prompt` / `budget_units` | เหมือน node แบบ worker |
+
+ดู [§11](#11-การตัดสินใจของ-manager-manager_decision_v1)
+
+### `join`
+
+รวม branch ที่แตกออก ไม่สร้าง job มี `mode` (ดู [§6](#6-โหมด-join)) และถ้าเป็น quorum
+ต้องมี `quorum` (จำนวนเต็ม) edge ขาเข้าซ้ำนับ upstream เพียงครั้งเดียว
+
+### `human_gate`
+
+หยุดรอคน ไม่สร้าง job
+
+| ฟิลด์ | ความหมาย |
+| --- | --- |
+| `label` | ข้อความที่แสดงให้ผู้ใช้ |
+| `reason` | เหตุผลที่ต้องอนุมัติ |
+| `choices` | สำหรับ choice gate: รายการ `{id, label}` |
+
+ดู [§13](#13-ประตูคนและการอนุมัติ)
+
+---
+
+## 6. โหมด join
+
+join จะไปต่อ downstream เมื่อ branch ขาเข้าครบตามโหมด และ downstream ถูก schedule
+เพียงครั้งเดียว
+
+| โหมด | พร้อมเมื่อ… |
+| --- | --- |
+| `all` *(ค่าเริ่มต้น)* | upstream ที่ประกาศไว้ **ทุกตัว** complete |
+| `any` | upstream **อย่างน้อยหนึ่งตัว** complete |
+| `quorum` | จำนวน upstream ที่ complete **≥ `quorum`** |
+
+โหมด `any` และ `quorum`: branch ที่เหลือยังรันต่อ แต่ join และ downstream ไม่ถูก
+schedule ซ้ำ node ที่ fail จะไม่เดินผ่าน edge ขาออกของตัวเอง
+
+---
+
+## 7. เงื่อนไข edge
+
+ทุก edge มี `condition` ถ้าไม่ใส่จะเป็น `always` **เงื่อนไขเป็นอิสระต่อกัน** — สอง edge
+ที่ออกจาก node เดียวกันคือ OR ไม่ใช่ AND ไม่มี expression engine มีแค่หกชนิดนี้
+
+| ชนิด | ตรงเมื่อ… | ฟิลด์ที่ต้องมี |
+| --- | --- | --- |
+| `always` | ตรงเสมอ | — |
+| `artifact_equals` | `artifact[path]` **เท่ากับ** `value` | `artifact`, `value` (`path` ไม่บังคับ) |
+| `artifact_in` | `artifact[path]` **อยู่ใน** `values[]` | `artifact`, `values` (`path` ไม่บังคับ) |
+| `manager_selected` | manager เลือก `target` | `target` (node id) |
+| `human_selected` | คนเลือก `choice` | `choice` (string) |
+| `max_iterations_below` | `node` ถูกรัน **น้อยกว่า** `max` ครั้ง | `node` (node id), `max` (จำนวนเต็มบวก) |
+
+`path` เดินเข้า JSON ของ artifact แบบ dot-path เช่น `verdict` หรือ `items.0.id`
+สำหรับ list
+
+`max_iterations_below` อ่านจำนวนครั้งที่ node ถูกรัน ใช้ทำลูปแบบมีขอบเขต อย่าสับสนกับ
+`max_iterations` ที่เป็น guard ระดับ policy ([§10](#10-นโยบายและ-guard))
+
+---
+
+## 8. ตัวแปรใน prompt
+
+prompt ของ worker/manager แทนค่า `{...}` จากสองราก:
+
+| ตัวแปร | แหล่งข้อมูล |
+| --- | --- |
+| `{input.X}` | JSON ของ run input |
+| `{artifact.KEY}` | เนื้อหา artifact ตามคีย์ |
+
+- dot-path เข้า JSON ซ้อนได้ เช่น `{artifact.fact_check.verdict}`
+- ค่า dict/list จะถูกใส่เป็น JSON แบบกระชับ
+- รากที่ไม่รู้จัก → `unknown prompt variable`; path ที่ไม่มี → `missing prompt variable`
+
+node แบบ `manager` ยังพิจารณาสถานะ run (`graph`, `current_node`, `artifacts`,
+`counters`, `policy`) และต้องตอบเป็น JSON `manager_decision_v1`
+
+---
+
+## 9. ชนิด artifact
+
+artifact คือกระดานข้อมูลที่ node ทุกตัวใน run เดียวกันใช้ร่วมกัน แต่ละชิ้นคือ
+`{key, kind, content, metadata}` — node เขียนลงไป ส่วน prompt (`{artifact.KEY}`),
+edge condition และ trigger `artifact_created` อ่านออกมา
+
+| kind | พฤติกรรม |
+| --- | --- |
+| `json` | **ถูก parse ตอนโหลด** — ใช้ dot-path ใน condition/prompt ได้ |
+| `file_ref` | **ตัวชี้ไปไฟล์ที่อัปโหลด** (ไม่ใช่ตัวไฟล์) |
+| `text` | string ล้วน; ค่าเริ่มต้นของ output |
+| `markdown` | string ล้วน ติดป้ายว่า markdown |
+| `summary` | string ล้วน ติดป้ายว่าบทสรุป |
+| `decision` | string ล้วน ติดป้ายว่าการตัดสินใจ |
+
+มีแค่สอง kind ที่เปลี่ยนพฤติกรรมของ engine: **`json`** (content ถูก `json.loads`
+จึงใช้ `{artifact.fact_check.verdict}` และ condition แบบ `path` ได้) และ **`file_ref`**
+(ไฟล์ binary ที่ Atlas เก็บและส่งให้เมื่อขอ) ส่วน `text`, `markdown`, `summary`,
+`decision` เป็น **ป้ายเชิงความหมายเท่านั้น** — engine มองเป็น string ทั้งก้อน แต่ป้าย
+ยังใช้เป็น filter ของ trigger `artifact_created` ได้
+
+### การตั้ง kind
+
+- **output ของ worker** เป็น `text` โดยปริยาย; ตั้ง `output_format: "json"` เพื่อเก็บเป็น `json`
+- **สร้างเอง** — `POST /api/artifacts` ระบุ `kind` และ `content` ได้เลย
+- **การอัปโหลดไฟล์** ได้ `file_ref` เสมอ (ดูด้านล่าง)
+
+### การอัปโหลดไฟล์ (`file_ref`)
+
+`POST /api/workflow-runs/{run_id}/files?key=...` (หรือ **Monitor → เลือก run →
+Upload file**) แนบไฟล์ binary เข้ากับ run ที่มีอยู่ในรูป `file_ref` พร้อมบันทึก
+filename, ขนาด, SHA-256 ดาวน์โหลดด้วย `GET /api/artifacts/{id}/content` ดีฟอลต์ 10 MiB
+(`ATLAS_MAX_UPLOAD_BYTES`)
+
+> **สำคัญ:** worker จะ **ไม่** อ่านไฟล์ที่อัปโหลดให้อัตโนมัติ — `{artifact.KEY}` ของ
+> `file_ref` ได้แค่ตัวชี้ ไม่ใช่เนื้อไฟล์ การอัปโหลดมีไว้ให้ **คน** (รีวิวเวอร์ดาวน์โหลดดูตอน
+> human gate) หรือ **ระบบภายนอก** ที่เรียก content API เอง โดยมี hash ผูกไฟล์กับ run ไว้ตรวจสอบ
+
+### ตัวอย่าง 1 — artifact `json` ใช้ตัดสินเส้นทาง
+
+node `fact_checker` ตั้ง `output_format: "json"` แล้วตอบ `{"verdict":"approved"}`
+Atlas เก็บเป็น artifact `json` ทำให้ edge ขาออกอ่าน field ด้วย `path` ได้:
+
+```json
+{"from":"fact_checker","to":"anchor","condition":{"type":"artifact_equals","artifact":"fact_check","path":"verdict","value":"approved"}}
+```
+
+ถ้าไม่ตั้ง `output_format: "json"` content จะเป็น string ทั้งก้อน และ `path: "verdict"`
+จะ resolve ไม่ได้ ดู graph เต็ม:
+[Fact Checker Approved Branch](workflow-examples.md#fact-checker-approved-branch)
+
+### ตัวอย่าง 2 — อัปโหลด `file_ref` ให้คนรีวิว
+
+run อนุมัติสัญญาหยุดที่ human gate มีคนอัปโหลดไฟล์สัญญา รีวิวเวอร์ดาวน์โหลดไปดูแล้ว
+กดอนุมัติ — worker ไม่ได้อ่าน PDF เลย คนเป็นคนอ่าน
+
+```bash
+# 1) run ค้างที่ human gate (waiting_for_human)
+curl -sS -X POST 'http://127.0.0.1:8787/api/workflow-runs/wfr_xxx/files?key=contract' \
+  -H 'content-type: application/pdf' \
+  -H 'x-filename: contract.pdf' \
+  --data-binary @contract.pdf
+# 2) รีวิวเวอร์ดาวน์โหลดไปอ่าน
+curl -sS http://127.0.0.1:8787/api/artifacts/art_xxx/content -o contract.pdf
+# 3) กด Approve ใน Monitor แล้ว run ไปต่อ
+```
+
+ไฟล์พร้อม SHA-256 ผูกกับ run ไว้ตรวจสอบย้อนหลัง
+
+---
+
+## 10. นโยบายและ guard
+
+policy กำหนดขอบเขตของ run เมื่อ guard ทำงาน Atlas จะ pause หรือ fail แบบชัดเจน
+
+| คีย์ | ความหมาย |
+| --- | --- |
+| `max_jobs` | จำนวน job สูงสุดต่อ run |
+| `max_iterations` | จำนวนรอบรวมสูงสุด |
+| `max_attempts_per_node` | จำนวนครั้งสูงสุดต่อ node |
+| `max_minutes` | เวลารวมสูงสุด (นาที) |
+| `requires_human_after_iterations` | บังคับอนุมัติหนึ่งครั้งเมื่อ job เริ่มครบจำนวนนี้ |
+| `max_budget_units` | budget รวม; เป็นหน่วยนามธรรม **ไม่ใช่** เงินหรือ token |
+| `allowed_worker_ids` | allowlist ของ worker id |
+| `allowed_workspace_ids` | allowlist ของ workspace id |
+| `stop_on_first_failure` | หยุด run เมื่อ branch แรก fail; **ค่าเริ่มต้น `true`** |
+
+ถ้า `stop_on_first_failure: false` branch อิสระยังรันต่อ แต่ run ยังจบเป็น `failed`
+ถ้ามี node ใด fail แต่ละ node แบบ worker/manager ใช้ `budget_units` (ค่าเริ่มต้น `1`)
+เทียบกับ `max_budget_units`
+
+---
+
+## 11. การตัดสินใจของ manager (`manager_decision_v1`)
+
+node แบบ manager ต้องตอบเป็น JSON นี้เท่านั้น manager เป็นผู้เสนอ; Atlas ตรวจสอบ
+(worker/workspace ที่อนุญาต, guard เรื่อง iteration/budget, artifact ที่ต้องมี,
+ห้ามใช้ edge ต้องห้าม) แล้วจึงตัดสิน
+
+| ฟิลด์ | ความหมาย |
+| --- | --- |
+| `stop` | `true` = จบ run; `next` ต้องว่าง |
+| `reason` | เหตุผลของการตัดสินใจ |
+| `next[]` | action ที่เลือก แต่ละตัว `{node, input_artifacts[], instructions}` |
+
+เลือกได้เฉพาะ node ที่มี edge `manager_selected` ออกจาก manager เท่านั้น
+
+```json
+{
+  "stop": false,
+  "reason": "Research artifact is ready.",
+  "next": [
+    {"node": "writer", "input_artifacts": ["research"], "instructions": "Produce one concise draft."}
+  ]
+}
+```
+
+---
+
+## 12. ทริกเกอร์
+
+trigger ใช้เริ่ม workflow run ชนิด `manual`, `schedule`, `webhook` ยิงจากภายนอก ส่วน
+internal event สามชนิดยิงโดย Atlas เท่านั้น Atlas กันการ self-trigger ที่ไม่มี guard
+เพื่อไม่ให้เกิดลูปไม่รู้จบ
+
+| ชนิด | ทำงานเมื่อ… | Config / filter |
+| --- | --- | --- |
+| `manual` | กด Fire เอง | `{}` |
+| `schedule` | ทุก ๆ ช่วงเวลา หรือเวลา local รายวัน | `{"interval_minutes": N}` หรือ `{"daily_time": "HH:MM"}` |
+| `webhook` | มี POST จากภายนอกเข้ามา | `{}`; ใช้ `dedupe_key` คงที่ต่อหนึ่ง event |
+| `workflow_run_completed` | run อื่นจบ | filter: `source_workflow_definition_id`, `state` |
+| `artifact_created` | มี artifact ถูกสร้าง | filter: `source_workflow_definition_id`, `key`, `kind` |
+| `worker_status_changed` | worker เปลี่ยนสถานะ | filter: `worker_id`, `status` |
+
+trigger event ไล่สถานะ `received` → `started` หรือ `ignored` (เช่น `dedupe_key` ซ้ำ)
+หรือ `failed`
+
+ตัวอย่าง API อยู่ใน [ตัวอย่าง Workflow](workflow-examples.md)
+
+---
+
+## 13. ประตูคนและการอนุมัติ
+
+node `human_gate` ทำให้ run เป็น `waiting_for_human` และไม่สร้าง job ตัดสินใจได้
+**ครั้งเดียว**
+
+- **gate ปกติ** → **Approve** (สถานะ `approved`, ไปต่อ) หรือ **Reject** (สถานะ
+  `rejected`, run fail)
+- **choice gate** → ปุ่มตามแต่ละ `choice`; id ที่เลือกจับคู่กับ edge `human_selected`
+  พร้อมปุ่ม **Reject**
+- policy `requires_human_after_iterations` เพิ่มจุดรออนุมัติหนึ่งครั้งหลัง job เริ่มครบจำนวน
+  ที่กำหนด แยกจาก node gate ที่ประกาศไว้
+
+สถานะ approval: `pending` → `approved` / `rejected` (หรือ choice ที่เลือก) ถ้า run
+ถูกยกเลิก approval ที่ค้างจะถูกยกเลิกด้วย
