@@ -262,22 +262,106 @@ node แบบ `manager` ยังพิจารณาสถานะ run (`gra
 
 ## 9. Artifact kinds / ชนิด artifact
 
-Artifacts are the typed blackboard shared across nodes in a run. The accepted
-kinds are exactly:
+Artifacts are the typed blackboard shared across the nodes of one run. Each
+artifact is `{key, kind, content, metadata}`. Nodes write them; prompts
+(`{artifact.KEY}`), edge conditions, and `artifact_created` triggers read them.
 
-artifact คือกระดานข้อมูลแบบมี kind ที่ใช้ร่วมกันทุก node ใน run kind ที่รับมีดังนี้
+artifact คือกระดานข้อมูลที่ node ทุกตัวใน run เดียวกันใช้ร่วมกัน แต่ละชิ้นคือ
+`{key, kind, content, metadata}` — node เขียนลงไป ส่วน prompt (`{artifact.KEY}`),
+edge condition และ trigger `artifact_created` อ่านออกมา
 
-| Kind | Meaning (EN) | ความหมาย (TH) |
+| Kind | Behaviour (EN) | พฤติกรรม (TH) |
 | --- | --- | --- |
-| `text` | Plain text (the default for worker output) | ข้อความล้วน (ค่าเริ่มต้นของ output) |
-| `json` | Parsed JSON content | เนื้อหา JSON ที่ parse แล้ว |
-| `markdown` | Markdown text | ข้อความ markdown |
-| `file_ref` | A reference to an uploaded file (size + SHA-256) | อ้างอิงไฟล์ที่อัปโหลด (ขนาด + SHA-256) |
-| `summary` | A condensed summary entry | สรุปแบบย่อ |
-| `decision` | A recorded decision entry | บันทึกการตัดสินใจ |
+| `json` | **Parsed on load** — enables dot-paths in conditions/prompts | **ถูก parse ตอนโหลด** — ใช้ dot-path ใน condition/prompt ได้ |
+| `file_ref` | **A pointer to an uploaded file** (not the bytes) | **ตัวชี้ไปไฟล์ที่อัปโหลด** (ไม่ใช่ตัวไฟล์) |
+| `text` | Plain string; the default for worker output | string ล้วน; ค่าเริ่มต้นของ output |
+| `markdown` | Plain string, labelled markdown | string ล้วน ติดป้ายว่า markdown |
+| `summary` | Plain string, labelled a summary | string ล้วน ติดป้ายว่าบทสรุป |
+| `decision` | Plain string, labelled a decision | string ล้วน ติดป้ายว่าการตัดสินใจ |
 
-Upload a `file_ref` via the Monitor view or the files API; download it with
-`GET /api/artifacts/{id}/content` (see [Workflow Examples](workflow-examples.md)).
+Only two kinds change engine behaviour: **`json`** (content is `json.loads`-ed,
+so `{artifact.fact_check.verdict}` and `path` conditions work) and **`file_ref`**
+(a binary file Atlas stores and serves on demand). `text`, `markdown`,
+`summary`, and `decision` are **semantic labels only** — the engine treats their
+content as a plain string, though a label is still useful as an
+`artifact_created` trigger filter.
+
+มีแค่สอง kind ที่เปลี่ยนพฤติกรรมของ engine: **`json`** (content ถูก `json.loads`
+จึงใช้ `{artifact.fact_check.verdict}` และ condition แบบ `path` ได้) และ
+**`file_ref`** (ไฟล์ binary ที่ Atlas เก็บและส่งให้เมื่อขอ) ส่วน `text`, `markdown`,
+`summary`, `decision` เป็น **ป้ายเชิงความหมายเท่านั้น** — engine มองเป็น string
+ทั้งก้อน แต่ป้ายยังใช้เป็น filter ของ trigger `artifact_created` ได้
+
+### Setting the kind / การตั้ง kind
+
+- **Worker output** defaults to `text`; set the node's `output_format: "json"` to
+  store `json`. / output ของ worker เป็น `text` โดยปริยาย; ตั้ง `output_format: "json"` เพื่อเก็บเป็น `json`
+- **Manual** — `POST /api/artifacts` with any `kind` and inline `content`. /
+  สร้างเองด้วย `POST /api/artifacts` ระบุ `kind` และ `content` ได้เลย
+- **File upload** always produces a `file_ref` (below). / การอัปโหลดไฟล์ได้ `file_ref` เสมอ
+
+### File upload (`file_ref`) / การอัปโหลดไฟล์
+
+`POST /api/workflow-runs/{run_id}/files?key=...` (or **Monitor → select a run →
+Upload file**) attaches a binary file to an existing run as a `file_ref`,
+recording its filename, size, and SHA-256. Download it with
+`GET /api/artifacts/{id}/content`. Default limit 10 MiB (`ATLAS_MAX_UPLOAD_BYTES`).
+
+`POST /api/workflow-runs/{run_id}/files?key=...` (หรือ **Monitor → เลือก run →
+Upload file**) แนบไฟล์ binary เข้ากับ run ที่มีอยู่ในรูป `file_ref` พร้อมบันทึก
+filename, ขนาด, SHA-256 ดาวน์โหลดด้วย `GET /api/artifacts/{id}/content` ดีฟอลต์ 10 MiB
+
+> **Important / สำคัญ:** a worker does **not** read an uploaded file
+> automatically — `{artifact.KEY}` for a `file_ref` yields the pointer, not the
+> file content. An upload is for **people** (a reviewer downloading it at a human
+> gate) or for an **external system** that calls the content API itself, with an
+> integrity hash tying the file to the run. /
+> worker จะ **ไม่** อ่านไฟล์ที่อัปโหลดให้อัตโนมัติ — `{artifact.KEY}` ของ `file_ref`
+> ได้แค่ตัวชี้ ไม่ใช่เนื้อไฟล์ การอัปโหลดมีไว้ให้ **คน** (รีวิวเวอร์ดาวน์โหลดดูตอน human
+> gate) หรือ **ระบบภายนอก** ที่เรียก content API เอง โดยมี hash ผูกไฟล์กับ run ไว้ตรวจสอบ
+
+### Example 1 — a `json` artifact drives a branch / ตัวอย่าง 1 — artifact `json` ใช้ตัดสินเส้นทาง
+
+A `fact_checker` node sets `output_format: "json"` and replies
+`{"verdict":"approved"}`. Atlas stores it as a `json` artifact, so the outgoing
+edge can read the field by `path`:
+
+node `fact_checker` ตั้ง `output_format: "json"` แล้วตอบ `{"verdict":"approved"}`
+Atlas เก็บเป็น artifact `json` ทำให้ edge ขาออกอ่าน field ด้วย `path` ได้:
+
+```json
+{"from":"fact_checker","to":"anchor","condition":{"type":"artifact_equals","artifact":"fact_check","path":"verdict","value":"approved"}}
+```
+
+Without `output_format: "json"` the content would be a plain string and
+`path: "verdict"` would resolve to nothing. Full graph:
+[Fact Checker Approved Branch](workflow-examples.md#fact-checker-approved-branch).
+
+ถ้าไม่ตั้ง `output_format: "json"` content จะเป็น string ทั้งก้อน และ `path: "verdict"`
+จะ resolve ไม่ได้
+
+### Example 2 — a `file_ref` upload for human review / ตัวอย่าง 2 — อัปโหลด `file_ref` ให้คนรีวิว
+
+A contract-approval run pauses at a human gate. A person uploads the contract,
+the reviewer downloads it to decide, then approves — the worker never reads the
+PDF, the human does.
+
+run อนุมัติสัญญาหยุดที่ human gate มีคนอัปโหลดไฟล์สัญญา รีวิวเวอร์ดาวน์โหลดไปดูแล้ว
+กดอนุมัติ — worker ไม่ได้อ่าน PDF เลย คนเป็นคนอ่าน
+
+```bash
+# 1) run is waiting_for_human at the gate / run ค้างที่ human gate
+curl -sS -X POST 'http://127.0.0.1:8787/api/workflow-runs/wfr_xxx/files?key=contract' \
+  -H 'content-type: application/pdf' \
+  -H 'x-filename: contract.pdf' \
+  --data-binary @contract.pdf
+# 2) reviewer downloads it to read / รีวิวเวอร์ดาวน์โหลดไปอ่าน
+curl -sS http://127.0.0.1:8787/api/artifacts/art_xxx/content -o contract.pdf
+# 3) Approve in Monitor → the run continues / กด Approve ใน Monitor แล้ว run ไปต่อ
+```
+
+The file and its SHA-256 stay tied to the run for audit. / ไฟล์พร้อม SHA-256 ผูกกับ
+run ไว้ตรวจสอบย้อนหลัง
 
 ---
 
