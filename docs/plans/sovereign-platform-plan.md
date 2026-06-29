@@ -21,8 +21,8 @@ the metering/CDR billing model are detailed in
 
 - Single SQLite file and single process (`ThreadingHTTPServer`), with per-user
   bearer tokens/RBAC plus legacy `ATLAS_API_TOKEN` bootstrap compatibility.
-- Users and roles are per instance; there are still no pooled tenants, billing,
-  or usage records.
+- Users, roles, and an idempotent usage ledger/export are per instance; there
+  are still no pooled tenants or Atlas-side rating/invoicing.
 - Worker `token` is authenticated ciphertext when `ATLAS_SECRET_KEY` is set;
   plaintext compatibility remains with an explicit warning when it is unset.
 - Authenticated usernames are written to `audit_log.actor`.
@@ -120,21 +120,24 @@ completion gate.
   POST a job; admin can; revoked token rejected; audit records the actor.
 
 ### M2 — Usage metering & export  ← GA blocker
-- [ ] `usage_events` table: `id, idempotency_key UNIQUE, run_id, job_id,
-      node_key, worker_id, actor, kind, units, started_at, finished_at,
-      created_at, metadata`. `idempotency_key` (e.g. `job:<id>` / `run:<id>`) +
+- [x] `usage_events` table: `id, idempotency_key UNIQUE, run_id, job_id,
+      node_key, worker_id, actor, kind, status, units, seconds, started_at,
+      finished_at, model, tokens_prompt, tokens_output, created_at, metadata`.
+      `idempotency_key` (e.g. `job:<id>` / `run:<id>`) +
       `INSERT OR IGNORE` makes emission safe across retry/restart-recovery so a
       run is never double-counted.
-- [ ] Emit a usage event on job finish (jobs.py) and on workflow node
+- [x] Emit a usage event on job finish (jobs.py) and on workflow node
       completion / budget spend (workflows.py). Reuse `counters.budget_units_spent`.
-- [ ] Define the billable unit (configurable): **workflow-run count** (headline),
+- [x] Define the billable unit (configurable): **workflow-run count** (headline),
       job-run count, budget_units, and wall-clock seconds. Record all; let NT
       billing choose. Under **BYOK**, model/token counts are recorded for
       visibility only — never billed (see usage-metering-billing-plan.md).
-- [ ] `GET /api/usage?from=&to=&format=json|csv` (admin/auditor only).
-- [ ] Signed offline export for air-gapped tenants (file the Fleet can ingest).
-- Check: `scripts/check_usage.py` — run a workflow, assert one usage_event per
-  job, totals match counters, CSV export parses.
+- [x] `GET /api/usage?from=&to=&format=json|csv` (admin/auditor only).
+- [x] Signed offline export for air-gapped tenants (file the Fleet can ingest),
+      with `python3 -m atlas.usage export|verify`.
+- Check: `scripts/check_usage.py` — mocked workflow, one event per job/run,
+  counter totals, duplicate suppression, JSON/CSV RBAC, signed-file tamper
+  detection, and failure isolation.
 
 ### M3 — Deployment hardening (per instance)  ← GA blocker
 - [ ] Production run mode: systemd unit + `scripts/run-prod.sh`; reverse proxy

@@ -18,6 +18,13 @@ thclaws --serve --bind 127.0.0.1 --port 4317
 Use a different port for each additional worker. Assign meaningful roles and
 tags such as `reporter`, `reviewer`, `coder`, or `workflow_builder` in Atlas.
 
+Before the first production login, create the administrator (the initial API
+token is printed once):
+
+```bash
+python3 -m atlas.admin create-admin admin
+```
+
 Start Atlas:
 
 ```bash
@@ -25,8 +32,9 @@ cd /Users/seal/Documents/GitHub/atlas-control-plane
 python3 -m atlas --host 127.0.0.1 --port 8787
 ```
 
-Alternatively, run `./scripts/run.sh`. Open `http://127.0.0.1:8787` and stop
-the server with `Ctrl+C`. Atlas uses `data/atlas.sqlite` by default.
+Alternatively, run `./scripts/run.sh`. Open `http://127.0.0.1:8787`, sign in with
+the per-instance username/password, and stop the server with `Ctrl+C`. Atlas uses
+`data/atlas.sqlite` by default.
 
 ## 2. Web UI overview
 
@@ -48,6 +56,9 @@ reloads data every 5 seconds and polls workers every 60 seconds.
 
 For first-time setup, use **Fleet → Command → Jobs**. Use **Workflows → Monitor**
 for multi-step orchestration.
+
+Usage metering/export currently has no dashboard view. Administrators and
+auditors use the API or host CLI described in [§10](#10-usage-metering-and-offline-export).
 
 ```mermaid
 flowchart TD
@@ -446,17 +457,44 @@ trace state changes and poll/run errors. The UI renders a subset of the latest
 
 ## 9. Security and remote access
 
+- Atlas requires a valid per-user API token by default. The dashboard login
+  exchanges username/password for a token stored in browser local storage;
+  **Sign out** revokes that token.
+- Assign least privilege: `viewer` reads, `operator` runs work, `auditor` reads
+  audit/usage, and `admin` manages identities and all resources.
 - Use real, separate worker tokens.
 - Worker tokens are stored in SQLite and are never returned by the dashboard
   API; responses only expose `token_set`.
-- Loopback access is tokenless by default.
-- When `ATLAS_API_TOKEN` is enabled, non-loopback API requests require its Bearer
-  token. This UI version has no token settings form; remote deployments should
-  use an authenticated reverse proxy or provision `atlasApiToken` in browser
-  local storage according to administrator policy.
+- `ATLAS_LOOPBACK_NO_AUTH=false` is the secure default. Set it to `true` only for
+  explicit local development; bypass is limited to `127.0.0.1` and `::1`.
+- `ATLAS_API_TOKEN`, when configured, remains a legacy bootstrap admin token.
+- Set a high-entropy `ATLAS_SECRET_KEY` to encrypt worker tokens at rest and sign
+  offline usage exports.
 - Do not expose Atlas or thClaws publicly without authentication and TLS.
 
-## 10. Troubleshooting
+## 10. Usage metering and offline export
+
+Atlas records one event per terminal job and one per terminal workflow run.
+Administrators and auditors can export a date range:
+
+```bash
+curl -H 'Authorization: Bearer <token>' \
+  'http://127.0.0.1:8787/api/usage?from=2026-06-01&to=2026-06-30&format=csv'
+```
+
+On the Atlas host, create and verify an air-gapped signed JSON file:
+
+```bash
+ATLAS_SECRET_KEY='<secret>' python3 -m atlas.usage export usage.json \
+  --from 2026-06-01 --to 2026-06-30
+ATLAS_SECRET_KEY='<secret>' python3 -m atlas.usage verify usage.json
+```
+
+The file contains raw usage only. Atlas does not calculate prices or invoices,
+and BYOK model/token counts are visibility-only. Protect the file and signing
+key as billing/audit material.
+
+## 11. Troubleshooting
 
 | Symptom | Check |
 | --- | --- |

@@ -18,7 +18,12 @@ flowchart LR
   Triggers --> Workflows
   Triggers --> DB
   API --> Jobs["Job Manager"]
+  API --> Usage["Usage Read/Export"]
   Jobs --> DB
+  Jobs --> Usage
+  Workflows --> Usage
+  Usage --> DB
+  Usage --> Offline["Signed Offline JSON"]
   Jobs --> W1["thClaws Worker A"]
   Jobs --> W2["thClaws Worker B"]
   Jobs --> W3["thClaws Worker C"]
@@ -60,6 +65,8 @@ This keeps manual override available while letting Atlas auto-route when the cal
 - `workflow_triggers`, `workflow_trigger_events`: manual, schedule, webhook, and
   internal event automation with dedupe history.
 - `audit_log`: operator and system actions.
+- `usage_events`: append-only, idempotent per-job/per-run usage records; the
+  Atlas instance is the tenant, so the table has no `tenant_id`.
 
 ## Workflow Execution
 
@@ -95,6 +102,19 @@ Run completion, artifact creation, and worker status transitions feed the
 trigger service. Internal triggers can filter by source workflow, state,
 artifact key/kind, worker, or status. Atlas blocks unguarded self-triggering to
 avoid infinite automation loops.
+
+## Usage Metering
+
+Job and workflow completion persist their outcome first, then attempt usage
+emission as a failure-isolated side effect. `job:<id>` and `run:<id>` unique
+keys make retry/recovery emission safe. The raw ledger records workflow-run and
+job counts, budget units, wall-clock seconds, status, and visibility-only BYOK
+model/token fields.
+
+`GET /api/usage` exposes period JSON/CSV only to administrators and auditors.
+Air-gapped instances write an HMAC-SHA256 signed JSON envelope for offline Fleet
+ingest. Atlas does not rate records or issue invoices; Fleet and NT billing own
+tenant aggregation, CDR mediation, rating, and invoicing.
 
 ## Phase 4 Readiness
 

@@ -24,6 +24,7 @@ literals the API accepts and the engine checks — all taken from the source cod
 11. [Manager decision](#11-manager-decision-manager_decision_v1)
 12. [Triggers](#12-triggers)
 13. [Human gates & approvals](#13-human-gates--approvals)
+14. [Usage metering](#14-usage-metering)
 
 ---
 
@@ -47,6 +48,7 @@ Atlas persists in SQLite.
 | **artifact** | A typed entry on the workflow blackboard |
 | **trigger / trigger event** | Automation source and its dedupe/run history |
 | **audit log** | Operator and system actions |
+| **usage event** | Idempotent raw usage record for one terminal job or workflow run |
 
 ---
 
@@ -437,3 +439,19 @@ gate can be decided **once**.
 
 Approval state literals: `pending` → `approved` / `rejected` (or a selected
 choice). A cancelled run cancels pending approvals.
+
+---
+
+## 14. Usage metering
+
+Atlas writes one `job` usage event for each terminal job and one `workflow_run`
+event for each terminal workflow run. Unique `job:<id>` / `run:<id>` keys prevent
+double counting across retry and restart recovery.
+
+- Workflow-run event count is the headline consumption measure.
+- Job count, `budget_units`, run/job wall seconds, and status remain raw measures.
+- `metadata.billable` is true only for successful workflow runs.
+- Model/token fields are visibility-only under BYOK and are not billed.
+- Metering errors are logged after outcomes are persisted and never change them.
+- Atlas exports raw JSON/CSV or signed offline JSON; Fleet/NT systems aggregate,
+  rate, and invoice later.

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Atlas Control Plane API
-  version: 1.1.0
+  version: 1.2.0
   description: |
     Current HTTP API implemented by atlas/app.py as of 2026-06-29. Workflow and
     trigger request schemas describe the preferred canonical client shape; the
@@ -29,6 +29,7 @@ tags:
   - name: Approvals
   - name: Triggers
   - name: Audit
+  - name: Usage
 paths:
   /api/auth/login:
     post:
@@ -1235,12 +1236,35 @@ paths:
                   audit: {type: array, items: {$ref: '#/components/schemas/AuditEntry'}}
         default: {$ref: '#/components/responses/Error'}
 
+  /api/usage:
+    get:
+      tags: [Usage]
+      operationId: listUsage
+      summary: Export raw usage events and period totals (admin/auditor only)
+      description: |
+        Returns the per-instance append-only usage ledger. Date/timestamp bounds
+        are inclusive. JSON is the default; CSV returns one row per raw event.
+        Atlas exports mediation/CDR source data and does not rate or invoice it.
+      parameters:
+        - {$ref: '#/components/parameters/UsageFrom'}
+        - {$ref: '#/components/parameters/UsageTo'}
+        - {$ref: '#/components/parameters/UsageFormat'}
+      responses:
+        '200':
+          description: Usage events and totals, or a raw-event CSV
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UsageResponse'}
+            text/csv:
+              schema: {type: string}
+        default: {$ref: '#/components/responses/Error'}
+
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
-      description: ATLAS_API_TOKEN in the Authorization header
+      description: Per-user API token, or the legacy ATLAS_API_TOKEN, in the Authorization header
     queryToken:
       type: apiKey
       in: query
@@ -1262,6 +1286,20 @@ components:
     TriggerId: {name: trigger_id, in: path, required: true, schema: {type: string}}
     UserId: {name: user_id, in: path, required: true, schema: {type: string}}
     TokenId: {name: token_id, in: path, required: true, schema: {type: string}}
+    UsageFrom:
+      name: from
+      in: query
+      description: Inclusive ISO 8601 date or timestamp
+      schema: {type: string}
+    UsageTo:
+      name: to
+      in: query
+      description: Inclusive ISO 8601 date or timestamp
+      schema: {type: string}
+    UsageFormat:
+      name: format
+      in: query
+      schema: {type: string, enum: [json, csv], default: json}
 
   responses:
     Error:
@@ -1297,6 +1335,49 @@ components:
               run: {$ref: '#/components/schemas/WorkflowRun'}
 
   schemas:
+    UsageEvent:
+      type: object
+      required: [id, idempotency_key, kind, units, created_at, metadata]
+      properties:
+        id: {type: string}
+        idempotency_key: {type: string}
+        run_id: {type: [string, 'null']}
+        job_id: {type: [string, 'null']}
+        node_key: {type: [string, 'null']}
+        worker_id: {type: [string, 'null']}
+        actor: {type: [string, 'null']}
+        kind: {type: string, enum: [job, workflow_run, token, worker_active]}
+        status: {type: [string, 'null']}
+        units: {type: integer}
+        seconds: {type: [number, 'null']}
+        started_at: {type: [string, 'null'], format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+        model: {type: [string, 'null'], description: Visibility only under BYOK}
+        tokens_prompt: {type: [integer, 'null'], description: Visibility only under BYOK}
+        tokens_output: {type: [integer, 'null'], description: Visibility only under BYOK}
+        created_at: {type: string, format: date-time}
+        metadata: {type: object, additionalProperties: true}
+
+    UsageTotals:
+      type: object
+      required: [workflow_runs, successful_workflow_runs, jobs, budget_units, wall_seconds, job_wall_seconds]
+      properties:
+        workflow_runs: {type: integer}
+        successful_workflow_runs: {type: integer}
+        jobs: {type: integer}
+        budget_units: {type: integer}
+        wall_seconds: {type: number}
+        job_wall_seconds: {type: number}
+
+    UsageResponse:
+      type: object
+      required: [usage, totals, from, to]
+      properties:
+        usage: {type: array, items: {$ref: '#/components/schemas/UsageEvent'}}
+        totals: {$ref: '#/components/schemas/UsageTotals'}
+        from: {type: [string, 'null'], format: date-time}
+        to: {type: [string, 'null'], format: date-time}
+
     User:
       type: object
       required: [username, role, status]

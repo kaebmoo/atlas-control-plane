@@ -22,6 +22,8 @@ Atlas currently supports:
 - Per-instance users, admin/operator/viewer/auditor RBAC, per-user API tokens,
   dashboard login/logout, and authenticated audit actors.
 - Authenticated encryption for worker tokens when `ATLAS_SECRET_KEY` is set.
+- Idempotent per-job and per-workflow-run usage metering, admin/auditor JSON/CSV
+  usage export, and HMAC-signed files for air-gapped transfer.
 - Multiple thClaws workers, one per machine or runtime.
 - Workspace mapping per worker.
 - Worker polling and capability snapshots.
@@ -157,6 +159,15 @@ Read this report as a clear broadcast script.
 
 {result}
 ```
+
+### Usage Event
+
+Atlas records one idempotent usage event when a job finishes and one when a
+workflow run finishes. Workflow-run count is the headline consumption unit;
+job count, budget units, and wall-clock seconds remain raw measures for Fleet
+and NT billing mediation. Model/token fields are visibility-only under BYOK.
+Metering is a failure-isolated side effect and cannot change a job or workflow
+outcome.
 
 ## Requirements
 
@@ -637,6 +648,7 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 - `POST /api/workflow-triggers/{id}/fire`
 - `GET /api/workflow-triggers/{id}/events`
 - `GET /api/audit`
+- `GET /api/usage?from=&to=&format=json|csv` (admin/auditor only)
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/me`
@@ -685,6 +697,31 @@ Authorization: Bearer <per-user-api-token>
 For remote access, put Atlas behind a VPN, Tailscale, SSH tunnel, or a real TLS
 reverse proxy with authentication.
 
+## Usage Metering And Offline Export
+
+Administrators and auditors can read a period from the raw per-instance ledger:
+
+```bash
+curl -H 'Authorization: Bearer <token>' \
+  'http://127.0.0.1:8787/api/usage?from=2026-06-01&to=2026-06-30&format=json'
+
+curl -H 'Authorization: Bearer <token>' \
+  'http://127.0.0.1:8787/api/usage?from=2026-06-01&to=2026-06-30&format=csv'
+```
+
+For an air-gapped transfer, use the same high-entropy `ATLAS_SECRET_KEY` as the
+running instance to sign and verify the JSON file:
+
+```bash
+ATLAS_SECRET_KEY='<secret>' python3 -m atlas.usage export usage-2026-06.json \
+  --from 2026-06-01 --to 2026-06-30
+
+ATLAS_SECRET_KEY='<secret>' python3 -m atlas.usage verify usage-2026-06.json
+```
+
+`--db /path/to/atlas.sqlite` overrides `ATLAS_DB` for export. Atlas emits raw
+usage/CDR source data only; Atlas does not rate usage or issue invoices.
+
 ## Security Notes
 
 - Treat Atlas as an operator console and assign least-privilege roles.
@@ -692,7 +729,8 @@ reverse proxy with authentication.
 - Use real tokens for thClaws workers.
 - `THCLAWS_API_TOKEN=disable-auth` is only safe on loopback binds.
 - Set a high-entropy `ATLAS_SECRET_KEY` to store worker tokens as authenticated
-  ciphertext. Without it, Atlas preserves plaintext compatibility and logs a warning.
+  ciphertext and sign offline usage exports. Without it, Atlas preserves worker
+  token plaintext compatibility and cannot create or verify signed exports.
 - Worker tokens are never returned to the dashboard API. API responses expose
   only `token_set: true`.
 - `data/` is intentionally ignored by Git.
@@ -785,6 +823,10 @@ After restart, Atlas marks interrupted workflow worker/manager nodes as
 `recovery_required`. It cannot inspect or resume the old thClaws stream, so an
 operator must verify possible side effects and explicitly authorize retry.
 
+thClaws does not currently emit model/token usage, so those visibility-only
+fields remain empty. Fleet aggregation, the final NT CDR contract, rating, and
+invoicing are separate later milestones.
+
 Atlas handles these at the control-plane layer where possible. See
 [docs/thclaws-capability-matrix.md](docs/thclaws-capability-matrix.md).
 
@@ -798,6 +840,7 @@ atlas/
   jobs.py             job runner, streaming bridge, handoff, worker polling
   router.py           routing decisions
   thclaws_client.py   thClaws HTTP/SSE client
+  usage.py            usage totals, CSV, signed offline export, verification
   static/             dashboard HTML/CSS/JS
 docs/
   architecture.md

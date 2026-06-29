@@ -2,7 +2,7 @@
 
 **English** · [ภาษาไทย](api-reference-th.md) · [OpenAPI 3.1](openapi.yaml)
 
-Status: **Current API specification v1.0**<br>
+Status: **Current API specification v1.2**<br>
 System baseline: `atlas/app.py` as of 2026-06-29<br>
 Default base URL: `http://127.0.0.1:8787`
 
@@ -75,7 +75,7 @@ Identity endpoints:
 - Admin-only CRUD: `/api/users`, `/api/users/{id}`, `/api/tokens`, and
   `/api/tokens/{id}`. `POST /api/tokens/{id}/revoke` is an additive revoke alias.
 - Roles: `viewer` reads normal resources; `operator` runs jobs/workflows and
-  decides approvals; `auditor` additionally reads audit data; `admin` has all permissions.
+  decides approvals; `auditor` additionally reads audit and usage data; `admin` has all permissions.
 
 ## 3. Request and response conventions
 
@@ -86,7 +86,7 @@ Identity endpoints:
 - Actions without payload may use an empty body or `{}`.
 - Response timestamps use ISO 8601 UTC, for example `2026-06-29T10:00:00Z`.
 - Server-generated IDs use prefixes such as `wrk_`, `wsp_`, `job_`, `wfd_`,
-  `wfr_`, `art_`, `apr_`, and `wtr_`.
+  `wfr_`, `art_`, `apr_`, `wtr_`, and `usg_`.
 
 ### Errors
 
@@ -180,7 +180,7 @@ Every error uses one JSON shape:
 | POST | `/api/approvals/{approval_id}/reject` | Reject and fail run |
 | POST | `/api/approvals/{approval_id}/choose` | Choose branch (`202`) |
 
-### Triggers and Audit
+### Triggers, Audit, and Usage
 
 | Method | Path | Result |
 | --- | --- | --- |
@@ -192,6 +192,7 @@ Every error uses one JSON shape:
 | POST | `/api/workflow-triggers/{trigger_id}/fire` | Fire manual/schedule/webhook (`202`) |
 | GET | `/api/workflow-triggers/{trigger_id}/events` | Trigger event history |
 | GET | `/api/audit?limit=100` | Audit log |
+| GET | `/api/usage?from=&to=&format=json\|csv` | Raw usage ledger (admin/auditor only) |
 
 ## 5. Workers and Workspaces
 
@@ -545,13 +546,87 @@ and `failed`.
 curl -sS "$BASE_URL/api/audit?limit=100"
 ```
 
-Each entry contains `action`, `actor` (currently usually `local`),
-`resource_type`, `resource_id`, `details`, and `created_at`. The API currently
-has no audit filters/cursor or audit deletion endpoint.
+Each entry contains `action`, `actor`, `resource_type`, `resource_id`, `details`,
+and `created_at`. Authenticated requests use the username; explicit loopback
+development and background work may use `local`. The API currently has no audit
+filters/cursor or audit deletion endpoint.
 
-## 13. OpenAPI 3.1
+## 13. Usage Metering and Export
 
-[openapi.yaml](openapi.yaml) defines 42 paths and 55 operations, including
+`GET /api/usage` is restricted to `admin` and `auditor`. `from` and `to` accept
+ISO 8601 dates or timestamps and are inclusive. `format` defaults to `json` and
+also accepts `csv`.
+
+```bash
+curl -sS -H 'Authorization: Bearer <token>' \
+  "$BASE_URL/api/usage?from=2026-06-01&to=2026-06-30&format=json"
+```
+
+The JSON response is:
+
+```json
+{
+  "usage": [{
+    "id": "usg_xxx",
+    "idempotency_key": "run:wfr_xxx",
+    "kind": "workflow_run",
+    "run_id": "wfr_xxx",
+    "job_id": null,
+    "node_key": null,
+    "worker_id": null,
+    "actor": "admin",
+    "status": "succeeded",
+    "units": 3,
+    "seconds": 4.0,
+    "started_at": "2026-06-29T10:00:00Z",
+    "finished_at": "2026-06-29T10:00:04Z",
+    "model": null,
+    "tokens_prompt": null,
+    "tokens_output": null,
+    "created_at": "2026-06-29T10:00:04Z",
+    "metadata": {"billing_unit":"workflow_run","billable":true}
+  }],
+  "totals": {
+    "workflow_runs": 1,
+    "successful_workflow_runs": 1,
+    "jobs": 1,
+    "budget_units": 3,
+    "wall_seconds": 4.0,
+    "job_wall_seconds": 3.0
+  },
+  "from": "2026-06-01T00:00:00.000000Z",
+  "to": "2026-06-30T23:59:59.999999Z"
+}
+```
+
+Atlas emits one idempotent `job` event per terminal job (`units=1`) and one
+`workflow_run` event per terminal run (`units=budget_units_spent`). The headline
+workflow-run count is the number of run events; `metadata.billable` is true only
+for successful runs. Model/token fields are visibility-only under BYOK and stay
+null until thClaws provides them. Metering failures are logged and never change
+job/run outcomes.
+
+CSV uses one row per raw event with columns `id`, `idempotency_key`, `kind`,
+`status`, `units`, `seconds`, `run_id`, `job_id`, `node_key`, `worker_id`,
+`actor`, `started_at`, `finished_at`, `model`, `tokens_prompt`, `tokens_output`,
+`created_at`, and JSON-encoded `metadata`.
+
+Air-gapped instances can write and verify an HMAC-SHA256 envelope using
+`ATLAS_SECRET_KEY`:
+
+```bash
+ATLAS_SECRET_KEY='<secret>' python3 -m atlas.usage export usage.json \
+  --from 2026-06-01 --to 2026-06-30
+ATLAS_SECRET_KEY='<secret>' python3 -m atlas.usage verify usage.json
+```
+
+Use `--db /path/to/atlas.sqlite` to override `ATLAS_DB`. Atlas exports raw CDR
+source data only; Fleet/NT systems perform later aggregation, rating, and
+invoicing.
+
+## 14. OpenAPI 3.1
+
+[openapi.yaml](openapi.yaml) defines 51 paths and 70 operations, including
 security schemes, parameters, request bodies, response wrappers, and schema
 references. It can drive Swagger UI, Redoc, code generation, or contract tests.
 
@@ -565,7 +640,7 @@ IDs, cycle guards, manager/human edge coupling, quorum, or live worker/workspace
 references. See the
 [Visual Workflow Builder Specification](workflow-visual-builder-spec-en.md).
 
-## 14. API client checklist
+## 15. API client checklist
 
 - Set timeouts for JSON requests, but do not use a short timeout for SSE.
 - Persist the latest SSE `seq` and reconnect with `after`.
