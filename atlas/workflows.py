@@ -1173,6 +1173,15 @@ class WorkflowTriggerService:
             raise ValueError(f"Unknown workflow_trigger_id: {trigger_id}")
         payload = payload or {}
 
+        if not trigger.get("enabled"):
+            # A disabled trigger must not start a run even on the direct API fire path.
+            # (The scheduler and internal event fan-out already pre-filter enabled=True;
+            # this guards the one path that reaches fire_trigger without that filter.)
+            event = self.db.append_workflow_trigger_event(
+                trigger_id, "ignored", payload=payload, dedupe_key=dedupe_key, error="trigger disabled"
+            )
+            return {"trigger": trigger, "event": event, "run": None}
+
         if dedupe_key and self.db.has_workflow_trigger_event_dedupe(trigger_id, dedupe_key):
             event = self.db.append_workflow_trigger_event(trigger_id, "ignored", payload=payload, dedupe_key=dedupe_key, error="duplicate dedupe_key")
             return {"trigger": trigger, "event": event, "run": None}

@@ -153,6 +153,15 @@ def main() -> None:
             disabled = request(base_url, "PUT", f"/api/workflow-triggers/{schedule['id']}", {"enabled": False})["trigger"]
             assert not disabled["enabled"]
             assert schedule["id"] not in {item["id"] for item in runtime.db.list_workflow_triggers(enabled=True)}
+            # A disabled trigger fired via the direct API path must be ignored, not started.
+            fired_disabled = request(
+                base_url,
+                "POST",
+                f"/api/workflow-triggers/{schedule['id']}/fire",
+                {"payload": {"topic": "nope"}},
+            )
+            assert fired_disabled["event"]["state"] == "ignored", fired_disabled["event"]
+            assert fired_disabled["run"] is None, fired_disabled
             check_milestones_3_and_4(base_url, workflow_id)
             check_milestone_5(base_url)
             check_milestone_14(runtime, base_url)
