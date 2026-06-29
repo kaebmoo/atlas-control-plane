@@ -46,11 +46,12 @@ House rules (do not violate):
 - Do NOT commit or push unless explicitly asked.
 
 Completion gate (must stay green; append your new check):
-  python3 -m py_compile atlas/config.py atlas/db.py atlas/app.py atlas/jobs.py atlas/workflows.py atlas/router.py atlas/workflow_templates.py scripts/check_workflows.py scripts/check_workflow_api.py
+  python3 -m py_compile atlas/config.py atlas/db.py atlas/app.py atlas/jobs.py atlas/workflows.py atlas/router.py atlas/workflow_templates.py atlas/usage.py scripts/check_workflows.py scripts/check_workflow_api.py scripts/check_usage.py
   node --check atlas/static/app.js
   python3 scripts/check_workflow_db.py
   python3 scripts/check_workflows.py
   python3 scripts/check_workflow_api.py
+  python3 scripts/check_usage.py
 
 After completion: summarize what changed, list changed files, report the gate
 plus your new check, note remaining limitations, and show git status.

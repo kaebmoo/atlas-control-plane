@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import logging
 import re
 import threading
 import time
@@ -10,6 +11,7 @@ from typing import Any
 
 from .db import Database, now_iso
 from .router import Router
+from .usage import elapsed_seconds
 
 
 _FIELD_RE = re.compile(r"{([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)}")
@@ -21,6 +23,7 @@ _EVENT_TRIGGER_FILTERS = {
     "artifact_created": {"source_workflow_definition_id": "workflow_definition_id", "key": "key", "kind": "kind"},
     "worker_status_changed": {"worker_id": "worker_id", "status": "status"},
 }
+LOGGER = logging.getLogger(__name__)
 
 
 def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -300,6 +303,7 @@ class WorkflowRunner:
         for node in self.db.list_workflow_nodes(run_id):
             if node["state"] == "running" and node.get("job_id"):
                 self._cancel_job(node["job_id"])
+        self._record_workflow_usage(run_id)
         self._notify_run_completed(run_id)
         return self.db.get_workflow_run(run_id) or run
 
@@ -797,7 +801,44 @@ class WorkflowRunner:
             finished_at=now_iso(),
         )
         self.db.append_workflow_event(run_id, "run_finished", {"state": state, "error": error})
+        self._record_workflow_usage(run_id)
         self._notify_run_completed(run_id)
+
+    def _record_workflow_usage(self, run_id: str) -> None:
+        try:
+            run = self.db.get_workflow_run(run_id)
+            if not run or run.get("state") not in {"succeeded", "failed", "cancelled"}:
+                return
+            counters = run.get("counters") or {}
+            budget_units = int(counters.get("budget_units_spent") or 0)
+            jobs = int(counters.get("jobs_started") or 0)
+            seconds = elapsed_seconds(run.get("started_at"), run.get("finished_at"))
+            self.db.emit_usage_event(
+                {
+                    "idempotency_key": f"run:{run_id}",
+                    "kind": "workflow_run",
+                    "run_id": run_id,
+                    "status": run.get("state"),
+                    "units": budget_units,
+                    "seconds": seconds,
+                    "started_at": run.get("started_at"),
+                    "finished_at": run.get("finished_at"),
+                    "metadata": {
+                        "workflow_definition_id": run.get("workflow_definition_id"),
+                        "measures": {
+                            "workflow_run_count": 1,
+                            "job_count": jobs,
+                            "budget_units": budget_units,
+                            "wall_seconds": seconds,
+                        },
+                        "billable": run.get("state") == "succeeded",
+                        "billing_unit": "workflow_run",
+                        "byok_token_counts_billable": False,
+                    },
+                }
+            )
+        except Exception:
+            LOGGER.exception("usage metering failed for workflow run %s", run_id)
 
     def _notify_run_completed(self, run_id: str) -> None:
         if not self.trigger_service:

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import contextvars
+import logging
 import threading
 from typing import Any
 
 from .db import Database, now_iso
 from .router import Router
 from .thclaws_client import ThClawsClient, ThClawsError, extract_session_id, extract_text, parse_event_payload
+from .usage import elapsed_seconds
 
 
 TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
@@ -17,6 +19,7 @@ DEFAULT_HANDOFF_PROMPT = """คุณได้รับผลลัพธ์จ�
 ผลลัพธ์จาก agent ก่อนหน้า:
 {result}
 """
+LOGGER = logging.getLogger(__name__)
 
 
 class JobManager:
@@ -171,6 +174,9 @@ class JobManager:
         if not worker:
             self.db.update_job(job_id, state="failed", error="Worker disappeared", finished_at=now_iso())
             self.db.append_job_event(job_id, "error", {"error": "Worker disappeared"})
+            self._record_job_usage(job_id)
+            with self._lock:
+                self._threads.pop(job_id, None)
             return
 
         self.db.update_job(job_id, state="running", started_at=now_iso())
@@ -230,8 +236,44 @@ class JobManager:
             self.db.append_job_event(job_id, "error", {"error": str(exc)})
             self.db.audit("job.failed", "job", job_id, {"error": str(exc)})
         finally:
+            self._record_job_usage(job_id)
             with self._lock:
                 self._threads.pop(job_id, None)
+
+    def _record_job_usage(self, job_id: str) -> None:
+        try:
+            job = self.db.get_job(job_id)
+            if not job or job.get("state") not in TERMINAL_STATES:
+                return
+            context = self.db.workflow_context_for_job(job_id)
+            seconds = elapsed_seconds(job.get("started_at"), job.get("finished_at"))
+            self.db.emit_usage_event(
+                {
+                    "idempotency_key": f"job:{job_id}",
+                    "kind": "job",
+                    "run_id": context.get("run_id"),
+                    "job_id": job_id,
+                    "node_key": context.get("node_key"),
+                    "worker_id": job.get("worker_id"),
+                    "status": job.get("state"),
+                    "units": 1,
+                    "seconds": seconds,
+                    "started_at": job.get("started_at"),
+                    "finished_at": job.get("finished_at"),
+                    "model": job.get("model") or None,
+                    "metadata": {
+                        "measures": {
+                            "workflow_run_count": 0,
+                            "job_count": 1,
+                            "budget_units": 0,
+                            "wall_seconds": seconds,
+                        },
+                        "byok_token_counts_billable": False,
+                    },
+                }
+            )
+        except Exception:
+            LOGGER.exception("usage metering failed for job %s", job_id)
 
     def _maybe_start_handoff(self, source_job_id: str) -> None:
         source = self.db.get_job(source_job_id)

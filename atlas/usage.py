@@ -1,0 +1,193 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import hmac
+import io
+import json
+from datetime import UTC, datetime, time
+from pathlib import Path
+from typing import Any
+
+from .config import Config
+from .db import Database, now_iso
+
+
+USAGE_EXPORT_SCHEMA = "atlas.usage.v1"
+USAGE_CSV_FIELDS = (
+    "id",
+    "idempotency_key",
+    "kind",
+    "status",
+    "units",
+    "seconds",
+    "run_id",
+    "job_id",
+    "node_key",
+    "worker_id",
+    "actor",
+    "started_at",
+    "finished_at",
+    "model",
+    "tokens_prompt",
+    "tokens_output",
+    "created_at",
+    "metadata",
+)
+
+
+def normalize_usage_range(from_at: str | None, to_at: str | None) -> tuple[str | None, str | None]:
+    normalized_from = _normalize_boundary(from_at, end=False)
+    normalized_to = _normalize_boundary(to_at, end=True)
+    if normalized_from and normalized_to and _parse_timestamp(normalized_from) > _parse_timestamp(normalized_to):
+        raise ValueError("usage from must not be after to")
+    return normalized_from, normalized_to
+
+
+def summarize_usage(events: list[dict[str, Any]]) -> dict[str, int | float]:
+    run_events = [event for event in events if event.get("kind") == "workflow_run"]
+    job_events = [event for event in events if event.get("kind") == "job"]
+    return {
+        "workflow_runs": len(run_events),
+        "successful_workflow_runs": sum(event.get("status") == "succeeded" for event in run_events),
+        "jobs": len(job_events),
+        "budget_units": sum(int(event.get("units") or 0) for event in run_events),
+        "wall_seconds": round(sum(float(event.get("seconds") or 0) for event in run_events), 6),
+        "job_wall_seconds": round(sum(float(event.get("seconds") or 0) for event in job_events), 6),
+    }
+
+
+def elapsed_seconds(started_at: str | None, finished_at: str | None) -> float | None:
+    if not started_at or not finished_at:
+        return None
+    try:
+        return max(0.0, (_parse_timestamp(finished_at) - _parse_timestamp(started_at)).total_seconds())
+    except ValueError:
+        return None
+
+
+def usage_csv(events: list[dict[str, Any]]) -> str:
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=USAGE_CSV_FIELDS, extrasaction="ignore", lineterminator="\n")
+    writer.writeheader()
+    for event in events:
+        row = dict(event)
+        row["metadata"] = json.dumps(row.get("metadata") or {}, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        writer.writerow({field: "" if row.get(field) is None else row.get(field) for field in USAGE_CSV_FIELDS})
+    return output.getvalue()
+
+
+def create_signed_usage_export(
+    db: Database,
+    secret_key: str,
+    from_at: str | None = None,
+    to_at: str | None = None,
+) -> dict[str, Any]:
+    if not secret_key:
+        raise ValueError("ATLAS_SECRET_KEY is required to sign a usage export")
+    from_at, to_at = normalize_usage_range(from_at, to_at)
+    events = db.list_usage_events(from_at, to_at)
+    payload = {
+        "schema": USAGE_EXPORT_SCHEMA,
+        "generated_at": now_iso(),
+        "from": from_at,
+        "to": to_at,
+        "totals": summarize_usage(events),
+        "usage": events,
+    }
+    return {
+        "algorithm": "HMAC-SHA256",
+        "payload": payload,
+        "signature": _signature(payload, secret_key),
+    }
+
+
+def verify_signed_usage_export(export: dict[str, Any], secret_key: str) -> bool:
+    if not secret_key or export.get("algorithm") != "HMAC-SHA256":
+        return False
+    payload = export.get("payload")
+    signature = export.get("signature")
+    if not isinstance(payload, dict) or payload.get("schema") != USAGE_EXPORT_SCHEMA or not isinstance(signature, str):
+        return False
+    return hmac.compare_digest(signature, _signature(payload, secret_key))
+
+
+def write_signed_usage_export(
+    db: Database,
+    path: Path,
+    secret_key: str,
+    from_at: str | None = None,
+    to_at: str | None = None,
+) -> dict[str, Any]:
+    export = create_signed_usage_export(db, secret_key, from_at, to_at)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(export, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    return export
+
+
+def verify_signed_usage_export_file(path: Path, secret_key: str) -> bool:
+    try:
+        export = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(export, dict) and verify_signed_usage_export(export, secret_key)
+
+
+def _signature(payload: dict[str, Any], secret_key: str) -> str:
+    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hmac.new(secret_key.encode("utf-8"), encoded, hashlib.sha256).hexdigest()
+
+
+def _normalize_boundary(value: str | None, end: bool) -> str | None:
+    value = str(value or "").strip()
+    if not value:
+        return None
+    if len(value) == 10:
+        try:
+            day = datetime.fromisoformat(value).date()
+        except ValueError as exc:
+            raise ValueError("usage range must use an ISO-8601 date or timestamp") from exc
+        boundary = datetime.combine(day, time.max if end else time.min, tzinfo=UTC)
+    else:
+        boundary = _parse_timestamp(value)
+    return boundary.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _parse_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("usage range must use an ISO-8601 date or timestamp") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Export or verify signed Atlas usage files")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    export_parser = subparsers.add_parser("export", help="write a signed usage JSON file")
+    export_parser.add_argument("output", type=Path)
+    export_parser.add_argument("--db", type=Path)
+    export_parser.add_argument("--from", dest="from_at")
+    export_parser.add_argument("--to", dest="to_at")
+    verify_parser = subparsers.add_parser("verify", help="verify a signed usage JSON file")
+    verify_parser.add_argument("input", type=Path)
+    args = parser.parse_args(argv)
+
+    config = Config.from_env()
+    if not config.secret_key:
+        parser.error("ATLAS_SECRET_KEY is required")
+    if args.command == "export":
+        db = Database((args.db or config.db_path).resolve(), secret_key=config.secret_key)
+        write_signed_usage_export(db, args.output.resolve(), config.secret_key, args.from_at, args.to_at)
+        print(args.output.resolve())
+        return
+    if not verify_signed_usage_export_file(args.input.resolve(), config.secret_key):
+        raise SystemExit("usage export signature is invalid")
+    print("usage export signature is valid")
+
+
+if __name__ == "__main__":
+    main()

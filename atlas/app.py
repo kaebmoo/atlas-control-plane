@@ -18,6 +18,7 @@ from .config import Config
 from .db import ARTIFACT_KINDS, Database, new_id
 from .jobs import JobManager, TERMINAL_STATES
 from .router import Router
+from .usage import normalize_usage_range, summarize_usage, usage_csv
 from .workflow_templates import workflow_templates
 from .workflows import (
     WorkflowRunner,
@@ -244,6 +245,21 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 }
             )
             return
+
+        if method == "GET" and parts == ["api", "usage"]:
+            from_at, to_at = normalize_usage_range(
+                query.get("from", [""])[0] or None,
+                query.get("to", [""])[0] or None,
+            )
+            events = runtime.db.list_usage_events(from_at, to_at)
+            output_format = query.get("format", ["json"])[0].lower()
+            if output_format == "json":
+                self._json({"usage": events, "totals": summarize_usage(events), "from": from_at, "to": to_at})
+                return
+            if output_format == "csv":
+                self._csv(usage_csv(events))
+                return
+            raise ValueError("usage format must be json or csv")
 
         if parts == ["api", "workers"]:
             if method == "GET":
@@ -748,6 +764,16 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _csv(self, content: str) -> None:
+        body = content.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self._cors_headers()
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", 'attachment; filename="atlas-usage.csv"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "authorization, content-type, x-filename")
@@ -779,6 +805,8 @@ def _required_permission(method: str, parts: list[str]) -> str:
     if parts[:2] in (["api", "users"], ["api", "tokens"]):
         return "admin"
     if parts == ["api", "audit"]:
+        return "audit.read"
+    if parts == ["api", "usage"]:
         return "audit.read"
     if method == "GET" or parts in (["api", "me"], ["api", "auth", "logout"]):
         return "read"

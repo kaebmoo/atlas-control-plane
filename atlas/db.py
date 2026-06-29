@@ -196,6 +196,31 @@ CREATE TABLE IF NOT EXISTS job_events (
 CREATE INDEX IF NOT EXISTS idx_job_events_job_seq ON job_events(job_id, seq);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
 
+CREATE TABLE IF NOT EXISTS usage_events (
+  id TEXT PRIMARY KEY,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  run_id TEXT,
+  job_id TEXT,
+  node_key TEXT,
+  worker_id TEXT,
+  actor TEXT,
+  kind TEXT NOT NULL,
+  status TEXT,
+  units INTEGER NOT NULL DEFAULT 1,
+  seconds REAL,
+  started_at TEXT,
+  finished_at TEXT,
+  model TEXT,
+  tokens_prompt INTEGER,
+  tokens_output INTEGER,
+  created_at TEXT NOT NULL,
+  metadata TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_events_created ON usage_events(created_at, id);
+CREATE INDEX IF NOT EXISTS idx_usage_events_run ON usage_events(run_id);
+CREATE INDEX IF NOT EXISTS idx_usage_events_job ON usage_events(job_id);
+
 CREATE TABLE IF NOT EXISTS workflow_definitions (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -424,6 +449,84 @@ class Database:
                 (limit,),
             ).fetchall()
         return [row_to_dict(row) or {} for row in rows]
+
+    def emit_usage_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+        idempotency_key = str(payload.get("idempotency_key") or "").strip()
+        kind = str(payload.get("kind") or "").strip()
+        if not idempotency_key:
+            raise ValueError("usage event idempotency_key is required")
+        if not kind:
+            raise ValueError("usage event kind is required")
+        event_id = str(payload.get("id") or new_id("usg"))
+        created_at = str(payload.get("created_at") or now_iso())
+        actor = str(payload.get("actor") or _AUDIT_ACTOR.get())
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO usage_events(
+                  id, idempotency_key, run_id, job_id, node_key, worker_id,
+                  actor, kind, status, units, seconds, started_at, finished_at,
+                  model, tokens_prompt, tokens_output, created_at, metadata
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    idempotency_key,
+                    payload.get("run_id"),
+                    payload.get("job_id"),
+                    payload.get("node_key"),
+                    payload.get("worker_id"),
+                    actor,
+                    kind,
+                    payload.get("status"),
+                    int(payload.get("units", 1)),
+                    payload.get("seconds"),
+                    payload.get("started_at"),
+                    payload.get("finished_at"),
+                    payload.get("model"),
+                    payload.get("tokens_prompt"),
+                    payload.get("tokens_output"),
+                    created_at,
+                    encode_json(payload.get("metadata") or {}),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM usage_events WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        return row_to_dict(row) or {}
+
+    def list_usage_events(self, from_at: str | None = None, to_at: str | None = None) -> list[dict[str, Any]]:
+        where = []
+        params: list[Any] = []
+        if from_at:
+            where.append("julianday(created_at) >= julianday(?)")
+            params.append(from_at)
+        if to_at:
+            where.append("julianday(created_at) <= julianday(?)")
+            params.append(to_at)
+        sql = "SELECT * FROM usage_events"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY created_at ASC, id ASC"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def workflow_context_for_job(self, job_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT workflow_nodes.run_id, workflow_nodes.node_key
+                FROM workflow_nodes
+                WHERE workflow_nodes.job_id = ?
+                ORDER BY workflow_nodes.created_at DESC
+                LIMIT 1
+                """,
+                (job_id,),
+            ).fetchone()
+        return row_to_dict(row) or {}
 
     def create_user(self, username: str, password: str, role: str = "viewer", status: str = "active") -> dict[str, Any]:
         username = str(username or "").strip()
