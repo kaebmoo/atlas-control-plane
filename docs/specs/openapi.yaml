@@ -194,6 +194,26 @@ paths:
         '200': {description: Token revoked}
         default: {$ref: '#/components/responses/Error'}
 
+  /healthz:
+    get:
+      tags: [System]
+      operationId: getHealthz
+      summary: Unauthenticated liveness probe (compose/systemd/Fleet)
+      description: Minimal health signal that leaks no internal details (no db path or counts).
+      security: []
+      responses:
+        '200':
+          description: Liveness
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, service, version]
+                properties:
+                  ok: {type: boolean}
+                  service: {type: string}
+                  version: {type: string}
+
   /api/health:
     get:
       tags: [System]

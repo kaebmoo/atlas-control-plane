@@ -597,6 +597,7 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 
 ## API Surface
 
+- `GET /healthz` (unauthenticated liveness probe)
 - `GET /api/health`
 - `GET /api/workers`
 - `POST /api/workers`
@@ -858,6 +859,7 @@ atlas/
   packs.py            solution pack validate/import/export
   packs/              shipped pack bundles (gov_complaint.json)
   static/             dashboard HTML/CSS/JS
+fleet/                Atlas Fleet: instance registry + atlas-fleet CLI (separate component)
 docs/
   architecture.md
   demo-script.md

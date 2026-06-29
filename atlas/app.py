@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
+from . import __version__
 from .config import Config
 from .db import ARTIFACT_KINDS, Database, new_id, now_iso
 from .jobs import JobManager, TERMINAL_STATES
@@ -130,6 +131,11 @@ class AtlasHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         try:
+            # Unauthenticated liveness probe (compose/systemd/Fleet health). Additive,
+            # not under /api/, and intentionally leaks nothing (no db path / counts).
+            if method == "GET" and path == "/healthz":
+                self._json({"ok": True, "service": "atlas-control-plane", "version": __version__})
+                return
             if path.startswith("/api/"):
                 parts = [part for part in path.split("/") if part]
                 if method == "POST" and parts == ["api", "auth", "login"]:

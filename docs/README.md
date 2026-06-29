@@ -38,6 +38,8 @@
   reverse-proxy TLS/gzip/request-size, request logging, config reference
 - [Backup & Restore](ops/backup-restore.md) — online `.backup`, restore runbook,
   single-writer caveat
+- [Atlas Fleet](../fleet/README.md) — multi-instance registry + `atlas-fleet` CLI
+  (provision / list / health / usage-pull); separate component, no tenant logic in core
 
 ## Specifications สำหรับ Programmer
 

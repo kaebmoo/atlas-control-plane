@@ -117,7 +117,8 @@ Every error uses one JSON shape:
 
 | Method | Path | Result |
 | --- | --- | --- |
-| GET | `/api/health` | Atlas health |
+| GET | `/healthz` | Unauthenticated liveness probe (`{ok, service, version}`) |
+| GET | `/api/health` | Atlas health (authenticated; includes worker count) |
 | GET | `/api/workers` | List workers |
 | POST | `/api/workers` | Create/upsert worker |
 | POST | `/api/workers/poll` | Poll all workers |
