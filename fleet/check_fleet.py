@@ -56,6 +56,18 @@ def main() -> None:
         offline = poll_all(registry)[0]
         assert offline["status"] == "offline", offline
 
+        # a failed provision (instance never becomes healthy) must not orphan a secret:
+        # the admin token is persisted only after /healthz is green. `false` stands in for
+        # an atlas process that exits immediately.
+        reg2 = Registry(Path(tmp) / "fleet2" / "fleet2.sqlite")  # own dir = own secrets sidecar
+        try:
+            provision_local(reg2, "tenant-x", data_dir=Path(tmp) / "inst-x", python="false")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("provision must fail when the instance never starts")
+        assert reg2._load_secrets() == {}, "failed provision must not store an admin token"
+
     print("fleet check ok")
 
 

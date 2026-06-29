@@ -187,8 +187,6 @@ def provision_local(
     with db.as_actor("atlas-fleet"):
         user = db.create_user(f"admin-{tenant}", secrets.token_urlsafe(16), role="admin")
         _, raw_token = db.create_api_token(user["id"], "fleet-bootstrap")
-    token_ref = new_id("atok")
-    registry.store_token(token_ref, raw_token)
 
     env = {**os.environ, "ATLAS_DB": str(instance_db), "ATLAS_HOME": str(data_dir)}
     env.pop("ATLAS_LOOPBACK_NO_AUTH", None)  # auth required; we hold a real token
@@ -206,6 +204,11 @@ def provision_local(
         proc.terminate()
         raise
 
+    # Persist the admin token into the secrets sidecar only after the instance is healthy,
+    # so a failed startup never orphans a secret entry for an instance that was never
+    # registered.
+    token_ref = new_id("atok")
+    registry.store_token(token_ref, raw_token)
     instance = registry.register(
         {
             "tenant": tenant,
