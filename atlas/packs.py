@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 from pathlib import Path
 from typing import Any
@@ -15,7 +17,37 @@ from .workflows import (
 # Pack bundle format version (distinct from the DB schema_version). Bump only on a
 # breaking change to the bundle shape. ponytail: one number, no negotiation layer.
 PACK_SCHEMA_VERSION = 1
+PACK_SIGNATURE_ALGORITHM = "HMAC-SHA256"
 PACKS_DIR = Path(__file__).parent / "packs"
+
+
+def _pack_signature(bundle: dict[str, Any], secret_key: str) -> str:
+    """HMAC-SHA256 over the canonical bundle excluding the `signature` field, mirroring
+    the usage-export signing approach in atlas/usage.py."""
+    payload = {key: value for key, value in bundle.items() if key != "signature"}
+    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hmac.new(secret_key.encode("utf-8"), encoded, hashlib.sha256).hexdigest()
+
+
+def sign_pack(bundle: dict[str, Any], secret_key: str) -> dict[str, Any]:
+    """Return a copy of the (valid) bundle carrying an HMAC signature."""
+    if not secret_key:
+        raise ValueError("ATLAS_SECRET_KEY is required to sign a pack")
+    validate_pack(bundle)
+    signed = {key: value for key, value in bundle.items() if key != "signature"}
+    signed["signature"] = {"algorithm": PACK_SIGNATURE_ALGORITHM, "value": _pack_signature(signed, secret_key)}
+    return signed
+
+
+def verify_pack_signature(bundle: dict[str, Any], secret_key: str | None) -> bool:
+    """True iff the bundle carries a valid HMAC signature for secret_key."""
+    signature = bundle.get("signature")
+    if not isinstance(signature, dict) or signature.get("algorithm") != PACK_SIGNATURE_ALGORITHM:
+        return False
+    value = signature.get("value")
+    if not isinstance(value, str) or not secret_key:
+        return False
+    return hmac.compare_digest(value, _pack_signature(bundle, secret_key))
 
 
 def validate_pack(bundle: Any) -> dict[str, Any]:
@@ -65,10 +97,24 @@ def validate_pack(bundle: Any) -> dict[str, Any]:
     return bundle
 
 
-def import_pack(db: Database, bundle: dict[str, Any]) -> dict[str, Any]:
+def import_pack(
+    db: Database,
+    bundle: dict[str, Any],
+    secret_key: str | None = None,
+    require_signature: bool = False,
+) -> dict[str, Any]:
     """Validate then create the bundle's workflow definitions + triggers, reusing the
-    existing db writers. Returns the created definitions and triggers."""
+    existing db writers. Returns the created definitions and triggers.
+
+    Signature policy: if the bundle carries a signature it MUST verify against
+    secret_key (a tampered or unverifiable signed pack is rejected). An unsigned pack is
+    accepted unless require_signature is set. See docs/specs/pack-format.md."""
     validate_pack(bundle)
+    if bundle.get("signature") is not None:
+        if not verify_pack_signature(bundle, secret_key):
+            raise ValueError("pack signature is invalid")
+    elif require_signature:
+        raise ValueError("pack is unsigned but a signature is required")
     definitions: list[dict[str, Any]] = []
     for workflow in bundle["workflows"]:
         definitions.append(
@@ -166,9 +212,42 @@ def list_available_packs(packs_dir: Path = PACKS_DIR) -> list[dict[str, Any]]:
                     "description": bundle.get("description") or "",
                     "workflows": len(bundle.get("workflows") or []),
                     "triggers": len(bundle.get("triggers") or []),
+                    "signed": isinstance(bundle.get("signature"), dict),
                 }
             )
         except (ValueError, json.JSONDecodeError) as exc:
             entry["error"] = str(exc)
         summaries.append(entry)
     return summaries
+
+
+def main(argv: list[str] | None = None) -> None:
+    import argparse
+
+    from .config import Config
+
+    parser = argparse.ArgumentParser(description="Sign or verify Atlas solution packs")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    sign_parser = subparsers.add_parser("sign", help="sign a pack bundle in place (or to --output)")
+    sign_parser.add_argument("path", type=Path)
+    sign_parser.add_argument("--output", type=Path)
+    verify_parser = subparsers.add_parser("verify", help="verify a pack bundle signature")
+    verify_parser.add_argument("path", type=Path)
+    args = parser.parse_args(argv)
+
+    config = Config.from_env()
+    if not config.secret_key:
+        parser.error("ATLAS_SECRET_KEY is required")
+    if args.command == "sign":
+        signed = sign_pack(load_pack_file(args.path), config.secret_key)
+        output = args.output or args.path
+        Path(output).write_text(json.dumps(signed, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+        print(output)
+        return
+    if not verify_pack_signature(load_pack_file(args.path), config.secret_key):
+        raise SystemExit("pack signature is invalid or missing")
+    print("pack signature is valid")
+
+
+if __name__ == "__main__":
+    main()

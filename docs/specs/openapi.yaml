@@ -626,6 +626,7 @@ paths:
                         description: {type: string}
                         workflows: {type: integer}
                         triggers: {type: integer}
+                        signed: {type: boolean}
                         error: {type: string}
         default: {$ref: '#/components/responses/Error'}
 
@@ -662,7 +663,13 @@ paths:
                 triggers:
                   type: array
                   items: {type: object}
-                signature: {type: string, nullable: true}
+                signature:
+                  type: object
+                  nullable: true
+                  description: Optional HMAC signature; verified on import when present.
+                  properties:
+                    algorithm: {type: string, enum: [HMAC-SHA256]}
+                    value: {type: string}
       responses:
         '201':
           description: Created definitions and triggers

@@ -43,7 +43,10 @@ Packs ship under `atlas/packs/*.json`. The reference pack is
       "enabled": true             // optional (default true); preserved on export
     }
   ],
-  "signature": null               // optional; reserved for pack signing (M8)
+  "signature": {                  // optional; HMAC signature (see Signing below)
+    "algorithm": "HMAC-SHA256",
+    "value": "…"
+  }
 }
 ```
 
@@ -92,8 +95,34 @@ The `Citizen complaint intake` trigger fires a run with the complaint as input;
 offers **approve** / **reject**; on **approve** the `publish` worker releases the
 response; **reject** ends the run without publishing (the draft remains for revision).
 
-## Not yet (readiness)
+## Signing & verification
 
-- **Signing**: the `signature` field is reserved. HMAC signing/verification on import
-  arrives in M8, along with a local pack-registry listing. A public marketplace stays a
-  documented future Fleet-side service.
+Packs can be signed with **HMAC-SHA256** using `ATLAS_SECRET_KEY` (the same approach as
+signed usage exports). The signature covers the canonical bundle with the `signature`
+field excluded.
+
+```bash
+ATLAS_SECRET_KEY=… python3 -m atlas.packs sign pack.json --output pack.signed.json
+ATLAS_SECRET_KEY=… python3 -m atlas.packs verify pack.signed.json
+```
+
+**Import policy** (`POST /api/packs/import`, which uses the server's `ATLAS_SECRET_KEY`):
+
+- A bundle that **carries a signature** must verify — a tampered or wrong-key signed
+  pack is rejected (`pack signature is invalid`). A signed pack also fails if the server
+  has no `ATLAS_SECRET_KEY` to verify against.
+- An **unsigned** bundle is accepted (the shipped `gov_complaint` pack is unsigned),
+  unless the caller sets `require_signature` (then `pack is unsigned but a signature is
+  required`).
+
+`GET /api/packs` reports a `signed` boolean per pack (whether a signature is present).
+
+## Future marketplace (readiness, not built in core)
+
+A public, hosted pack **marketplace** (a signed registry of community packs with
+discovery and ratings) is intentionally **not** in Atlas core. It would live as a
+Fleet-side service: a catalog API serving signed bundles, with Atlas verifying each
+bundle's signature on import exactly as above (the trust mechanism already exists). The
+extension path: stand up the registry service, publish signed bundles, and point
+operators at it; Atlas core needs no change because import already validates and
+verifies. Ratings/curation are a registry-service concern, never Atlas core.

@@ -417,7 +417,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
             return
 
         if parts == ["api", "packs", "import"] and method == "POST":
-            result = import_pack(runtime.db, self._read_json())
+            result = import_pack(runtime.db, self._read_json(), secret_key=runtime.config.secret_key)
             self._json(result, HTTPStatus.CREATED)
             return
 

@@ -10,7 +10,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from atlas.db import Database, now_iso
-from atlas.packs import PACKS_DIR, export_pack, import_pack, load_pack_file, validate_pack
+from atlas.packs import (
+    PACKS_DIR,
+    export_pack,
+    import_pack,
+    list_available_packs,
+    load_pack_file,
+    sign_pack,
+    validate_pack,
+    verify_pack_signature,
+)
 from atlas.workflows import WorkflowRunner
 
 GOV_PACK = PACKS_DIR / "gov_complaint.json"
@@ -99,6 +108,43 @@ def main() -> None:
         # Re-importing the exported bundle yields another working definition.
         reimported = import_pack(db, exported)
         assert reimported["workflows"][0]["graph"] == bundle["workflows"][0]["graph"]
+
+        # M8: signing — sign, verify, import; tampered/wrong-key/unsigned per policy.
+        secret = "pack-signing-secret"
+        signed = sign_pack(bundle, secret)
+        assert verify_pack_signature(signed, secret) is True
+        assert verify_pack_signature(signed, "wrong-key") is False
+        assert verify_pack_signature(bundle, secret) is False  # unsigned bundle
+        assert import_pack(db, signed, secret_key=secret)["workflows"], "signed pack should import"
+
+        tampered = deepcopy(signed)
+        tampered["workflows"][0]["name"] = "Tampered handler"
+        try:
+            import_pack(db, tampered, secret_key=secret)
+        except ValueError as exc:
+            assert "signature is invalid" in str(exc), str(exc)
+        else:
+            raise AssertionError("tampered signed pack must be rejected")
+
+        try:
+            import_pack(db, signed, secret_key="wrong-key")
+        except ValueError as exc:
+            assert "signature is invalid" in str(exc), str(exc)
+        else:
+            raise AssertionError("signed pack with the wrong key must be rejected")
+
+        # Unsigned packs import unless a signature is required.
+        assert import_pack(db, bundle)["workflows"]
+        try:
+            import_pack(db, bundle, require_signature=True)
+        except ValueError as exc:
+            assert "unsigned" in str(exc), str(exc)
+        else:
+            raise AssertionError("require_signature must reject an unsigned pack")
+
+    # The local registry listing reports the signed flag (shipped gov pack is unsigned).
+    gov = next(entry for entry in list_available_packs() if entry.get("name") == "gov_complaint")
+    assert gov["signed"] is False, gov
 
     # 5. Invalid packs are rejected with clear errors.
     assert_rejected({"name": "x", "version": "1", "workflows": []}, "schema_version must be 1")
