@@ -37,6 +37,17 @@ class JobManager:
             raise ValueError("prompt is required")
 
         conversation_id = payload.get("conversation_id")
+        # Resolve routing and handoff BEFORE creating a conversation, so a failure here
+        # (e.g. no workers registered, unknown handoff target) doesn't leave an orphan
+        # conversation behind. A brand-new conversation has no session binding, so the
+        # router doesn't need its id to resolve.
+        route_payload = dict(payload)
+        route_payload["prompt"] = prompt
+        if conversation_id:
+            route_payload["conversation_id"] = conversation_id
+        decision = self.router.resolve(route_payload)
+        handoff = self._resolve_handoff(payload)
+
         if not conversation_id:
             conversation = self.db.create_conversation(
                 {
@@ -46,12 +57,6 @@ class JobManager:
                 }
             )
             conversation_id = conversation["id"]
-
-        route_payload = dict(payload)
-        route_payload["conversation_id"] = conversation_id
-        route_payload["prompt"] = prompt
-        decision = self.router.resolve(route_payload)
-        handoff = self._resolve_handoff(payload)
 
         job = self.db.create_job(
             {
@@ -109,7 +114,9 @@ class JobManager:
         try:
             health = client.health()
             agent_info = client.agent_info()
-            status = "online" if health else "healthy"
+            # health() always returns a dict (truthy), so key off the worker's own ok flag:
+            # a reachable-but-unhealthy worker ({"ok": false}) must not be ranked as online.
+            status = "online" if health.get("ok") else "offline"
             merged_info = {"health": health, "agent": agent_info}
             self.db.update_worker_status(worker_id, status, merged_info, None)
         except ThClawsError as exc:

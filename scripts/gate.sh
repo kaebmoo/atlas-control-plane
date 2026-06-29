@@ -12,11 +12,13 @@ python3 -m py_compile \
   fleet/fleet.py fleet/cdr.py fleet/__main__.py fleet/check_fleet.py \
   scripts/check_workflows.py scripts/check_workflow_api.py scripts/check_usage.py \
   scripts/check_auth.py scripts/check_migrations.py scripts/check_packs.py \
-  scripts/check_cdr.py scripts/check_byok_helper.py scripts/check_silo.py
+  scripts/check_cdr.py scripts/check_byok_helper.py scripts/check_silo.py \
+  scripts/check_jobs.py
 
 node --check atlas/static/app.js
 
 python3 scripts/check_workflow_db.py
+python3 scripts/check_jobs.py
 python3 scripts/check_workflows.py
 python3 scripts/check_workflow_api.py
 python3 scripts/check_auth.py
