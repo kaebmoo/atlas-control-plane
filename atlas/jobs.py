@@ -189,6 +189,7 @@ class JobManager:
         self.db.update_job(job_id, state="running", started_at=now_iso())
         self.db.append_job_event(job_id, "state", {"state": "running"})
         client = ThClawsClient(worker["base_url"], worker.get("token"), timeout=self.request_timeout_seconds)
+        done_seen = False
         try:
             for event in client.run_agent_stream(
                 prompt=job["prompt"],
@@ -202,6 +203,7 @@ class JobManager:
                 payload = parse_event_payload(event)
                 if event.data == "[DONE]":
                     self.db.append_job_event(job_id, "done", payload)
+                    done_seen = True
                     break
 
                 session_id = extract_session_id(event)
@@ -225,6 +227,11 @@ class JobManager:
 
             if self.db.is_cancel_requested(job_id):
                 raise _JobCancelled()
+            if not done_seen:
+                # Stream ended without a terminal [DONE] frame — the worker disconnected
+                # mid-output. Fail rather than report success so a truncated result is never
+                # handed off as complete.
+                raise ThClawsError("worker stream ended without a terminal [DONE] frame")
             self.db.update_job(job_id, state="succeeded", finished_at=now_iso())
             self.db.append_job_event(job_id, "state", {"state": "succeeded"})
             self.db.audit("job.succeeded", "job", job_id)

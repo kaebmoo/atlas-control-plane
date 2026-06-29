@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,6 +29,16 @@ class MockThClawsHandler(BaseHTTPRequestHandler):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:
+        # /agent/run: emit some output but NO terminal [DONE] frame (worker disconnect).
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        body = b"event: text\ndata: partial output\n\n"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -67,10 +78,36 @@ def check_submit_routing_failure_no_orphan(db: Database) -> None:
     assert len(db.list_conversations()) == before, "routing failure must not orphan a conversation"
 
 
+def check_truncated_stream_fails(db: Database) -> None:
+    """A worker stream that ends without a terminal [DONE] frame (disconnect mid-output)
+    must mark the job failed, not succeeded — a truncated result must never be handed off
+    as complete."""
+    mock = ThreadingHTTPServer(("127.0.0.1", 0), MockThClawsHandler)
+    threading.Thread(target=mock.serve_forever, daemon=True).start()
+    try:
+        host, port = mock.server_address
+        worker = db.upsert_worker({"base_url": f"http://{host}:{port}", "name": "mock-stream"})
+        manager = JobManager(db, request_timeout_seconds=5)
+        job = manager.submit({"prompt": "hello", "worker_id": worker["id"]})
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            current = db.get_job(job["id"])
+            if current and current["state"] in {"succeeded", "failed", "cancelled"}:
+                break
+            time.sleep(0.02)
+        final = db.get_job(job["id"])
+        assert final["state"] == "failed", f"truncated stream must fail, got {final['state']}"
+        assert "DONE" in (final.get("error") or ""), final.get("error")
+    finally:
+        mock.shutdown()
+        mock.server_close()
+
+
 def main() -> None:
     with TemporaryDirectory() as tmp:
         check_submit_routing_failure_no_orphan(Database(Path(tmp) / "orphan.sqlite"))
         check_poll_worker_health(Database(Path(tmp) / "health.sqlite"))
+        check_truncated_stream_fails(Database(Path(tmp) / "stream.sqlite"))
     print("jobs check ok")
 
 
