@@ -34,6 +34,34 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
+def atomic_write_0600(path: Path, data: bytes) -> None:
+    """Write bytes to path atomically at 0600: a temp file in the same directory is written,
+    fsynced, then os.replace()d over the target. A short write or disk error leaves the
+    previous file intact and removes the partial temp — unlike an in-place O_TRUNC, which
+    destroys the original before the new bytes are safely on disk. Used for secret files
+    (BYOK env, fleet token sidecar)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(fd, 0o600)  # tighten even if the temp pre-existed at a looser mode
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def encode_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
 
@@ -1230,6 +1258,26 @@ class Database:
             ).fetchone()
         return row is not None
 
+    def claim_trigger_dedupe(self, trigger_id: str, dedupe_key: str, payload: Any = None) -> bool:
+        """Atomically claim a dedupe_key by inserting the 'received' event only if no event
+        with that key exists yet. Returns True if claimed (caller starts the run), False if it
+        was already claimed (duplicate). self._lock serializes the check-and-insert against
+        concurrent fires in-process, closing the TOCTOU window that let two requests with the
+        same dedupe_key both start a run. (Atlas runs one process per instance.)"""
+        with self._lock, self.connect() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM workflow_trigger_events WHERE trigger_id = ? AND dedupe_key = ? LIMIT 1",
+                (trigger_id, dedupe_key),
+            ).fetchone()
+            if exists:
+                return False
+            conn.execute(
+                "INSERT INTO workflow_trigger_events(id, trigger_id, run_id, payload, state, error, dedupe_key, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (new_id("wte"), trigger_id, None, encode_json(payload or {}), "received", None, dedupe_key, now_iso()),
+            )
+        return True
+
     def append_workflow_trigger_event(
         self,
         trigger_id: str,
@@ -1498,6 +1546,12 @@ class Database:
 
     def delete_worker(self, worker_id: str) -> bool:
         with self._lock, self.connect() as conn:
+            # The jobs FK is ON DELETE CASCADE, so deleting a worker would silently destroy
+            # its jobs and job_events. Job history is an audit record — block the delete when
+            # any job references the worker rather than cascade it away.
+            job_count = conn.execute("SELECT COUNT(*) AS n FROM jobs WHERE worker_id = ?", (worker_id,)).fetchone()["n"]
+            if job_count:
+                raise ValueError(f"worker has {job_count} job(s) in history; deletion is blocked to preserve the audit trail")
             cursor = conn.execute("DELETE FROM workers WHERE id = ?", (worker_id,))
         deleted = cursor.rowcount > 0
         if deleted:
