@@ -58,6 +58,27 @@ def summarize_usage(events: list[dict[str, Any]]) -> dict[str, int | float]:
     }
 
 
+def usage_threshold_alert(
+    events: list[dict[str, Any]],
+    expected_runs: int,
+    threshold_ratio: float = 0.8,
+) -> dict[str, Any]:
+    """Per-period run-count threshold alert (B4): read-only from usage_events. Reports how
+    much of the expected workflow-run volume has been used and whether it crossed the
+    threshold. Deliberately does NOT consider budget_units — that stays the per-run cost
+    guard; this is a volume signal only."""
+    used = summarize_usage(events)["workflow_runs"]
+    expected = int(expected_runs or 0)
+    ratio = (used / expected) if expected > 0 else 0.0
+    return {
+        "expected_runs": expected,
+        "used_runs": used,
+        "ratio": round(ratio, 6),
+        "threshold_ratio": threshold_ratio,
+        "alert": expected > 0 and ratio >= threshold_ratio,
+    }
+
+
 def elapsed_seconds(started_at: str | None, finished_at: str | None) -> float | None:
     if not started_at or not finished_at:
         return None

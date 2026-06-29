@@ -45,6 +45,7 @@ the per-instance username/password, and stop the server with `Ctrl+C`. Atlas use
 | **Monitor** | Inspect workflow runs, approvals, artifacts, and triggers |
 | **Jobs** | Inspect jobs, live output, events, and cancellation |
 | **Audit** | Review recent control-plane actions |
+| **Usage** | Per-period run/job/budget totals, a quota-threshold alert, and JSON/CSV download |
 | **Fleet** | Manage workers and workspaces |
 
 The sidebar counters show workers, active jobs, and finished jobs. The Monitor
@@ -57,8 +58,10 @@ reloads data every 5 seconds and polls workers every 60 seconds.
 For first-time setup, use **Fleet → Command → Jobs**. Use **Workflows → Monitor**
 for multi-step orchestration.
 
-Usage metering/export currently has no dashboard view. Administrators and
-auditors use the API or host CLI described in [§10](#10-usage-metering-and-offline-export).
+Administrators and auditors also get the **Usage** view (period totals, a quota
+alert, and downloads); the API and host CLI in
+[§10](#10-usage-metering-and-offline-export) remain available for automation and
+air-gapped signed exports.
 
 ```mermaid
 flowchart TD
@@ -473,6 +476,16 @@ trace state changes and poll/run errors. The UI renders a subset of the latest
 - Do not expose Atlas or thClaws publicly without authentication and TLS.
 
 ## 10. Usage metering and offline export
+
+### Usage view (dashboard)
+
+Administrators and auditors see a **Usage** view. Set an optional **From**/**To**
+range and click **Load** to show workflow-run, job, and budget-unit totals for the
+period, with **Download JSON** / **Download CSV** buttons. Enter an **Expected runs**
+target and an **Alert at %** threshold to get a read-only quota alert (e.g. "7 / 10
+expected runs used (70%)") that turns red once the run volume crosses the threshold.
+The alert is a volume signal only — it never affects `budget_units`, which stays the
+per-run cost guard.
 
 Atlas records one event per terminal job and one per terminal workflow run.
 Administrators and auditors can export a date range:

@@ -97,7 +97,7 @@ function setDirty(value) {
   reflectEditorDirty();
 }
 
-const VIEWS = ["command", "workflows", "monitor", "jobs", "audit", "fleet"];
+const VIEWS = ["command", "workflows", "monitor", "jobs", "audit", "usage", "fleet"];
 
 function showView(view) {
   if (!VIEWS.includes(view)) view = "command";
@@ -389,9 +389,12 @@ function applyRoleGate() {
   }
   const auditNav = document.querySelector('.nav-item[data-view="audit"]');
   if (auditNav) auditNav.hidden = !["admin", "auditor"].includes(role);
+  const usageNav = document.querySelector('.nav-item[data-view="usage"]');
+  if (usageNav) usageNav.hidden = !["admin", "auditor"].includes(role);
   for (const node of document.querySelectorAll(".edit-worker, .delete-worker, .edit-workspace, .delete-workspace")) node.disabled = !admin;
   for (const node of document.querySelectorAll(".poll-worker, .approve-approval, .reject-approval, .choose-approval, .fire-trigger, .toggle-trigger, .delete-trigger, .apply-worker-suggestion")) node.disabled = !operator;
   if (auditNav?.hidden && document.querySelector("#view-audit.is-active")) showView("command");
+  if (usageNav?.hidden && document.querySelector("#view-usage.is-active")) showView("command");
 }
 
 async function login(event) {
@@ -767,6 +770,64 @@ function renderAudit() {
       <pre>${escapeHtml(JSON.stringify(entry.details || {}, null, 2))}</pre>
     </article>
   `).join("");
+}
+
+// Authenticated download: fetch with the Bearer header (never a token in the URL, which
+// would leak into browser history and proxy logs), then save the blob locally.
+async function downloadUsage(format) {
+  const params = new URLSearchParams();
+  const from = $("#usageFromInput").value.trim();
+  const to = $("#usageToInput").value.trim();
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  if (format) params.set("format", format);
+  const headers = new Headers();
+  const token = localStorage.getItem("atlasApiToken");
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(`/api/usage?${params.toString()}`, { headers });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = format === "csv" ? "usage.csv" : "usage.json";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Read-only run-count threshold alert. Derived purely from usage_events; never touches
+// budget_units (which stays the per-run cost guard).
+function renderUsageAlert(usedRuns) {
+  const box = $("#usageAlert");
+  const expected = Number($("#usageExpectedInput").value) || 0;
+  const thresholdPct = Number($("#usageThresholdInput").value) || 80;
+  if (expected <= 0) { box.hidden = true; return; }
+  const ratioPct = Math.round((usedRuns / expected) * 1000) / 10;
+  const tripped = ratioPct >= thresholdPct;
+  box.hidden = false;
+  box.classList.toggle("is-tripped", tripped);
+  box.textContent = `${usedRuns} / ${expected} expected runs used (${ratioPct}%)`
+    + (tripped ? ` — over ${thresholdPct}% threshold` : "");
+}
+
+async function loadUsage() {
+  const from = $("#usageFromInput").value.trim();
+  const to = $("#usageToInput").value.trim();
+  const params = new URLSearchParams();
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  const qs = params.toString();
+  const data = await api(`/api/usage${qs ? "?" + qs : ""}`);
+  const totals = data.totals || {};
+  $("#usageRuns").textContent = totals.workflow_runs ?? 0;
+  $("#usageJobs").textContent = totals.jobs ?? 0;
+  $("#usageBudgetUnits").textContent = totals.budget_units ?? 0;
+  $("#usageMeta").textContent = (data.from || data.to)
+    ? `Period ${data.from || "…"} → ${data.to || "…"}`
+    : "All time";
+  renderUsageAlert(totals.workflow_runs ?? 0);
 }
 
 async function submitJob() {
@@ -1469,8 +1530,14 @@ for (const [, selector] of POLICY_FORM_FIELDS) {
 }
 
 for (const button of document.querySelectorAll(".nav-item")) {
-  button.addEventListener("click", () => showView(button.dataset.view));
+  button.addEventListener("click", () => {
+    showView(button.dataset.view);
+    if (button.dataset.view === "usage") loadUsage().catch((error) => toast(error.message));
+  });
 }
+$("#loadUsageBtn").addEventListener("click", () => loadUsage().catch((error) => toast(error.message)));
+$("#usageJsonBtn").addEventListener("click", () => downloadUsage("").catch((error) => toast(error.message)));
+$("#usageCsvBtn").addEventListener("click", () => downloadUsage("csv").catch((error) => toast(error.message)));
 showView(localStorage.getItem("atlasView") || "command");
 
 document.addEventListener("keydown", (event) => {
@@ -1480,6 +1547,8 @@ document.addEventListener("keydown", (event) => {
 loadAll()
   .then(() => {
     document.body.classList.remove("is-loading");
+    // If the Usage view was restored from localStorage, load it now that auth/role are known.
+    if (document.querySelector("#view-usage.is-active")) loadUsage().catch(() => undefined);
     const firstActive = state.jobs.find((job) => ["running", "queued", "cancel_requested"].includes(job.state));
     if (firstActive) openJobStream(firstActive.id);
   })

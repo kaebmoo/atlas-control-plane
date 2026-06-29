@@ -623,3 +623,15 @@ button:focus:not(:focus-visible) { outline: none; }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* Usage view (B2/B4) */
+.usage-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.usage-controls label { display: flex; flex-direction: column; gap: 5px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted); }
+.usage-controls input { padding: 8px 10px; }
+.usage-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.usage-metrics .metric { display: flex; flex-direction: column; gap: 6px; }
+.metric-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+.metric-value { font-size: 24px; font-weight: 800; color: var(--ink); }
+.usage-alert { margin-top: 14px; padding: 12px 14px; border-radius: 10px; border: 1px solid #d8b36a; background: #fbf3da; color: #6b4e16; font-size: 13px; }
+.usage-alert.is-tripped { border-color: #c2410c; background: #fde4d6; color: #9a3412; font-weight: 700; }
+@media (max-width: 720px) { .usage-metrics { grid-template-columns: 1fr; } }

@@ -19,7 +19,12 @@ sys.path.insert(0, str(ROOT))
 
 from atlas.app import AtlasHttpServer, AtlasRuntime
 from atlas.config import Config
-from atlas.usage import summarize_usage, verify_signed_usage_export_file, write_signed_usage_export
+from atlas.usage import (
+    summarize_usage,
+    usage_threshold_alert,
+    verify_signed_usage_export_file,
+    write_signed_usage_export,
+)
 
 
 class MockThClawsHandler(BaseHTTPRequestHandler):
@@ -128,6 +133,20 @@ def main() -> None:
             runtime.jobs._record_job_usage(job_event["job_id"])
             runtime.workflows._record_workflow_usage(run["id"])
             assert len(runtime.db.list_usage_events()) == 2
+
+            # B4: read-only run-count threshold alert; the Usage view reads the same data.
+            ledger = runtime.db.list_usage_events()
+            assert summarize_usage(ledger)["workflow_runs"] == 1
+            crossed = usage_threshold_alert(ledger, expected_runs=1)
+            assert crossed["used_runs"] == 1 and crossed["alert"] is True, crossed
+            below = usage_threshold_alert(ledger, expected_runs=10)
+            assert below["used_runs"] == 1 and below["alert"] is False, below
+            # alert fires once volume crosses the configured threshold ratio
+            assert usage_threshold_alert(ledger, expected_runs=2, threshold_ratio=0.4)["alert"] is True
+            assert usage_threshold_alert(ledger, expected_runs=0)["alert"] is False
+            # the volume alert never touches budget_units (the per-run cost guard)
+            assert "budget_units" not in crossed
+            assert summarize_usage(ledger)["budget_units"] == 3
 
             status, usage_json, _ = request_json(base_url, "GET", "/api/usage?format=json", token=tokens["admin"])
             assert status == 200 and usage_json["totals"]["workflow_runs"] == 1
