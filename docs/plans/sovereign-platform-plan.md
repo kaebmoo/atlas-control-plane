@@ -6,13 +6,16 @@
 >
 > การตัดสินใจหลัก: **multi-tenant แบบ silo (1 control plane ต่อ 1 ลูกค้า)** ไม่ใช่
 > pooled. แต่ละลูกค้าได้ Atlas instance ของตัวเอง (VM/DB/secret/URL แยก) และมี
-> ชั้น **Atlas Fleet** อยู่ข้างบนไว้ provision/monitor/รวม usage มาออกบิล.
+> ชั้น **Atlas Fleet** อยู่ข้างบนไว้ provision/monitor/รวม usage แล้วส่งออกเป็น CDR
+> ให้ระบบ billing ของ NT ไป rate/ออก invoice (เราไม่ออก invoice เอง).
 
 This plan covers the commercial/platform layer needed to turn the current
 single-tenant MVP into a sellable, governable, multi-customer product. It does
 **not** re-cover the workflow engine, which is implemented and verified
 (see [workflow-engine-plan.md](workflow-engine-plan.md) and
-[workflow-engine-coding-plan.md](workflow-engine-coding-plan.md)).
+[workflow-engine-coding-plan.md](workflow-engine-coding-plan.md)). Usage pricing and
+the metering/CDR billing model are detailed in
+[usage-metering-billing-plan.md](usage-metering-billing-plan.md) (BYOK-first).
 
 ## Where the code is today
 
@@ -53,8 +56,9 @@ low-end shared tier is ever needed — YAGNI for now).
 - Atlas core still needs, per instance: real **users + RBAC** (one agency has
   many operators), **usage metering export**, and **hardening**.
 - New top component **Atlas Fleet**: instance registry, provisioning
-  automation, health/version monitoring, usage aggregation → billing,
-  fleet-wide upgrades. This is where "spin up as many control planes as you
+  automation, health/version monitoring, usage aggregation → CDR export
+  (NT billing rates/invoices, not us), fleet-wide upgrades. This is where "spin
+  up as many control planes as you
   want" lives.
 - Isolation is per deployment, so a tenant breach cannot reach another tenant.
 
@@ -63,7 +67,7 @@ low-end shared tier is ever needed — YAGNI for now).
                     ┌──────────────────────────────┐
                     │        Atlas Fleet           │  (new, runs at NT)
                     │  registry · provision · health│
-                    │  usage aggregation · billing  │
+                    │  usage aggregation · CDR export│
                     │  upgrade orchestration        │
                     └───────┬───────────┬───────────┘
         provision/health/usage pull (HTTPS, per-instance admin token)
@@ -116,12 +120,17 @@ completion gate.
   POST a job; admin can; revoked token rejected; audit records the actor.
 
 ### M2 — Usage metering & export  ← GA blocker
-- [ ] `usage_events` table: `id, run_id, job_id, node_key, worker_id, actor,
-      kind, units, started_at, finished_at, created_at, metadata`.
+- [ ] `usage_events` table: `id, idempotency_key UNIQUE, run_id, job_id,
+      node_key, worker_id, actor, kind, units, started_at, finished_at,
+      created_at, metadata`. `idempotency_key` (e.g. `job:<id>` / `run:<id>`) +
+      `INSERT OR IGNORE` makes emission safe across retry/restart-recovery so a
+      run is never double-counted.
 - [ ] Emit a usage event on job finish (jobs.py) and on workflow node
       completion / budget spend (workflows.py). Reuse `counters.budget_units_spent`.
-- [ ] Define the billable unit (configurable): job-run count, budget_units, and
-      wall-clock seconds. Record all three; let billing choose.
+- [ ] Define the billable unit (configurable): **workflow-run count** (headline),
+      job-run count, budget_units, and wall-clock seconds. Record all; let NT
+      billing choose. Under **BYOK**, model/token counts are recorded for
+      visibility only — never billed (see usage-metering-billing-plan.md).
 - [ ] `GET /api/usage?from=&to=&format=json|csv` (admin/auditor only).
 - [ ] Signed offline export for air-gapped tenants (file the Fleet can ingest).
 - Check: `scripts/check_usage.py` — run a workflow, assert one usage_event per
@@ -155,11 +164,15 @@ completion gate.
 - Check: provision → register → health-green → usage-pulled, against a local
   throwaway Atlas instance.
 
-### M5 — Central billing aggregation  ← Phase 2
+### M5 — Central usage aggregation & CDR export  ← Phase 2
 - [ ] Aggregate `usage_events` per tenant per period in the Fleet.
-- [ ] Rating rules per plan tier (Gov Standard / Enterprise / Flagship ACVs).
-- [ ] `tenant_invoices` + export to finance (CSV/accounting webhook).
-- Check: synthetic usage → expected invoice line items.
+- [ ] Emit a **CDR-style CSV** (one row per billable event, e.g. per
+      workflow-run) and hand it to **NT's billing system** — same pattern as telco
+      CDR. NT rates per plan tier and issues invoices, **not Atlas/Fleet**.
+- [ ] **No rating engine, no `tenant_invoices`, no ERP integration on our side.**
+      Plan tiers are supplied to NT billing as config, not implemented here.
+- See [usage-metering-billing-plan.md](usage-metering-billing-plan.md) Decision 3.
+- Check: synthetic usage → one CDR file per tenant with correct per-period totals.
 
 ### M6 — Solution packs (Government first)  ← Phase 1 use case
 - [ ] Pack format: a JSON bundle `{ name, version, workflows[], triggers[],
@@ -175,6 +188,9 @@ completion gate.
   multi-provider gateway is wanted (OpenThaiGPT/Llama/Claude/GPT), build it as a
   dedicated gateway worker behind the existing worker abstraction — Atlas needs
   no change. Document, don't build yet.
+- **Billing default is BYOK** (customer brings the model key, held by thClaws;
+  Atlas never bills tokens). Managed Inference is the alternate SKU-B. See
+  [usage-metering-billing-plan.md](usage-metering-billing-plan.md) Decision 0.
 
 ### M8 — Marketplace for community packs  ← later
 - Depends on M6 pack format. A signed registry + ratings. Defer.
@@ -209,7 +225,9 @@ completion gate.
 - Provisioning target: which cloud/virtualization (GDCC, libvirt, k8s)? Decides
   the M4 IaC.
 - Per-instance HA (the plan's later phases) vs. single-VM-with-backups for GA.
-- Billing unit of account: per-run, per-budget-unit, per-seat, or flat ACV?
+- ~~Billing unit of account~~ — **resolved**: subscription anchor + per
+  *workflow-run* consumption; `budget_units` stays a cost guard, not a meter.
+  See [usage-metering-billing-plan.md](usage-metering-billing-plan.md) Decision 2.
 
 ## Non-goals (first pass)
 - Pooled multi-tenant isolation (M9).

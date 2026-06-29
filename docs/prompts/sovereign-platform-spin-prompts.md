@@ -125,23 +125,35 @@ Deliverables, process, and completion gate per the Shared Preamble.
 
 ```text
 Run after M1. Goal: record billable usage and expose an export the Fleet can
-ingest, as a pure side effect that never affects job/workflow outcomes. Follow
-docs/plans/sovereign-platform-plan.md §M2.
+ingest, as a pure side effect that never affects job/workflow outcomes.
 
-Implement:
-- DB (additive): usage_events(id, run_id, job_id, node_key, worker_id, actor,
-  kind, units, started_at, finished_at, created_at, metadata).
-- Emit a usage_event when a job finishes (atlas/jobs.py) and when a workflow node
-  completes or budget is spent (atlas/workflows.py; reuse counters.budget_units_spent).
-  Record three measures per event: job_count (=1), budget_units, wall_seconds.
+Read BOTH as the source of truth, and implement EXACTLY what they specify — do not
+invent a schema or billable unit in this prompt:
+- docs/plans/sovereign-platform-plan.md §M2 — usage_events table, billable units,
+  /api/usage, offline export.
+- docs/plans/usage-metering-billing-plan.md — §(ก) "How the metering schema will be
+  done", Decision 2 (billable unit), Decision 3 (CDR / no rating engine here).
+
+Key requirements to honor (from those docs):
+- DB (additive): usage_events as defined in §M2, INCLUDING `idempotency_key UNIQUE`
+  (e.g. job:<id> / run:<id>) so emission is safe across retry/restart-recovery via
+  INSERT OR IGNORE — a run/job is never double-counted.
+- Emit a usage_event when a job finishes (atlas/jobs.py) and on workflow node
+  completion / budget spend (atlas/workflows.py; reuse counters.budget_units_spent).
+  Record all measures from §M2: workflow-run count (headline unit), job-run count,
+  budget_units, wall_seconds.
+- Under BYOK, model/token counts are recorded for VISIBILITY ONLY — never billed.
 - A metering failure MUST be caught and logged, never propagated — it cannot fail
   or alter a job/run. Do not change any existing response shape.
 - GET /api/usage?from=&to=&format=json|csv — admin/auditor only (RBAC from M1).
 - Offline export: a signed JSON file (HMAC with ATLAS_SECRET_KEY) for air-gapped
   tenants, plus a verify helper.
+- Do NOT build a rating engine or invoices here — that is NT billing's job; M5 only
+  aggregates and exports CDR (billing-plan Decision 3).
 
-New check (add to the gate): scripts/check_usage.py — run a mocked-worker
-workflow; assert exactly one usage_event per job, totals equal the run counters,
+New check (add to the gate): scripts/check_usage.py — run a mocked-worker workflow;
+assert one usage_event per job AND one per workflow-run, totals equal the run
+counters, re-emitting the same job/run does NOT create duplicates (idempotency),
 CSV parses, and /api/usage enforces RBAC.
 
 Deliverables, process, and completion gate per the Shared Preamble.
@@ -181,10 +193,16 @@ Derive each prompt the same way from the plan:
   (Terraform/cloud-init/Ansible); do NOT build a bespoke orchestrator. Start with
   an `instances` registry + `atlas-fleet provision --tenant X` + `/healthz`
   polling + usage pull.
-- **M5 Central billing** — aggregate usage per tenant/period in the Fleet; rating
-  per plan tier; invoice export.
+- **M5 Central usage aggregation & CDR export** — aggregate usage per tenant/period
+  in the Fleet and export a **CDR-style CSV to NT's billing system** (NT rates per
+  plan tier and issues invoices; Atlas/Fleet does **not** build a rating engine,
+  `tenant_invoices`, or ERP integration). See usage-metering-billing-plan.md Decision 3.
 - **M6 Government solution pack** — first revenue use case (citizen complaint
   intake → triage → response draft → human gate → publish). Define the pack
   bundle format + import/export endpoints.
-- **M7 managed inference**, **M8 marketplace**, **M9 pooled tenancy** — deferred;
-  see the plan's non-goals before starting any of them.
+- **M7 managed inference** — deferred. Billing default is **BYOK** (customer brings
+  the model key, held by thClaws; Atlas never bills tokens); Managed Inference is the
+  alternate SKU-B in the worker/gateway layer. Read usage-metering-billing-plan.md
+  Decision 0 & B7 before building.
+- **M8 marketplace**, **M9 pooled tenancy** — deferred; see the plan's non-goals
+  before starting either.
