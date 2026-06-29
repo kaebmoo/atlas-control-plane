@@ -25,6 +25,7 @@ literals the API accepts and the engine checks — all taken from the source cod
 12. [Triggers](#12-triggers)
 13. [Human gates & approvals](#13-human-gates--approvals)
 14. [Usage metering](#14-usage-metering)
+15. [Fleet, packs, BYOK & health](#15-fleet-packs-byok--health)
 
 ---
 
@@ -455,3 +456,27 @@ double counting across retry and restart recovery.
 - Metering errors are logged after outcomes are persisted and never change them.
 - Atlas exports raw JSON/CSV or signed offline JSON; Fleet/NT systems aggregate,
   rate, and invoice later.
+
+## 15. Fleet, packs, BYOK & health
+
+These components sit at the edges of the control plane. Each has an authoritative spec;
+this section is the one-paragraph definition.
+
+- **Fleet** — a separate component (`fleet/`) with its own SQLite registry that
+  provisions, health-checks, and pulls usage from Atlas instances over HTTP. Atlas core
+  has no knowledge of Fleet and no tenant logic.
+- **Instance-per-tenant (silo)** — each tenant runs its own Atlas instance and database;
+  the instance *is* the tenant, so core tables carry no `tenant_id`. Pooled tenancy is
+  deferred. See [ADR 0001](adr/0001-multi-tenancy-silo-vs-pooled.md).
+- **Solution pack** — a signed, portable bundle of workflow definitions + triggers (and
+  declared roles) that imports atomically through the real engine validators. See
+  [Solution Pack Format](specs/pack-format.md).
+- **CDR export** — Fleet aggregates pulled `usage_events` into a per-tenant, per-period
+  CDR CSV for NT billing (export only; the schema is proposed). See
+  [CDR Record Schema](specs/cdr-schema.md).
+- **BYOK key injection** — a write-only helper that installs a provider key into a
+  worker's env/config and audits the action without ever storing, logging, or returning
+  the key. See [BYOK Key Injection](specs/byok-key-injection.md) and the
+  [Managed Inference Gateway](specs/managed-inference.md) readiness note.
+- **Health (`/healthz`)** — an unauthenticated liveness endpoint returning status +
+  version; Fleet polls it to provision and track instances.

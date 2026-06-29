@@ -116,6 +116,30 @@ Air-gapped instances write an HMAC-SHA256 signed JSON envelope for offline Fleet
 ingest. Atlas does not rate records or issue invoices; Fleet and NT billing own
 tenant aggregation, CDR mediation, rating, and invoicing.
 
+## Fleet, Packs, BYOK & Health
+
+Several capabilities sit at the edges of the core control plane. Each has an
+authoritative spec; see also [Concepts §15](concepts-en.md#15-fleet-packs-byok--health).
+
+- **Fleet** (`fleet/`) is a *separate* component with its own SQLite registry. It
+  provisions Atlas instances, polls their `/healthz`, and pulls `usage_events` over HTTP.
+  Atlas core has no knowledge of Fleet and no tenant logic, which keeps the silo
+  invariant intact.
+- **Multi-tenancy is instance-per-tenant (silo):** each tenant runs its own Atlas
+  instance and database, so core tables carry no `tenant_id`. Pooled tenancy is deferred —
+  see [ADR 0001](adr/0001-multi-tenancy-silo-vs-pooled.md).
+- **CDR export:** Fleet aggregates pulled usage into a per-tenant, per-period CDR CSV for
+  NT billing (export only; proposed schema) — see [CDR Record Schema](specs/cdr-schema.md).
+- **Solution packs** are signed, portable bundles of workflow definitions + triggers that
+  import atomically through the real engine validators — see
+  [Solution Pack Format](specs/pack-format.md).
+- **BYOK key injection** writes a provider key into a worker's env/config and audits the
+  action without ever storing, logging, or returning the key — see
+  [BYOK Key Injection](specs/byok-key-injection.md) and the
+  [Managed Inference Gateway](specs/managed-inference.md) readiness note.
+- **`/healthz`** is an unauthenticated liveness endpoint (status + version) that Fleet
+  uses to provision and track instances.
+
 ## Phase 4 Readiness
 
 Atlas already has stable boundaries for features thClaws does not expose natively today:
