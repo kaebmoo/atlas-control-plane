@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from atlas.db import Database, new_id, now_iso  # noqa: E402
+from atlas.db import Database, atomic_write_0600, new_id, now_iso  # noqa: E402
 
 DEFAULT_REGISTRY = Path(os.getenv("ATLAS_FLEET_DB", ROOT / "data" / "fleet.sqlite"))
 INSTANCE_DB_NAME = "atlas.sqlite"
@@ -122,18 +122,11 @@ class Registry:
     def store_token(self, ref: str, token: str) -> None:
         data = self._load_secrets()
         data[ref] = token
-        # Create/truncate at 0600 from the start (umask only clears bits, so 0o600
-        # holds under any umask), so a freshly seeded admin token is never momentarily
-        # world-readable. The trailing chmod tightens a pre-existing looser file.
-        fd = os.open(self.secrets_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            # fchmod before writing: an existing file keeps its old mode through O_CREAT,
-            # but O_TRUNC emptied it, so tightening now means tokens are only ever written
-            # to a 0600 file (no world-readable window).
-            os.fchmod(fd, 0o600)
-            os.write(fd, json.dumps(data).encode("utf-8"))
-        finally:
-            os.close(fd)
+        # Atomic 0600 write: a short write or disk error must never truncate the existing
+        # sidecar (which holds every other instance's admin token) the way an in-place
+        # O_TRUNC would. The temp file is 0600 from creation, so tokens are never written
+        # to a world-readable file.
+        atomic_write_0600(self.secrets_path, json.dumps(data).encode("utf-8"))
 
     def token_for(self, ref: str | None) -> str | None:
         if not ref:
@@ -227,10 +220,14 @@ def check_health(registry: Registry, instance: dict[str, Any]) -> dict[str, Any]
     status, version = "offline", None
     try:
         with urllib.request.urlopen(instance["base_url"] + "/healthz", timeout=3) as resp:
-            if resp.status == 200:
-                status = "online"
-                version = json.loads(resp.read()).get("version") or None
-    except (urllib.error.URLError, ConnectionError, OSError):
+            http_status = resp.status
+            body = json.loads(resp.read()) if http_status == 200 else {}
+        # Honor the instance's own ok flag: a 200 carrying {"ok": false} is unhealthy, not
+        # online (mirrors JobManager.poll_worker).
+        if http_status == 200 and isinstance(body, dict) and body.get("ok"):
+            status = "online"
+            version = body.get("version") or None
+    except (urllib.error.URLError, ConnectionError, OSError, json.JSONDecodeError):
         status = "offline"
     registry.update_health(instance["id"], status=status, version=version, last_health_at=now_iso())
     return registry.get(instance["id"]) or {}
@@ -347,7 +344,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "cdr":
         from .cdr import pull_and_aggregate, write_cdr
 
-        written = write_cdr(args.out_dir, pull_and_aggregate(registry, args.from_at, args.to_at))
+        written = write_cdr(args.out_dir, pull_and_aggregate(registry, args.from_at, args.to_at), args.from_at, args.to_at)
         _print({tenant: str(path) for tenant, path in written.items()})
         return
 

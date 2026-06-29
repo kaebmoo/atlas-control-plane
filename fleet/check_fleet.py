@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 import stat
 import sys
+import threading
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -67,6 +71,29 @@ def main() -> None:
         else:
             raise AssertionError("provision must fail when the instance never starts")
         assert reg2._load_secrets() == {}, "failed provision must not store an admin token"
+
+        # a reachable-but-unhealthy instance (HTTP 200 carrying {"ok": false}) must be
+        # recorded offline, not online — check_health honors the ok flag.
+        class _UnhealthyHandler(BaseHTTPRequestHandler):
+            def log_message(self, *_args: object) -> None:
+                return
+
+            def do_GET(self) -> None:
+                body = json.dumps({"ok": False, "version": "x"}).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        mock = ThreadingHTTPServer(("127.0.0.1", 0), _UnhealthyHandler)
+        threading.Thread(target=mock.serve_forever, daemon=True).start()
+        try:
+            host, port = mock.server_address
+            record = registry.register({"tenant": "t-unhealthy", "base_url": f"http://{host}:{port}"})
+            assert check_health(registry, record)["status"] == "offline", "ok:false must be offline"
+        finally:
+            mock.shutdown()
+            mock.server_close()
 
     print("fleet check ok")
 
