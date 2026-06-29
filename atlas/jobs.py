@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import threading
 from typing import Any
 
@@ -131,7 +132,8 @@ class JobManager:
         return results
 
     def _start_thread(self, job_id: str) -> None:
-        thread = threading.Thread(target=self._run, args=(job_id,), name=f"atlas-job-{job_id}", daemon=True)
+        context = contextvars.copy_context()
+        thread = threading.Thread(target=context.run, args=(self._run, job_id), name=f"atlas-job-{job_id}", daemon=True)
         with self._lock:
             self._threads[job_id] = thread
         thread.start()

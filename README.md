@@ -19,6 +19,9 @@ together into practical multi-agent workflows.
 
 Atlas currently supports:
 
+- Per-instance users, admin/operator/viewer/auditor RBAC, per-user API tokens,
+  dashboard login/logout, and authenticated audit actors.
+- Authenticated encryption for worker tokens when `ATLAS_SECRET_KEY` is set.
 - Multiple thClaws workers, one per machine or runtime.
 - Workspace mapping per worker.
 - Worker polling and capability snapshots.
@@ -634,6 +637,10 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 - `POST /api/workflow-triggers/{id}/fire`
 - `GET /api/workflow-triggers/{id}/events`
 - `GET /api/audit`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/me`
+- admin-only CRUD under `/api/users` and `/api/tokens`
 
 ## Configuration
 
@@ -644,22 +651,35 @@ ATLAS_HOST=127.0.0.1
 ATLAS_PORT=8787
 ATLAS_DB=./data/atlas.sqlite
 ATLAS_API_TOKEN=
-ATLAS_LOOPBACK_NO_AUTH=true
+ATLAS_LOOPBACK_NO_AUTH=false
+ATLAS_SECRET_KEY=
 ATLAS_REQUEST_TIMEOUT=30
 ATLAS_UPLOAD_DIR=./data/uploads
 ATLAS_MAX_UPLOAD_BYTES=10485760
 ```
 
-Optional API auth:
+Create the first administrator (the token is printed once):
 
 ```bash
-ATLAS_API_TOKEN="atlas-secret" python3 -m atlas
+python3 -m atlas.admin create-admin admin
 ```
 
-When `ATLAS_API_TOKEN` is set, non-loopback API calls must include:
+Atlas stores only password and API-token hashes. Roles are `admin`, `operator`,
+`viewer`, and `auditor`. Use `python3 -m atlas.admin --help` for user and token
+management commands.
+
+`ATLAS_API_TOKEN`, when set, remains accepted as a legacy bootstrap admin token.
+For explicit local development without auth:
+
+```bash
+ATLAS_LOOPBACK_NO_AUTH=true python3 -m atlas
+```
+
+This bypass applies only to clients seen as `127.0.0.1` or `::1`. Production
+defaults require a valid bearer token. Authenticated API calls include:
 
 ```text
-Authorization: Bearer atlas-secret
+Authorization: Bearer <per-user-api-token>
 ```
 
 For remote access, put Atlas behind a VPN, Tailscale, SSH tunnel, or a real TLS
@@ -667,13 +687,14 @@ reverse proxy with authentication.
 
 ## Security Notes
 
-- Treat Atlas as an operator console. Anyone with access can trigger agents on
-  registered workers.
+- Treat Atlas as an operator console and assign least-privilege roles.
 - Do not expose Atlas or thClaws workers directly to the public internet.
 - Use real tokens for thClaws workers.
 - `THCLAWS_API_TOKEN=disable-auth` is only safe on loopback binds.
-- Worker tokens are stored in SQLite and never returned to the dashboard API.
-  API responses expose only `token_set: true`.
+- Set a high-entropy `ATLAS_SECRET_KEY` to store worker tokens as authenticated
+  ciphertext. Without it, Atlas preserves plaintext compatibility and logs a warning.
+- Worker tokens are never returned to the dashboard API. API responses expose
+  only `token_set: true`.
 - `data/` is intentionally ignored by Git.
 
 ## Troubleshooting

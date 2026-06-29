@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+import base64
+import contextvars
+import hashlib
+import hmac
 import json
+import os
+import secrets
 import sqlite3
 import threading
 import uuid
+import warnings
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+from .auth import generate_api_token, hash_api_token, hash_password, verify_password
+
 
 ARTIFACT_KINDS = frozenset({"text", "json", "markdown", "file_ref", "summary", "decision"})
+ROLES = frozenset({"admin", "operator", "viewer", "auditor"})
+USER_STATUSES = frozenset({"active", "disabled"})
+_WORKER_TOKEN_MARKER = "atlasenc:v1:"
+_AUDIT_ACTOR = contextvars.ContextVar("atlas_audit_actor", default="local")
 
 
 def now_iso() -> str:
@@ -59,6 +72,30 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  last_used_at TEXT,
+  created_at TEXT NOT NULL,
+  revoked_at TEXT,
+  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 
 CREATE TABLE IF NOT EXISTS workers (
   id TEXT PRIMARY KEY,
@@ -314,9 +351,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
 
 
 class Database:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, secret_key: str | None = None):
         self.path = path
         self._lock = threading.RLock()
+        self._secret_key = secret_key if secret_key is not None else (os.getenv("ATLAS_SECRET_KEY") or None)
+        self._plaintext_warning_emitted = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.init()
 
@@ -359,7 +398,16 @@ class Database:
             if column not in approval_columns:
                 conn.execute(sql)
 
-    def audit(self, action: str, resource_type: str, resource_id: str, details: Any = None, actor: str = "local") -> None:
+    @contextmanager
+    def as_actor(self, actor: str) -> Iterator[None]:
+        token = _AUDIT_ACTOR.set(actor or "local")
+        try:
+            yield
+        finally:
+            _AUDIT_ACTOR.reset(token)
+
+    def audit(self, action: str, resource_type: str, resource_id: str, details: Any = None, actor: str | None = None) -> None:
+        actor = actor or _AUDIT_ACTOR.get()
         with self._lock, self.connect() as conn:
             conn.execute(
                 """
@@ -376,6 +424,196 @@ class Database:
                 (limit,),
             ).fetchall()
         return [row_to_dict(row) or {} for row in rows]
+
+    def create_user(self, username: str, password: str, role: str = "viewer", status: str = "active") -> dict[str, Any]:
+        username = str(username or "").strip()
+        if not username:
+            raise ValueError("username is required")
+        self._validate_role_status(role, status)
+        user_id = new_id("usr")
+        now = now_iso()
+        try:
+            with self._lock, self.connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO users(id, username, password_hash, role, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, username, hash_password(password), role, status, now, now),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"username already exists: {username}") from exc
+        self.audit("user.create", "user", user_id, {"username": username, "role": role, "status": status})
+        return self.get_user(user_id) or {}
+
+    def get_user(self, user_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT id, username, role, status, created_at, updated_at FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+        return row_to_dict(row)
+
+    def get_user_by_username(self, username: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT id, username, role, status, created_at, updated_at FROM users WHERE username = ?",
+                (username,),
+            ).fetchone()
+        return row_to_dict(row)
+
+    def list_users(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT users.id, users.username, users.role, users.status, users.created_at, users.updated_at,
+                  COUNT(api_tokens.id) AS token_count
+                FROM users LEFT JOIN api_tokens ON api_tokens.user_id = users.id AND api_tokens.revoked_at IS NULL
+                GROUP BY users.id ORDER BY users.username COLLATE NOCASE
+                """
+            ).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def update_user(self, user_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        user = self.get_user(user_id)
+        if not user:
+            return None
+        fields: dict[str, Any] = {}
+        if "username" in payload:
+            username = str(payload["username"] or "").strip()
+            if not username:
+                raise ValueError("username is required")
+            fields["username"] = username
+        role = str(payload.get("role", user["role"]))
+        status = str(payload.get("status", user["status"]))
+        self._validate_role_status(role, status)
+        if "role" in payload:
+            fields["role"] = role
+        if "status" in payload:
+            fields["status"] = status
+        if "password" in payload:
+            fields["password_hash"] = hash_password(str(payload["password"] or ""))
+        if not fields:
+            return user
+        fields["updated_at"] = now_iso()
+        assignments = ", ".join(f"{key} = ?" for key in fields)
+        try:
+            with self._lock, self.connect() as conn:
+                conn.execute(f"UPDATE users SET {assignments} WHERE id = ?", [*fields.values(), user_id])
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"username already exists: {fields.get('username')}") from exc
+        self.audit("user.update", "user", user_id, {key: value for key, value in fields.items() if key != "password_hash"})
+        return self.get_user(user_id)
+
+    def delete_user(self, user_id: str) -> bool:
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        deleted = cursor.rowcount > 0
+        if deleted:
+            self.audit("user.delete", "user", user_id)
+        return deleted
+
+    def verify_user_password(self, username: str, password: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        if not row or row["status"] != "active" or not verify_password(password, row["password_hash"]):
+            return None
+        return {key: row[key] for key in ("id", "username", "role", "status", "created_at", "updated_at")}
+
+    def create_api_token(self, user_id: str, name: str = "") -> tuple[dict[str, Any], str]:
+        user = self.get_user(user_id)
+        if not user:
+            raise ValueError(f"Unknown user_id: {user_id}")
+        raw_token = generate_api_token()
+        token_id = new_id("tok")
+        created_at = now_iso()
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO api_tokens(id, user_id, token_hash, name, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (token_id, user_id, hash_api_token(raw_token), str(name or ""), created_at),
+            )
+        self.audit("api_token.create", "api_token", token_id, {"user_id": user_id, "name": str(name or "")})
+        return self.get_api_token(token_id) or {}, raw_token
+
+    def get_api_token(self, token_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT api_tokens.id, api_tokens.user_id, api_tokens.name, api_tokens.last_used_at,
+                  api_tokens.created_at, api_tokens.revoked_at, users.username
+                FROM api_tokens JOIN users ON users.id = api_tokens.user_id
+                WHERE api_tokens.id = ?
+                """,
+                (token_id,),
+            ).fetchone()
+        return row_to_dict(row)
+
+    def list_api_tokens(self, user_id: str | None = None) -> list[dict[str, Any]]:
+        sql = """
+            SELECT api_tokens.id, api_tokens.user_id, api_tokens.name, api_tokens.last_used_at,
+              api_tokens.created_at, api_tokens.revoked_at, users.username
+            FROM api_tokens JOIN users ON users.id = api_tokens.user_id
+        """
+        params: tuple[Any, ...] = ()
+        if user_id:
+            sql += " WHERE api_tokens.user_id = ?"
+            params = (user_id,)
+        sql += " ORDER BY api_tokens.created_at DESC"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def authenticate_api_token(self, raw_token: str) -> dict[str, Any] | None:
+        candidate = hash_api_token(raw_token)
+        with self._lock, self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT api_tokens.id AS token_id, api_tokens.token_hash, users.id, users.username,
+                  users.role, users.status, users.created_at, users.updated_at
+                FROM api_tokens JOIN users ON users.id = api_tokens.user_id
+                WHERE api_tokens.token_hash = ? AND api_tokens.revoked_at IS NULL
+                """,
+                (candidate,),
+            ).fetchone()
+            if not row or row["status"] != "active" or not hmac.compare_digest(candidate, row["token_hash"]):
+                return None
+            conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (now_iso(), row["token_id"]))
+        return {
+            "id": row["id"],
+            "username": row["username"],
+            "role": row["role"],
+            "status": row["status"],
+            "token_id": row["token_id"],
+        }
+
+    def revoke_api_token(self, token_id: str) -> bool:
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE api_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ? AND revoked_at IS NULL",
+                (now_iso(), token_id),
+            )
+        revoked = cursor.rowcount > 0
+        if revoked:
+            self.audit("api_token.revoke", "api_token", token_id)
+        return revoked
+
+    def update_api_token(self, token_id: str, name: str) -> dict[str, Any] | None:
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute("UPDATE api_tokens SET name = ? WHERE id = ?", (str(name or ""), token_id))
+        if not cursor.rowcount:
+            return None
+        self.audit("api_token.update", "api_token", token_id, {"name": str(name or "")})
+        return self.get_api_token(token_id)
+
+    @staticmethod
+    def _validate_role_status(role: str, status: str) -> None:
+        if role not in ROLES:
+            raise ValueError(f"role must be one of: {', '.join(sorted(ROLES))}")
+        if status not in USER_STATUSES:
+            raise ValueError(f"status must be one of: {', '.join(sorted(USER_STATUSES))}")
 
     def create_workflow_definition(self, payload: dict[str, Any]) -> dict[str, Any]:
         definition_id = payload.get("id") or new_id("wfd")
@@ -971,6 +1209,7 @@ class Database:
             token = payload.get("token")
             if token is None or str(token).strip() == "":
                 token = existing["token"] if existing else None
+            token = self._encrypt_worker_token(token)
             conn.execute(
                 """
                 INSERT INTO workers(id, name, base_url, token, role, tags, status, last_seen_at, agent_info, last_error, created_at, updated_at)
@@ -1004,6 +1243,7 @@ class Database:
     def update_worker_status(self, worker_id: str, status: str, agent_info: Any = None, error: str | None = None) -> None:
         with self._lock, self.connect() as conn:
             previous = conn.execute("SELECT status, last_error FROM workers WHERE id = ?", (worker_id,)).fetchone()
+            self._reencrypt_worker_token(conn, worker_id)
             conn.execute(
                 """
                 UPDATE workers
@@ -1018,12 +1258,92 @@ class Database:
     def get_worker(self, worker_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM workers WHERE id = ?", (worker_id,)).fetchone()
-        return row_to_dict(row)
+        worker = row_to_dict(row)
+        if worker:
+            worker["token"] = self._decrypt_worker_token(worker.get("token"))
+        return worker
 
     def list_workers(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute("SELECT * FROM workers ORDER BY name COLLATE NOCASE").fetchall()
-        return [row_to_dict(row) or {} for row in rows]
+        workers = [row_to_dict(row) or {} for row in rows]
+        for worker in workers:
+            worker["token"] = self._decrypt_worker_token(worker.get("token"))
+        return workers
+
+    def _encrypt_worker_token(self, token: Any) -> str | None:
+        if token is None or token == "":
+            return None
+        token = str(token)
+        if token.startswith(_WORKER_TOKEN_MARKER):
+            return token
+        if not self._secret_key:
+            self._warn_plaintext_worker_tokens()
+            return token
+        nonce = secrets.token_bytes(16)
+        plaintext = token.encode("utf-8")
+        encryption_key, mac_key = self._worker_token_keys()
+        ciphertext = bytes(value ^ mask for value, mask in zip(plaintext, self._keystream(encryption_key, nonce, len(plaintext))))
+        tag = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
+        encoded = base64.urlsafe_b64encode(nonce + ciphertext + tag).decode("ascii")
+        return _WORKER_TOKEN_MARKER + encoded
+
+    def _decrypt_worker_token(self, token: Any) -> str | None:
+        if token is None or token == "":
+            return None
+        token = str(token)
+        if not token.startswith(_WORKER_TOKEN_MARKER):
+            if not self._secret_key:
+                self._warn_plaintext_worker_tokens()
+            return token
+        if not self._secret_key:
+            raise ValueError("ATLAS_SECRET_KEY is required to decrypt stored worker tokens")
+        try:
+            packed = base64.urlsafe_b64decode(token.removeprefix(_WORKER_TOKEN_MARKER).encode("ascii"))
+        except (ValueError, TypeError) as exc:
+            raise ValueError("stored worker token ciphertext is invalid") from exc
+        if len(packed) < 48:
+            raise ValueError("stored worker token ciphertext is invalid")
+        nonce, ciphertext, expected_tag = packed[:16], packed[16:-32], packed[-32:]
+        encryption_key, mac_key = self._worker_token_keys()
+        actual_tag = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
+        if not hmac.compare_digest(actual_tag, expected_tag):
+            raise ValueError("stored worker token could not be authenticated; check ATLAS_SECRET_KEY")
+        plaintext = bytes(value ^ mask for value, mask in zip(ciphertext, self._keystream(encryption_key, nonce, len(ciphertext))))
+        return plaintext.decode("utf-8")
+
+    def _worker_token_keys(self) -> tuple[bytes, bytes]:
+        master = str(self._secret_key).encode("utf-8")
+        return (
+            hmac.new(master, b"atlas-worker-token-encryption-v1", hashlib.sha256).digest(),
+            hmac.new(master, b"atlas-worker-token-authentication-v1", hashlib.sha256).digest(),
+        )
+
+    @staticmethod
+    def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
+        output = bytearray()
+        counter = 0
+        while len(output) < length:
+            output.extend(hmac.new(key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest())
+            counter += 1
+        return bytes(output[:length])
+
+    def _reencrypt_worker_token(self, conn: sqlite3.Connection, worker_id: str) -> None:
+        if not self._secret_key:
+            return
+        row = conn.execute("SELECT token FROM workers WHERE id = ?", (worker_id,)).fetchone()
+        if row and row["token"] and not row["token"].startswith(_WORKER_TOKEN_MARKER):
+            conn.execute("UPDATE workers SET token = ? WHERE id = ?", (self._encrypt_worker_token(row["token"]), worker_id))
+
+    def _warn_plaintext_worker_tokens(self) -> None:
+        if self._plaintext_warning_emitted:
+            return
+        self._plaintext_warning_emitted = True
+        warnings.warn(
+            "ATLAS_SECRET_KEY is unset; worker tokens will remain plaintext at rest",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
     def delete_worker(self, worker_id: str) -> bool:
         with self._lock, self.connect() as conn:

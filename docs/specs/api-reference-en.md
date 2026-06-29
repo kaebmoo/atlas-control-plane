@@ -31,38 +31,51 @@ release and review this specification when contracts change.
 
 ## 2. Authentication, CORS, and security
 
-When `ATLAS_API_TOKEN` is unset, API requests require no token. To enable it:
+Atlas requires a per-user API token by default. Create the first administrator:
 
 ```bash
-ATLAS_API_TOKEN="atlas-secret" python3 -m atlas
+python3 -m atlas.admin create-admin admin
 ```
 
 Send the token in a header:
 
 ```bash
-curl -H 'Authorization: Bearer atlas-secret' "$BASE_URL/api/workers"
+curl -H 'Authorization: Bearer <token>' "$BASE_URL/api/workers"
 ```
 
 Or as a query parameter:
 
 ```text
-GET /api/jobs/{job_id}/events?token=atlas-secret
+GET /api/jobs/{job_id}/events?token=<token>
 ```
 
 The query token primarily supports browser `EventSource`, which cannot set an
 Authorization header. Do not use it for ordinary requests because URLs may be
 recorded in logs and history.
 
-With the default `ATLAS_LOOPBACK_NO_AUTH=true`, requests from `127.0.0.1` and
-`::1` bypass authentication even when `ATLAS_API_TOKEN` is configured.
+Set `ATLAS_LOOPBACK_NO_AUTH=true` explicitly for local development to allow
+requests seen as `127.0.0.1` or `::1` without a token. The secure default is
+`false`. A configured `ATLAS_API_TOKEN` remains accepted as a legacy admin token.
 
 Current limitations:
 
-- One shared API token; no user identity, RBAC, or per-resource permissions yet.
 - No built-in TLS; use an HTTPS reverse proxy for remote access.
 - CORS uses `Access-Control-Allow-Origin: *` and allows `authorization`,
   `content-type`, and `x-filename` headers.
-- Worker tokens are stored in SQLite but never returned; responses expose only `token_set`.
+- Worker tokens use authenticated ciphertext when `ATLAS_SECRET_KEY` is set;
+  without it Atlas warns and preserves plaintext compatibility. Responses expose
+  only `token_set`.
+
+Identity endpoints:
+
+- `POST /api/auth/login` with `username` and `password` returns a one-time raw
+  token response plus public user metadata.
+- `POST /api/auth/logout` revokes the current per-user token.
+- `GET /api/me` returns the authenticated username and role.
+- Admin-only CRUD: `/api/users`, `/api/users/{id}`, `/api/tokens`, and
+  `/api/tokens/{id}`. `POST /api/tokens/{id}/revoke` is an additive revoke alias.
+- Roles: `viewer` reads normal resources; `operator` runs jobs/workflows and
+  decides approvals; `auditor` additionally reads audit data; `admin` has all permissions.
 
 ## 3. Request and response conventions
 
@@ -87,6 +100,7 @@ Every error uses one JSON shape:
 | --- | --- |
 | `400` | Invalid payload, state transition, or reference |
 | `401` | Missing or incorrect token |
+| `403` | Authenticated role lacks the route permission |
 | `404` | Resource or route not found |
 | `500` | Exception not converted into a validation error |
 

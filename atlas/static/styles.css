@@ -77,6 +77,28 @@ a { color: var(--teal-strong); }
 .is-loading .loading-bar { opacity: 1; animation: loadbar 1.1s ease-in-out infinite; }
 @keyframes loadbar { 0% { background-position: -40% 0; } 100% { background-position: 140% 0; } }
 
+.login-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: linear-gradient(145deg, var(--sidebar), #18322e);
+}
+.login-screen[hidden] { display: none; }
+.login-card {
+  width: min(100%, 380px);
+  display: grid;
+  gap: 18px;
+  padding: 28px;
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: var(--shadow-pop);
+}
+.login-card h1 { font-size: 22px; }
+.login-card p { margin-top: 3px; color: var(--muted); }
+
 /* ---------- Shell ---------- */
 .app-shell {
   display: grid;
@@ -149,6 +171,11 @@ a { color: var(--teal-strong); }
 .nav-badge[hidden] { display: none; }
 
 .sidebar-foot { margin-top: auto; display: grid; gap: 10px; }
+.signed-in { display: grid; gap: 2px; padding: 10px; border: 1px solid rgba(255,255,255,.1); border-radius: 8px; background: rgba(255,255,255,.05); }
+.signed-in[hidden] { display: none; }
+.signed-in span { color: var(--sidebar-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
+.signed-in strong { overflow-wrap: anywhere; font-size: 12px; }
+.signed-in button { justify-self: start; color: #b8d8d2; font-size: 12px; text-decoration: underline; }
 .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
 .metrics div {
   padding: 8px 9px;

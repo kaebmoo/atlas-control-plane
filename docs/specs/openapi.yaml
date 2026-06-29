@@ -1,21 +1,22 @@
 openapi: 3.1.0
 info:
   title: Atlas Control Plane API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Current HTTP API implemented by atlas/app.py as of 2026-06-29. Workflow and
     trigger request schemas describe the preferred canonical client shape; the
     backend also accepts some shorthand/defaulted fields documented in the guides.
-    All API errors use {"error":"message"}. Authentication is deployment-dependent:
-    ATLAS_API_TOKEN enables bearer/query-token checks, while loopback may be exempt.
+    All API errors use {"error":"message"}. Per-user bearer tokens are required
+    by default; ATLAS_API_TOKEN remains a legacy admin token and explicit loopback
+    development mode may be exempt.
 servers:
   - url: http://127.0.0.1:8787
     description: Default local server
 security:
   - bearerAuth: []
   - queryToken: []
-  - {}
 tags:
+  - name: Identity
   - name: System
   - name: Workers
   - name: Workspaces
@@ -29,6 +30,168 @@ tags:
   - name: Triggers
   - name: Audit
 paths:
+  /api/auth/login:
+    post:
+      tags: [Identity]
+      operationId: login
+      summary: Verify username/password and issue a per-user API token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string}
+                password: {type: string, format: password}
+      responses:
+        '200':
+          description: Login token and public user metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: {type: string, writeOnly: true}
+                  user: {$ref: '#/components/schemas/User'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/auth/logout:
+    post:
+      tags: [Identity]
+      operationId: logout
+      summary: Revoke the current per-user API token
+      responses:
+        '200': {description: Logged out}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/me:
+    get:
+      tags: [Identity]
+      operationId: getCurrentUser
+      summary: Read the authenticated identity and role
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: {$ref: '#/components/schemas/User'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/users:
+    get:
+      tags: [Identity]
+      operationId: listUsers
+      summary: List users (admin only)
+      responses:
+        '200': {description: User list}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Identity]
+      operationId: createUser
+      summary: Create a user (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserInput'}
+      responses:
+        '201': {description: User created}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/users/{user_id}:
+    parameters: [{$ref: '#/components/parameters/UserId'}]
+    get:
+      tags: [Identity]
+      operationId: getUser
+      summary: Get a user (admin only)
+      responses:
+        '200': {description: User}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      tags: [Identity]
+      operationId: updateUser
+      summary: Update username, password, role, or status (admin only)
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserInput'}
+      responses:
+        '200': {description: Updated user}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Identity]
+      operationId: deleteUser
+      summary: Delete a user and tokens (admin only)
+      responses:
+        '200': {$ref: '#/components/responses/Deleted'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/tokens:
+    get:
+      tags: [Identity]
+      operationId: listApiTokens
+      summary: List token metadata without token hashes (admin only)
+      responses:
+        '200': {description: Token metadata list}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Identity]
+      operationId: createApiToken
+      summary: Issue an API token returned once (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                user_id: {type: string}
+                username: {type: string}
+                name: {type: string}
+      responses:
+        '201': {description: Token metadata and one-time raw api_token}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/tokens/{token_id}:
+    parameters: [{$ref: '#/components/parameters/TokenId'}]
+    get:
+      tags: [Identity]
+      operationId: getApiToken
+      summary: Get token metadata (admin only)
+      responses:
+        '200': {description: Token metadata}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      tags: [Identity]
+      operationId: updateApiToken
+      summary: Rename a token (admin only)
+      responses:
+        '200': {description: Updated token metadata}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Identity]
+      operationId: revokeApiToken
+      summary: Revoke a token (admin only)
+      responses:
+        '200': {description: Token revoked}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/tokens/{token_id}/revoke:
+    parameters: [{$ref: '#/components/parameters/TokenId'}]
+    post:
+      tags: [Identity]
+      operationId: revokeApiTokenAction
+      summary: Revoke a token using the additive action alias (admin only)
+      responses:
+        '200': {description: Token revoked}
+        default: {$ref: '#/components/responses/Error'}
+
   /api/health:
     get:
       tags: [System]
@@ -1097,10 +1260,12 @@ components:
     ArtifactId: {name: artifact_id, in: path, required: true, schema: {type: string}}
     ApprovalId: {name: approval_id, in: path, required: true, schema: {type: string}}
     TriggerId: {name: trigger_id, in: path, required: true, schema: {type: string}}
+    UserId: {name: user_id, in: path, required: true, schema: {type: string}}
+    TokenId: {name: token_id, in: path, required: true, schema: {type: string}}
 
   responses:
     Error:
-      description: Error response; normally 400, 401, 404, or 500
+      description: Error response; normally 400, 401, 403, 404, or 500
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -1132,6 +1297,26 @@ components:
               run: {$ref: '#/components/schemas/WorkflowRun'}
 
   schemas:
+    User:
+      type: object
+      required: [username, role, status]
+      properties:
+        id: {type: [string, 'null']}
+        username: {type: string}
+        role: {type: string, enum: [admin, operator, viewer, auditor]}
+        status: {type: string, enum: [active, disabled]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        token_count: {type: integer}
+
+    UserInput:
+      type: object
+      properties:
+        username: {type: string}
+        password: {type: string, format: password}
+        role: {type: string, enum: [admin, operator, viewer, auditor]}
+        status: {type: string, enum: [active, disabled]}
+
     Error:
       type: object
       required: [error]

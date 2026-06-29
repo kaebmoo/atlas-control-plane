@@ -10,6 +10,19 @@
     <a class="skip-link" href="#main">Skip to content</a>
     <div class="loading-bar" aria-hidden="true"></div>
 
+    <div id="loginScreen" class="login-screen" hidden>
+      <form id="loginForm" class="login-card" autocomplete="on">
+        <div class="brand-mark">A</div>
+        <div>
+          <h1>Sign in to Atlas</h1>
+          <p id="loginMessage">Use your instance account.</p>
+        </div>
+        <label class="field">Username<input name="username" autocomplete="username" required></label>
+        <label class="field">Password<input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="primary-btn block-btn" type="submit">Sign in</button>
+      </form>
+    </div>
+
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
@@ -50,6 +63,11 @@
         </nav>
 
         <div class="sidebar-foot">
+          <div id="signedInPanel" class="signed-in" hidden>
+            <span>Signed in as</span>
+            <strong id="signedInIdentity"></strong>
+            <button id="signOutBtn" type="button">Sign out</button>
+          </div>
           <div class="metrics">
             <div><span id="metricWorkers">0</span><label>workers</label></div>
             <div><span id="metricRunning">0</span><label>running</label></div>

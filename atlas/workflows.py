@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import json
 import re
 import threading
@@ -477,9 +478,10 @@ class WorkflowRunner:
         policy: dict[str, Any],
         input: dict[str, Any],
     ) -> None:
+        context = contextvars.copy_context()
         thread = threading.Thread(
-            target=self._run_background,
-            args=(run_id, graph, policy, input),
+            target=context.run,
+            args=(self._run_background, run_id, graph, policy, input),
             name=f"atlas-workflow-{run_id}",
             daemon=True,
         )

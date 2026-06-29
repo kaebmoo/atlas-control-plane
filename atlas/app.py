@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import mimetypes
 import os
@@ -44,12 +45,18 @@ _WORKFLOW_POLICY_DEFAULTS = {
     "max_minutes": 30,
     "stop_on_first_failure": True,
 }
+ROLE_PERMISSIONS = {
+    "admin": frozenset({"read", "audit.read", "jobs.run", "workflows.run", "approvals.decide", "workflows.manage", "workers.poll", "resources.manage", "admin"}),
+    "operator": frozenset({"read", "jobs.run", "workflows.run", "approvals.decide", "workflows.manage", "workers.poll", "resources.manage"}),
+    "viewer": frozenset({"read"}),
+    "auditor": frozenset({"read", "audit.read"}),
+}
 
 
 class AtlasRuntime:
     def __init__(self, config: Config):
         self.config = config
-        self.db = Database(config.db_path)
+        self.db = Database(config.db_path, secret_key=config.secret_key)
         self.upload_dir = (config.upload_dir or config.db_path.parent / "uploads").resolve()
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.jobs = JobManager(self.db, config.request_timeout_seconds)
@@ -97,10 +104,19 @@ class AtlasHandler(BaseHTTPRequestHandler):
         path = parsed.path
         try:
             if path.startswith("/api/"):
+                parts = [part for part in path.split("/") if part]
+                if method == "POST" and parts == ["api", "auth", "login"]:
+                    self._handle_api(method, path, parse_qs(parsed.query))
+                    return
                 if not self._is_authorized():
                     self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
                     return
-                self._handle_api(method, path, parse_qs(parsed.query))
+                permission = _required_permission(method, parts)
+                if permission not in ROLE_PERMISSIONS.get(self.auth_identity["role"], frozenset()):
+                    self._json({"error": "forbidden"}, HTTPStatus.FORBIDDEN)
+                    return
+                with self.server.runtime.db.as_actor(self.auth_identity["username"]):
+                    self._handle_api(method, path, parse_qs(parsed.query))
                 return
             self._handle_static(path)
         except ValueError as exc:
@@ -115,6 +131,108 @@ class AtlasHandler(BaseHTTPRequestHandler):
     def _handle_api(self, method: str, path: str, query: dict[str, list[str]]) -> None:
         runtime = self.server.runtime
         parts = [part for part in path.split("/") if part]
+
+        if parts == ["api", "auth", "login"] and method == "POST":
+            payload = self._read_json()
+            username = str(payload.get("username") or "").strip()
+            password = str(payload.get("password") or "")
+            user = runtime.db.verify_user_password(username, password)
+            if not user:
+                self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            with runtime.db.as_actor(user["username"]):
+                token, raw_token = runtime.db.create_api_token(user["id"], "dashboard login")
+                runtime.db.audit("auth.login", "user", user["id"], {"token_id": token["id"]})
+            self._json({"token": raw_token, "user": user})
+            return
+
+        if parts == ["api", "auth", "logout"] and method == "POST":
+            token_id = self.auth_identity.get("token_id")
+            if token_id:
+                runtime.db.revoke_api_token(token_id)
+            runtime.db.audit("auth.logout", "user", self.auth_identity.get("id") or "legacy")
+            self._json({"logged_out": True})
+            return
+
+        if parts == ["api", "me"] and method == "GET":
+            self._json({"user": {key: self.auth_identity.get(key) for key in ("id", "username", "role", "status")}})
+            return
+
+        if parts == ["api", "users"]:
+            if method == "GET":
+                self._json({"users": runtime.db.list_users()})
+                return
+            if method == "POST":
+                payload = self._read_json()
+                user = runtime.db.create_user(
+                    str(payload.get("username") or ""),
+                    str(payload.get("password") or ""),
+                    str(payload.get("role") or "viewer"),
+                    str(payload.get("status") or "active"),
+                )
+                self._json({"user": user}, HTTPStatus.CREATED)
+                return
+
+        if len(parts) == 3 and parts[:2] == ["api", "users"]:
+            user_id = parts[2]
+            if method == "GET":
+                user = runtime.db.get_user(user_id)
+                if not user:
+                    raise FileNotFoundError()
+                self._json({"user": user})
+                return
+            if method == "PUT":
+                user = runtime.db.update_user(user_id, self._read_json())
+                if not user:
+                    raise FileNotFoundError()
+                self._json({"user": user})
+                return
+            if method == "DELETE":
+                if not runtime.db.delete_user(user_id):
+                    raise FileNotFoundError()
+                self._json({"deleted": True})
+                return
+
+        if parts == ["api", "tokens"]:
+            if method == "GET":
+                user_id = query.get("user_id", [""])[0] or None
+                self._json({"tokens": runtime.db.list_api_tokens(user_id)})
+                return
+            if method == "POST":
+                payload = self._read_json()
+                user_id = str(payload.get("user_id") or "")
+                if not user_id and payload.get("username"):
+                    user = runtime.db.get_user_by_username(str(payload["username"]))
+                    user_id = user["id"] if user else ""
+                token, raw_token = runtime.db.create_api_token(user_id, str(payload.get("name") or "api"))
+                self._json({"token": token, "api_token": raw_token}, HTTPStatus.CREATED)
+                return
+
+        if len(parts) == 3 and parts[:2] == ["api", "tokens"]:
+            token_id = parts[2]
+            if method == "GET":
+                token = runtime.db.get_api_token(token_id)
+                if not token:
+                    raise FileNotFoundError()
+                self._json({"token": token})
+                return
+            if method == "PUT":
+                token = runtime.db.update_api_token(token_id, str(self._read_json().get("name") or ""))
+                if not token:
+                    raise FileNotFoundError()
+                self._json({"token": token})
+                return
+            if method == "DELETE":
+                if not runtime.db.revoke_api_token(token_id):
+                    raise FileNotFoundError()
+                self._json({"revoked": True})
+                return
+
+        if len(parts) == 4 and parts[:2] == ["api", "tokens"] and parts[3] == "revoke" and method == "POST":
+            if not runtime.db.revoke_api_token(parts[2]):
+                raise FileNotFoundError()
+            self._json({"revoked": True})
+            return
 
         if method == "GET" and parts == ["api", "health"]:
             self._json(
@@ -636,15 +754,49 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 
     def _is_authorized(self) -> bool:
-        token = self.server.runtime.config.api_token
-        if not token:
+        runtime = self.server.runtime
+        self.auth_identity = {}
+        if runtime.config.enable_loopback_without_token and self.client_address[0] in {"127.0.0.1", "::1"}:
+            self.auth_identity = {"id": None, "username": "local", "role": "admin", "status": "active", "token_id": None}
             return True
-        if self.server.runtime.config.enable_loopback_without_token and self.client_address[0] in {"127.0.0.1", "::1"}:
+        authorization = self.headers.get("Authorization") or ""
+        bearer_token = authorization[7:] if authorization.startswith("Bearer ") else None
+        raw_token = bearer_token or parse_qs(urlparse(self.path).query).get("token", [None])[0]
+        if not raw_token:
+            return False
+        legacy_token = runtime.config.api_token
+        if legacy_token and hmac.compare_digest(raw_token, legacy_token):
+            self.auth_identity = {"id": None, "username": "legacy", "role": "admin", "status": "active", "token_id": None}
             return True
-        query_token = parse_qs(urlparse(self.path).query).get("token", [None])[0]
-        if query_token == token:
-            return True
-        return self.headers.get("Authorization") == f"Bearer {token}"
+        identity = runtime.db.authenticate_api_token(raw_token)
+        if not identity:
+            return False
+        self.auth_identity = identity
+        return True
+
+
+def _required_permission(method: str, parts: list[str]) -> str:
+    if parts[:2] in (["api", "users"], ["api", "tokens"]):
+        return "admin"
+    if parts == ["api", "audit"]:
+        return "audit.read"
+    if method == "GET" or parts in (["api", "me"], ["api", "auth", "logout"]):
+        return "read"
+    if parts[:2] == ["api", "jobs"] or parts == ["api", "routes", "resolve"]:
+        return "jobs.run"
+    if parts[:2] == ["api", "approvals"]:
+        return "approvals.decide"
+    if parts[:2] == ["api", "workflow-runs"] or parts[:2] == ["api", "artifacts"]:
+        return "workflows.run"
+    if parts[:2] == ["api", "workflow-triggers"]:
+        return "workflows.run" if len(parts) == 4 and parts[3] == "fire" else "workflows.manage"
+    if parts[:2] == ["api", "workflows"]:
+        return "workflows.manage"
+    if parts[:2] == ["api", "workers"]:
+        if method == "POST" and (parts == ["api", "workers", "poll"] or (len(parts) == 4 and parts[3] == "poll")):
+            return "workers.poll"
+        return "admin"
+    return "resources.manage"
 
 
 def run_server(config: Config) -> None:
@@ -1074,6 +1226,7 @@ def main(argv: list[str] | None = None) -> None:
             api_token=config.api_token,
             request_timeout_seconds=config.request_timeout_seconds,
             enable_loopback_without_token=config.enable_loopback_without_token,
+            secret_key=config.secret_key,
             upload_dir=upload_dir,
             max_upload_bytes=config.max_upload_bytes,
         )

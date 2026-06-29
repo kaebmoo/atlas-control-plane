@@ -1,4 +1,5 @@
 const state = {
+  currentUser: null,
   workers: [],
   workspaces: [],
   conversations: [],
@@ -50,6 +51,10 @@ async function api(path, options = {}) {
   }
   if (!response.ok) {
     const message = data?.error || data?.message || response.statusText || `HTTP ${response.status}`;
+    if (response.status === 401 && path !== "/api/auth/login") {
+      localStorage.removeItem("atlasApiToken");
+      showLogin("Your session is missing or expired.");
+    }
     throw new Error(message);
   }
   return data;
@@ -286,6 +291,10 @@ function applyQuickTrigger() {
 }
 
 async function loadAll() {
+  const me = await api("/api/me");
+  state.currentUser = me.user;
+  hideLogin();
+  const canReadAudit = ["admin", "auditor"].includes(state.currentUser?.role);
   const [workers, workspaces, conversations, jobs, workflows, workflowTemplates, workflowRuns, workflowTriggers, approvals, audit] = await Promise.all([
     api("/api/workers"),
     api("/api/workspaces"),
@@ -296,7 +305,7 @@ async function loadAll() {
     api("/api/workflow-runs"),
     api("/api/workflow-triggers"),
     api("/api/approvals?state=pending"),
-    api("/api/audit?limit=30"),
+    canReadAudit ? api("/api/audit?limit=30") : Promise.resolve({ audit: [] }),
   ]);
   state.workers = workers.workers || [];
   state.workspaces = workspaces.workspaces || [];
@@ -316,11 +325,12 @@ async function loadAll() {
 }
 
 async function refreshAll({ poll = false, notice = false } = {}) {
-  if (poll) {
+  const didPoll = poll && ["admin", "operator"].includes(state.currentUser?.role);
+  if (didPoll) {
     await api("/api/workers/poll", { method: "POST" });
   }
   await loadAll();
-  if (notice) toast(poll ? "Refreshed and polled workers" : "Refreshed");
+  if (notice) toast(didPoll ? "Refreshed and polled workers" : "Refreshed");
 }
 
 function render() {
@@ -334,6 +344,73 @@ function render() {
   renderAudit();
   updateComposerRoutePreview();
   reflectEditorDirty();
+  renderIdentity();
+  applyRoleGate();
+}
+
+function showLogin(message = "Use your instance account.") {
+  state.currentUser = null;
+  if (state.eventSource) state.eventSource.close();
+  $("#loginMessage").textContent = message;
+  $("#loginScreen").hidden = false;
+  document.querySelector(".app-shell").inert = true;
+  document.body.classList.remove("is-loading");
+  $("#loginForm").elements.username.focus();
+}
+
+function hideLogin() {
+  $("#loginScreen").hidden = true;
+  document.querySelector(".app-shell").inert = false;
+  $("#loginMessage").textContent = "Use your instance account.";
+}
+
+function renderIdentity() {
+  const panel = $("#signedInPanel");
+  panel.hidden = !state.currentUser;
+  $("#signedInIdentity").textContent = state.currentUser ? `${state.currentUser.username} (${state.currentUser.role})` : "";
+}
+
+function applyRoleGate() {
+  const role = state.currentUser?.role;
+  const operator = ["admin", "operator"].includes(role);
+  const admin = role === "admin";
+  for (const selector of [
+    "#submitJobBtn", "#cancelJobBtn", "#newWorkflowBtn", "#saveWorkflowBtn", "#validateWorkflowBtn",
+    "#explainWorkflowBtn", "#repairWorkflowBtn", "#suggestWorkersBtn", "#draftWorkflowBtn",
+    "#runWorkflowBtn", "#uploadWorkflowFileBtn", "#pauseWorkflowRunBtn", "#resumeWorkflowRunBtn",
+    "#retryInterruptedRunBtn", "#cancelWorkflowRunBtn", "#saveTriggerBtn", "#suggestTriggersBtn", "#pollAllBtn",
+  ]) {
+    const node = $(selector);
+    if (node) node.disabled = !operator;
+  }
+  for (const selector of ["#addWorkerBtn", "#addWorkspaceBtn"]) {
+    const node = $(selector);
+    if (node) node.disabled = !admin;
+  }
+  const auditNav = document.querySelector('.nav-item[data-view="audit"]');
+  if (auditNav) auditNav.hidden = !["admin", "auditor"].includes(role);
+  for (const node of document.querySelectorAll(".edit-worker, .delete-worker, .edit-workspace, .delete-workspace")) node.disabled = !admin;
+  for (const node of document.querySelectorAll(".poll-worker, .approve-approval, .reject-approval, .choose-approval, .fire-trigger, .toggle-trigger, .delete-trigger, .apply-worker-suggestion")) node.disabled = !operator;
+  if (auditNav?.hidden && document.querySelector("#view-audit.is-active")) showView("command");
+}
+
+async function login(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = await api("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ username: form.elements.username.value, password: form.elements.password.value }),
+  });
+  localStorage.setItem("atlasApiToken", data.token);
+  form.elements.password.value = "";
+  await loadAll();
+}
+
+async function signOut() {
+  try { await api("/api/auth/logout", { method: "POST" }); } catch { /* token may already be invalid */ }
+  localStorage.removeItem("atlasApiToken");
+  state.currentUser = null;
+  showLogin("Signed out.");
 }
 
 function renderRunSummary() {
@@ -1379,6 +1456,10 @@ $("#workspaceSelect").addEventListener("change", () => {
 });
 $("#workerForm").addEventListener("submit", (event) => saveWorker(event).catch((error) => toast(error.message)));
 $("#workspaceForm").addEventListener("submit", (event) => saveWorkspace(event).catch((error) => toast(error.message)));
+$("#loginForm").addEventListener("submit", (event) => login(event).catch((error) => {
+  $("#loginMessage").textContent = error.message === "unauthorized" ? "Invalid username or password." : error.message;
+}));
+$("#signOutBtn").addEventListener("click", () => signOut());
 for (const selector of ["#workflowNameInput", "#workflowDescriptionInput", "#workflowGraphInput", "#workflowPolicyInput"]) {
   $(selector).addEventListener("input", () => { setDirty(true); });
 }
@@ -1408,9 +1489,11 @@ loadAll()
   });
 
 setInterval(() => {
+  if (!$("#loginScreen").hidden) return;
   loadAll().catch(() => undefined);
 }, 5000);
 
 setInterval(() => {
+  if (!$("#loginScreen").hidden) return;
   refreshAll({ poll: true }).catch(() => undefined);
 }, AUTO_POLL_MS);

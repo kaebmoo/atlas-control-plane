@@ -16,12 +16,13 @@ single-tenant MVP into a sellable, governable, multi-customer product. It does
 
 ## Where the code is today
 
-- Single SQLite file, single process (`ThreadingHTTPServer`), single shared
-  bearer token (`ATLAS_API_TOKEN`) plus `ATLAS_LOOPBACK_NO_AUTH` for dev.
-- No users, roles, tenants, billing, or usage records.
-- Worker `token` stored in plaintext in the `workers` table.
-- `audit_log` already has an `actor` column (default `local`) — only needs an
-  authenticated identity wired into it.
+- Single SQLite file and single process (`ThreadingHTTPServer`), with per-user
+  bearer tokens/RBAC plus legacy `ATLAS_API_TOKEN` bootstrap compatibility.
+- Users and roles are per instance; there are still no pooled tenants, billing,
+  or usage records.
+- Worker `token` is authenticated ciphertext when `ATLAS_SECRET_KEY` is set;
+  plaintext compatibility remains with an explicit warning when it is unset.
+- Authenticated usernames are written to `audit_log.actor`.
 - Effectively **already single-tenant**, which makes the silo model below cheap.
 
 ## Decision 1 — Multi-tenancy = Silo (instance-per-tenant), Fleet-managed
@@ -97,19 +98,19 @@ Each milestone keeps the repo's "one runnable check" culture: add a
 completion gate.
 
 ### M1 — Identity & Access (per instance)  ← GA blocker
-- [ ] `users` table: `id, username, password_hash, role, status, created_at, updated_at`.
-- [ ] `api_tokens` table: `id, user_id, token_hash, name, last_used_at, created_at, revoked_at` (store only the hash).
-- [ ] Roles: `admin`, `operator`, `viewer`, `auditor`. Define an RBAC matrix
+- [x] `users` table: `id, username, password_hash, role, status, created_at, updated_at`.
+- [x] `api_tokens` table: `id, user_id, token_hash, name, last_used_at, created_at, revoked_at` (store only the hash).
+- [x] Roles: `admin`, `operator`, `viewer`, `auditor`. Define an RBAC matrix
       (who can run jobs, edit/run workflows, approve gates, manage workers,
       read audit, manage users).
-- [ ] Replace `AtlasHandler._is_authorized()` with: resolve token → user →
+- [x] Replace `AtlasHandler._is_authorized()` with: resolve token → user →
       role, then per-route permission check. Keep `ATLAS_LOOPBACK_NO_AUTH` for
       dev only; **default it to `false`** and require a token in prod config.
-- [ ] First-run bootstrap: create an `admin` + initial token via CLI/env
+- [x] First-run bootstrap: create an `admin` + initial token via CLI/env
       (`python3 -m atlas.admin create-admin`), printed once.
-- [ ] Wire authenticated identity into the existing `audit_log.actor`.
-- [ ] Encrypt `workers.token` at rest (Decision 2). Add migration to re-encrypt.
-- [ ] Session cookie for the dashboard (login page) OR keep token-in-localStorage
+- [x] Wire authenticated identity into the existing `audit_log.actor`.
+- [x] Encrypt `workers.token` at rest (Decision 2). Add migration to re-encrypt.
+- [x] Session cookie for the dashboard (login page) OR keep token-in-localStorage
       but issue per-user tokens. Recommend a simple login → session cookie.
 - Check: `scripts/check_auth.py` — unauthorized request → 401; viewer cannot
   POST a job; admin can; revoked token rejected; audit records the actor.

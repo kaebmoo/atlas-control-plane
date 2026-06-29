@@ -20,6 +20,7 @@ class Config:
     api_token: str | None
     request_timeout_seconds: float
     enable_loopback_without_token: bool
+    secret_key: str | None = None
     upload_dir: Path | None = None
     max_upload_bytes: int = 10 * 1024 * 1024
 
@@ -34,7 +35,8 @@ class Config:
             db_path=db_path,
             api_token=os.getenv("ATLAS_API_TOKEN") or None,
             request_timeout_seconds=float(os.getenv("ATLAS_REQUEST_TIMEOUT", "30")),
-            enable_loopback_without_token=_bool_env("ATLAS_LOOPBACK_NO_AUTH", True),
+            enable_loopback_without_token=_bool_env("ATLAS_LOOPBACK_NO_AUTH", False),
+            secret_key=os.getenv("ATLAS_SECRET_KEY") or None,
             upload_dir=upload_dir,
             max_upload_bytes=int(os.getenv("ATLAS_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))),
         )
