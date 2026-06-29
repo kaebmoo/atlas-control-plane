@@ -1,0 +1,69 @@
+Atlas Source-Available License 1.0
+
+Copyright (c) 2026 Pornthep Nivatyakul. All rights reserved.
+
+This license governs use of the accompanying software ("Atlas" or the
+"Software"). It is a source-available license. It is NOT an OSI-approved
+open-source license. By using the Software, you accept these terms.
+
+Summary (non-binding):
+  - Personal use and internal use (including inside a company) are free. You may
+    use, modify, and self-host the Software, and you do not have to publish your
+    changes.
+  - Offering the Software to third parties as a service (SaaS, hosted, managed,
+    white-labeled, or embedded in a product for others) requires a separate
+    Commercial License, which carries a fee and a source-disclosure obligation.
+  The numbered terms below control if this summary and they ever conflict.
+
+1. Definitions
+   "Licensor" means Pornthep Nivatyakul (GitHub: @kaebmoo), the copyright
+   holder.
+   "You" means the individual or legal entity exercising rights under this
+   license.
+   "Service Use" means making the functionality of the Software available to any
+   third party (anyone other than You or members of your own organization),
+   whether for a fee or free of charge. This includes, without limitation:
+   operating the Software as a software-as-a-service or managed/hosted service,
+   embedding it in a product or service offered to third parties, and
+   white-labeling or reselling it.
+   "Internal Use" means any use that is not Service Use, including personal use
+   and use for the internal business operations of You or your organization.
+
+2. Grant for Internal Use
+   Subject to this license, the Licensor grants You a worldwide, royalty-free,
+   non-exclusive license to use, copy, modify, and create derivative works of
+   the Software for Internal Use, and to redistribute the Software to others for
+   their Internal Use, subject to Section 4. You are NOT required to publish or
+   disclose modifications you make for Internal Use.
+
+3. Service Use requires a Commercial License
+   Service Use is NOT granted by this license. To make Service Use of the
+   Software or any derivative work of it, You must first obtain a separate
+   Commercial License from the Licensor. The Commercial License requires, at a
+   minimum:
+     (a) payment of a license fee as agreed with the Licensor; and
+     (b) public disclosure of the complete corresponding source code of the
+         version of the Software, including Your modifications, that You use to
+         provide the service.
+   To obtain a Commercial License, contact the Licensor (GitHub: @kaebmoo).
+
+4. Conditions
+   All copies and derivative works must retain this license text and the above
+   copyright notice. This license grants no rights to the names, logos, or
+   trademarks of the Licensor.
+
+5. Termination
+   Any breach of this license, including any Service Use without a valid
+   Commercial License, automatically terminates the rights granted in Section 2.
+   Your rights may be reinstated at the sole discretion of the Licensor.
+
+6. Disclaimer of Warranty
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+7. Limitation of Liability
+   IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM,
+   OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
