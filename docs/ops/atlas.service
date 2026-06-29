@@ -1,0 +1,24 @@
+# Example systemd unit for Atlas. Copy to /etc/systemd/system/atlas.service,
+# adjust paths/user, then: systemctl daemon-reload && systemctl enable --now atlas
+[Unit]
+Description=Atlas control plane
+After=network.target
+
+[Service]
+Type=simple
+User=atlas
+Group=atlas
+WorkingDirectory=/opt/atlas
+# Secrets (ATLAS_SECRET_KEY, etc.) in a 0600 file, not inline Environment=.
+EnvironmentFile=/etc/atlas/atlas.env
+ExecStart=/opt/atlas/scripts/run-prod.sh
+Restart=on-failure
+RestartSec=2
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

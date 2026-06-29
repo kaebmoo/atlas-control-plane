@@ -32,6 +32,13 @@
 - [thClaws Capability Matrix](thclaws-capability-matrix.md) — ความสามารถที่ใช้ได้ทันที,
   workaround และข้อจำกัดของ thClaws
 
+## ปฏิบัติการ / Operations
+
+- [Deployment (Production)](ops/deployment.md) — secure launcher, systemd unit,
+  reverse-proxy TLS/gzip/request-size, request logging, config reference
+- [Backup & Restore](ops/backup-restore.md) — online `.backup`, restore runbook,
+  single-writer caveat
+
 ## Specifications สำหรับ Programmer
 
 - [API Reference (ไทย)](specs/api-reference-th.md) ·
@@ -54,6 +61,10 @@
   implementation checklist
 - [Sovereign Platform Plan (GA Gaps)](plans/sovereign-platform-plan.md) — สิ่งที่ยังขาด
   เพื่อไป GA: auth/RBAC, multi-tenant แบบ silo, metering/billing, fleet provisioning, hardening
+- [Usage Metering & Billing Plan](plans/usage-metering-billing-plan.md) — BYOK,
+  billable unit, CDR export, metering schema, B-milestones
+- [GA Completion Plan (run-to-completion)](plans/ga-completion-plan.md) — ลำดับเดินจนจบ
+  ทุกงานที่เหลือ (M3→M9 + B3–B7), definition-of-done ต่อ milestone, scope tiers และ commit policy
 
 ## Prompt files
 
@@ -62,6 +73,8 @@
 - [Workflow Engine Coding Spin Prompts](prompts/workflow-engine-spin-prompts.md)
 - [Sovereign Platform Spin Prompts](prompts/sovereign-platform-spin-prompts.md) —
   prompts สำหรับ implement ตาม sovereign platform plan (M1–M3 พร้อมรัน)
+- [GA Completion — Autonomous Spin Prompts](prompts/ga-completion-spin-prompts.md) —
+  driver ที่ไล่ทำ M3→M9 ต่อเนื่องจนจบ, commit เมื่อ gate เขียวจบแต่ละ milestone
 
 ## โครงสร้าง
 
@@ -71,13 +84,21 @@ docs/
 ├── guides/
 │   ├── web-user-guide-th.md
 │   └── web-user-guide-en.md
+├── ops/
+│   ├── deployment.md
+│   ├── backup-restore.md
+│   └── atlas.service
 ├── plans/
 │   ├── workflow-engine-plan.md
 │   ├── workflow-engine-coding-plan.md
-│   └── sovereign-platform-plan.md
+│   ├── sovereign-platform-plan.md
+│   ├── usage-metering-billing-plan.md
+│   ├── nt-aiaas-business-plan.md
+│   └── ga-completion-plan.md
 ├── prompts/
 │   ├── workflow-engine-spin-prompts.md
-│   └── sovereign-platform-spin-prompts.md
+│   ├── sovereign-platform-spin-prompts.md
+│   └── ga-completion-spin-prompts.md
 ├── specs/
 │   ├── api-reference-th.md
 │   ├── api-reference-en.md

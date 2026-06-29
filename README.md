@@ -208,6 +208,10 @@ SQLite state is stored at:
 `data/` is ignored by Git because it may contain local worker URLs, cached
 capabilities, job output, and audit history.
 
+For production, use `./scripts/run-prod.sh` (requires `ATLAS_SECRET_KEY`, keeps the
+auth bypass off, enables request logging) behind a TLS reverse proxy — see
+[docs/ops/deployment.md](docs/ops/deployment.md).
+
 ## Start thClaws Workers
 
 On each machine, start thClaws with a token and a unique port.
@@ -668,7 +672,11 @@ ATLAS_SECRET_KEY=
 ATLAS_REQUEST_TIMEOUT=30
 ATLAS_UPLOAD_DIR=./data/uploads
 ATLAS_MAX_UPLOAD_BYTES=10485760
+ATLAS_REQUEST_LOG=false
 ```
+
+`ATLAS_REQUEST_LOG=true` emits one JSON line per request to stderr (method, path,
+status, client, duration); it leaves response bodies unchanged and is off by default.
 
 Create the first administrator (the token is printed once):
 
@@ -695,7 +703,10 @@ Authorization: Bearer <per-user-api-token>
 ```
 
 For remote access, put Atlas behind a VPN, Tailscale, SSH tunnel, or a real TLS
-reverse proxy with authentication.
+reverse proxy with authentication. For a production runbook (secure launcher,
+systemd unit, reverse-proxy TLS/gzip/size limits, request logging) see
+[docs/ops/deployment.md](docs/ops/deployment.md); for backups see
+[docs/ops/backup-restore.md](docs/ops/backup-restore.md).
 
 ## Usage Metering And Offline Export
 
@@ -836,7 +847,7 @@ Atlas handles these at the control-plane layer where possible. See
 atlas/
   app.py              HTTP API and static dashboard server
   config.py           environment configuration
-  db.py               SQLite schema, migration, persistence methods
+  db.py               SQLite schema, versioned migration runner, persistence methods
   jobs.py             job runner, streaming bridge, handoff, worker polling
   router.py           routing decisions
   thclaws_client.py   thClaws HTTP/SSE client
@@ -848,10 +859,11 @@ docs/
   thclaws-capability-matrix.md
   user-guide.md
   workflow-examples.md
-  workflow-engine-coding-plan.md
-  workflow-engine-plan.md
+  ops/                deployment + backup/restore runbooks, systemd unit
 scripts/
-  run.sh
+  run.sh              dev launcher
+  run-prod.sh         production launcher (secure defaults)
+  backup.sh           online SQLite backup (.backup)
 ```
 
 ## Development

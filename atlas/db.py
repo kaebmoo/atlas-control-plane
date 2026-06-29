@@ -375,6 +375,54 @@ CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
 """
 
 
+def _add_missing_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for name, ddl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
+def _migration_002_jobs_columns(conn: sqlite3.Connection) -> None:
+    _add_missing_columns(
+        conn,
+        "jobs",
+        {
+            "parent_job_id": "TEXT",
+            "handoff_worker_id": "TEXT",
+            "handoff_workspace_id": "TEXT",
+            "handoff_prompt": "TEXT NOT NULL DEFAULT ''",
+            "handoff_job_id": "TEXT",
+            "handoff_error": "TEXT",
+        },
+    )
+
+
+def _migration_003_approval_columns(conn: sqlite3.Connection) -> None:
+    _add_missing_columns(
+        conn,
+        "approvals",
+        {
+            "choices": "TEXT NOT NULL DEFAULT '[]'",
+            "selected_choice": "TEXT",
+        },
+    )
+
+
+# Ordered, append-only migration steps. A step is either a SQL string (run via
+# executescript) or a callable(conn). The 1-based index is the schema version.
+# Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
+# the column steps guard with PRAGMA table_info. That makes the runner crash-safe
+# (a step re-run after a crash-before-version-record is a no-op) and lets a legacy
+# pre-schema_version DB migrate forward by simply applying every step.
+# ponytail: append new tables/columns as new steps here; never edit a shipped step.
+MIGRATIONS: list[str | Any] = [
+    SCHEMA,
+    _migration_002_jobs_columns,
+    _migration_003_approval_columns,
+]
+SCHEMA_VERSION = len(MIGRATIONS)
+
+
 class Database:
     def __init__(self, path: Path, secret_key: str | None = None):
         self.path = path
@@ -398,30 +446,30 @@ class Database:
 
     def init(self) -> None:
         with self._lock, self.connect() as conn:
-            conn.executescript(SCHEMA)
             self._migrate(conn)
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
-        migrations = {
-            "parent_job_id": "ALTER TABLE jobs ADD COLUMN parent_job_id TEXT",
-            "handoff_worker_id": "ALTER TABLE jobs ADD COLUMN handoff_worker_id TEXT",
-            "handoff_workspace_id": "ALTER TABLE jobs ADD COLUMN handoff_workspace_id TEXT",
-            "handoff_prompt": "ALTER TABLE jobs ADD COLUMN handoff_prompt TEXT NOT NULL DEFAULT ''",
-            "handoff_job_id": "ALTER TABLE jobs ADD COLUMN handoff_job_id TEXT",
-            "handoff_error": "ALTER TABLE jobs ADD COLUMN handoff_error TEXT",
-        }
-        for column, sql in migrations.items():
-            if column not in columns:
-                conn.execute(sql)
-        approval_columns = {row["name"] for row in conn.execute("PRAGMA table_info(approvals)").fetchall()}
-        approval_migrations = {
-            "choices": "ALTER TABLE approvals ADD COLUMN choices TEXT NOT NULL DEFAULT '[]'",
-            "selected_choice": "ALTER TABLE approvals ADD COLUMN selected_choice TEXT",
-        }
-        for column, sql in approval_migrations.items():
-            if column not in approval_columns:
-                conn.execute(sql)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version ("
+            " version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        applied = conn.execute("SELECT COALESCE(MAX(version), 0) AS v FROM schema_version").fetchone()["v"]
+        for version, step in enumerate(MIGRATIONS, start=1):
+            if version <= applied:
+                continue
+            if callable(step):
+                step(conn)
+            else:
+                conn.executescript(step)
+            conn.execute(
+                "INSERT INTO schema_version(version, applied_at) VALUES (?, ?)",
+                (version, now_iso()),
+            )
+
+    def schema_version(self) -> int:
+        with self.connect() as conn:
+            row = conn.execute("SELECT COALESCE(MAX(version), 0) AS v FROM schema_version").fetchone()
+        return int(row["v"])
 
     @contextmanager
     def as_actor(self, actor: str) -> Iterator[None]:

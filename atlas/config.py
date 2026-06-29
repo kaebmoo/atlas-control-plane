@@ -23,6 +23,7 @@ class Config:
     secret_key: str | None = None
     upload_dir: Path | None = None
     max_upload_bytes: int = 10 * 1024 * 1024
+    request_log: bool = False
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -39,6 +40,7 @@ class Config:
             secret_key=os.getenv("ATLAS_SECRET_KEY") or None,
             upload_dir=upload_dir,
             max_upload_bytes=int(os.getenv("ATLAS_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))),
+            request_log=_bool_env("ATLAS_REQUEST_LOG", False),
         )
 
     @property

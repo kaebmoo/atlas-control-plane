@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import re
+import sys
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,7 +16,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
 from .config import Config
-from .db import ARTIFACT_KINDS, Database, new_id
+from .db import ARTIFACT_KINDS, Database, new_id, now_iso
 from .jobs import JobManager, TERMINAL_STATES
 from .router import Router
 from .usage import normalize_usage_range, summarize_usage, usage_csv
@@ -99,6 +100,35 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args: Any) -> None:
         return
+
+    def handle_one_request(self) -> None:
+        self._t0 = time.monotonic()
+        super().handle_one_request()
+
+    def log_request(self, code: Any = "-", size: Any = "-") -> None:
+        # Structured (JSON) request log behind ATLAS_REQUEST_LOG; off by default so
+        # response shapes and stdout stay untouched. ponytail: one line to stderr.
+        server = getattr(self, "server", None)
+        runtime = getattr(server, "runtime", None)
+        if runtime is None or not runtime.config.request_log:
+            return
+        try:
+            status: Any = int(code)
+        except (TypeError, ValueError):
+            status = code
+        t0 = getattr(self, "_t0", None)
+        raw_path = getattr(self, "path", None)
+        # Path only — never the query string, which can carry ?token=<api-token>
+        # (SSE/EventSource auth). Keeps tokens out of stderr/journald.
+        record = {
+            "ts": now_iso(),
+            "method": getattr(self, "command", None),
+            "path": urlparse(raw_path).path if raw_path else None,
+            "status": status,
+            "client": self.client_address[0] if self.client_address else None,
+            "dur_ms": None if t0 is None else round((time.monotonic() - t0) * 1000, 1),
+        }
+        sys.stderr.write(json.dumps(record, ensure_ascii=True) + "\n")
 
     def _dispatch(self, method: str) -> None:
         parsed = urlparse(self.path)
@@ -1257,5 +1287,6 @@ def main(argv: list[str] | None = None) -> None:
             secret_key=config.secret_key,
             upload_dir=upload_dir,
             max_upload_bytes=config.max_upload_bytes,
+            request_log=config.request_log,
         )
     run_server(config)
