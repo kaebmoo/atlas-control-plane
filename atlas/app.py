@@ -18,28 +18,24 @@ from urllib.parse import parse_qs, quote, urlparse
 from .config import Config
 from .db import ARTIFACT_KINDS, Database, new_id, now_iso
 from .jobs import JobManager, TERMINAL_STATES
+from .packs import export_pack, import_pack, list_available_packs
 from .router import Router
 from .usage import normalize_usage_range, summarize_usage, usage_csv
 from .workflow_templates import workflow_templates
 from .workflows import (
+    WORKFLOW_POLICY_LIMITS,
     WorkflowRunner,
     WorkflowTriggerService,
     next_fire_at_for_trigger,
     validate_workflow_graph,
+    validate_workflow_policy,
     validate_workflow_trigger_payload,
 )
 
 
 STATIC_DIR = Path(__file__).parent / "static"
-# ponytail: hard-coded safety caps; move to Config only when deployments need tuning.
-_WORKFLOW_POLICY_LIMITS = {
-    "max_jobs": 100,
-    "max_iterations": 100,
-    "max_attempts_per_node": 25,
-    "max_minutes": 1440,
-    "requires_human_after_iterations": 100,
-    "max_budget_units": 1000000,
-}
+# Safety caps live in atlas/workflows.py so the workflow API and pack import share them.
+_WORKFLOW_POLICY_LIMITS = WORKFLOW_POLICY_LIMITS
 _WORKFLOW_POLICY_DEFAULTS = {
     "max_jobs": 20,
     "max_iterations": 5,
@@ -408,6 +404,19 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
         if parts == ["api", "workflow-templates"] and method == "GET":
             self._json({"templates": workflow_templates()})
+            return
+
+        if parts == ["api", "packs"] and method == "GET":
+            self._json({"packs": list_available_packs()})
+            return
+
+        if parts == ["api", "packs", "import"] and method == "POST":
+            result = import_pack(runtime.db, self._read_json())
+            self._json(result, HTTPStatus.CREATED)
+            return
+
+        if len(parts) == 4 and parts[:2] == ["api", "packs"] and parts[3] == "export" and method == "GET":
+            self._json({"pack": export_pack(runtime.db, parts[2])})
             return
 
         if parts == ["api", "workflows", "draft"] and method == "POST":
@@ -838,6 +847,8 @@ def _required_permission(method: str, parts: list[str]) -> str:
         return "audit.read"
     if parts == ["api", "usage"]:
         return "audit.read"
+    if parts[:2] == ["api", "packs"]:
+        return "workflows.manage" if method == "POST" else "read"
     if method == "GET" or parts in (["api", "me"], ["api", "auth", "logout"]):
         return "read"
     if parts[:2] == ["api", "jobs"] or parts == ["api", "routes", "resolve"]:
@@ -956,14 +967,7 @@ def _validate_workflow_references(
 
 
 def _validate_workflow_policy(policy: dict[str, Any]) -> None:
-    for key, maximum in _WORKFLOW_POLICY_LIMITS.items():
-        if key not in policy:
-            continue
-        value = policy[key]
-        if not isinstance(value, int) or value <= 0 or value > maximum:
-            raise ValueError(f"workflow policy {key} must be an integer between 1 and {maximum}")
-    if "stop_on_first_failure" in policy and not isinstance(policy["stop_on_first_failure"], bool):
-        raise ValueError("workflow policy stop_on_first_failure must be boolean")
+    validate_workflow_policy(policy)
 
 
 def _validate_workflow_draft_triggers(triggers: Any) -> None:

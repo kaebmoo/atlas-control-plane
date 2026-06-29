@@ -118,6 +118,33 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
     return graph
 
 
+# Hard safety caps for workflow policy. Shared by the workflow API and pack import so
+# neither path can persist a policy the other would reject. ponytail: one source.
+WORKFLOW_POLICY_LIMITS = {
+    "max_jobs": 100,
+    "max_iterations": 100,
+    "max_attempts_per_node": 25,
+    "max_minutes": 1440,
+    "requires_human_after_iterations": 100,
+    "max_budget_units": 1000000,
+}
+
+
+def validate_workflow_policy(policy: dict[str, Any] | None) -> None:
+    if policy is None:
+        return
+    if not isinstance(policy, dict):
+        raise ValueError("workflow policy must be an object")
+    for key, maximum in WORKFLOW_POLICY_LIMITS.items():
+        if key not in policy:
+            continue
+        value = policy[key]
+        if not isinstance(value, int) or value <= 0 or value > maximum:
+            raise ValueError(f"workflow policy {key} must be an integer between 1 and {maximum}")
+    if "stop_on_first_failure" in policy and not isinstance(policy["stop_on_first_failure"], bool):
+        raise ValueError("workflow policy stop_on_first_failure must be boolean")
+
+
 def render_prompt(
     template: str,
     input: dict[str, Any] | None = None,

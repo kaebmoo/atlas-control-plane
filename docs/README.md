@@ -47,6 +47,8 @@
 - [Visual Workflow Builder Specification (ไทย)](specs/workflow-visual-builder-spec-th.md) ·
   [English](specs/workflow-visual-builder-spec-en.md) — visual grammar, drag/drop rules,
   JSON mapping, validation, AI workflow และ QA criteria
+- [Solution Pack Format](specs/pack-format.md) — pack bundle schema, validation rules,
+  `/api/packs` endpoints, and the `gov_complaint` reference pack
 - [Workflow Definition JSON Schema](specs/workflow-definition.schema.json)
 - [Workflow Trigger JSON Schema](specs/workflow-trigger.schema.json)
 - [AI Workflow Draft JSON Schema](specs/workflow-ai-draft.schema.json)
@@ -103,6 +105,7 @@ docs/
 │   ├── api-reference-th.md
 │   ├── api-reference-en.md
 │   ├── openapi.yaml
+│   ├── pack-format.md
 │   ├── workflow-visual-builder-spec-th.md
 │   ├── workflow-visual-builder-spec-en.md
 │   ├── workflow-definition.schema.json

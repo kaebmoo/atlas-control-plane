@@ -7,7 +7,7 @@ stage at close-out (gate green + docs synced + committed).
 | Stage | Status | Notes |
 |---|---|---|
 | M3 — migrations + hardening | ✅ done | Versioned migration runner (`schema_version` + ordered idempotent steps) folding old `_migrate()`; `scripts/backup.sh`, `run-prod.sh`, example systemd unit; `ATLAS_REQUEST_LOG` JSON request log; secure defaults confirmed; `scripts/check_migrations.py` added to gate; ops docs added. |
-| M6 — government pack | ⬜ todo | |
+| M6 — government pack | ✅ done | `atlas/packs.py` (validate/import/export, reuses workflow + trigger validators); additive `/api/packs`, `/api/packs/import`, `/api/packs/{id}/export` (RBAC: read / workflows.manage); `atlas/packs/gov_complaint.json` (intake→triage→draft→human gate→publish) runs end-to-end on a mock worker; `scripts/check_packs.py` in gate; `docs/specs/pack-format.md` + openapi + api-reference EN/TH. |
 | M4 — Atlas Fleet | ⬜ todo | |
 | M5+B3 — CDR export | ⬜ todo | |
 | B2+B4 — usage view + alert | ⬜ todo | |

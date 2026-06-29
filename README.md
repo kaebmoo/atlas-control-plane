@@ -628,6 +628,9 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 - `POST /api/workflows/{id}/repair`
 - `POST /api/workflows/{id}/suggest-triggers`
 - `GET /api/workflow-templates`
+- `GET /api/packs`
+- `POST /api/packs/import`
+- `GET /api/packs/{id}/export`
 - `GET /api/workflow-runs`
 - `POST /api/workflow-runs`
 - `GET /api/workflow-runs/{id}`
@@ -852,6 +855,8 @@ atlas/
   router.py           routing decisions
   thclaws_client.py   thClaws HTTP/SSE client
   usage.py            usage totals, CSV, signed offline export, verification
+  packs.py            solution pack validate/import/export
+  packs/              shipped pack bundles (gov_complaint.json)
   static/             dashboard HTML/CSS/JS
 docs/
   architecture.md

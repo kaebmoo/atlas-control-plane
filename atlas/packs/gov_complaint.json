@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "name": "gov_complaint",
+  "version": "1.0.0",
+  "description": "Citizen complaint intake, triage, response drafting, human approval, and publication.",
+  "roles": ["operator", "auditor"],
+  "sample_input": {
+    "complaint": "The streetlight on Soi 5 has been broken for two weeks and the area is unsafe at night.",
+    "channel": "web",
+    "citizen_ref": "C-2026-0042"
+  },
+  "docs": "Government complaint handling.\n\nFlow: a complaint arrives (the `Citizen complaint intake` trigger fires a run with the complaint as input) -> `triage` classifies it -> `draft` writes an official response -> a human gate `review` approves or rejects -> on approve, `publish` releases the response to the citizen. Choosing `reject` at the gate ends the run without publishing, leaving the draft for revision. Roles: `operator` runs and decides the gate; `auditor` reviews the audit trail.",
+  "workflows": [
+    {
+      "name": "Citizen complaint handling",
+      "description": "Triage a citizen complaint, draft a response, gate it on human approval, then publish.",
+      "status": "active",
+      "graph": {
+        "start": "triage",
+        "nodes": [
+          {
+            "id": "triage",
+            "type": "worker",
+            "role": "triage_officer",
+            "prompt": "Classify this citizen complaint, assign a responsible department, and rate severity (low/medium/high).\nComplaint: {input.complaint}\nReturn a short triage summary.",
+            "outputs": ["triage"]
+          },
+          {
+            "id": "draft",
+            "type": "worker",
+            "role": "case_officer",
+            "prompt": "Draft a polite, official response to the citizen.\nComplaint: {input.complaint}\nTriage: {artifact.triage}",
+            "outputs": ["draft_response"]
+          },
+          {
+            "id": "review",
+            "type": "human_gate",
+            "label": "Approve the drafted response before it is published",
+            "choices": [
+              {"id": "approve", "label": "Approve and publish"},
+              {"id": "reject", "label": "Reject (return for revision)"}
+            ]
+          },
+          {
+            "id": "publish",
+            "type": "worker",
+            "role": "comms_officer",
+            "prompt": "Publish the approved response to the citizen via {input.channel}.\nResponse: {artifact.draft_response}",
+            "outputs": ["published"]
+          }
+        ],
+        "edges": [
+          {"from": "triage", "to": "draft", "condition": {"type": "always"}},
+          {"from": "draft", "to": "review", "condition": {"type": "always"}},
+          {"from": "review", "to": "publish", "condition": {"type": "human_selected", "choice": "approve"}}
+        ]
+      },
+      "policy": {
+        "max_jobs": 10,
+        "max_iterations": 3,
+        "max_attempts_per_node": 2,
+        "max_minutes": 1440,
+        "max_budget_units": 50
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "workflow": 0,
+      "name": "Citizen complaint intake",
+      "type": "manual",
+      "config": {}
+    }
+  ]
+}

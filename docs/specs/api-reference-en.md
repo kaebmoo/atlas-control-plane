@@ -159,6 +159,18 @@ Every error uses one JSON shape:
 | POST | `/api/workflows/{workflow_id}/repair` | Unsaved repair preview |
 | POST | `/api/workflows/{workflow_id}/suggest-triggers` | Trigger suggestions |
 
+### Solution packs
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/packs` | List available solution packs |
+| POST | `/api/packs/import` | Validate a bundle and create its definitions + triggers |
+| GET | `/api/packs/{workflow_id}/export` | Export a definition back to a bundle |
+
+Bundle format: [pack-format.md](pack-format.md). Import reuses the workflow graph and
+trigger validators (no bypass); an invalid bundle is rejected with a clear error.
+`import` requires `workflows.manage`; the reads require `read`.
+
 ### Runs, Artifacts, and Approvals
 
 | Method | Path | Result |
