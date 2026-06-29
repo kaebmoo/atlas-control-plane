@@ -6,3 +6,5 @@ data/
 logs/
 docs/plans/nt-aiaas-business-plan.md
 docs/plans/usage-metering-billing-plan.md
+codex-bug-audit.md
+codex-audit-run.log
