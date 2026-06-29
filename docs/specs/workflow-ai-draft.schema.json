@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://atlas.local/schemas/workflow-ai-draft.schema.json",
+  "title": "Atlas AI workflow draft",
+  "description": "Complete JSON-only response expected from a workflow_builder worker.",
+  "type": "object",
+  "required": ["name", "description", "graph", "policy", "triggers", "explanation", "warnings"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {"$ref": "workflow-definition.schema.json#/properties/name"},
+    "description": {"$ref": "workflow-definition.schema.json#/properties/description"},
+    "graph": {"$ref": "workflow-definition.schema.json#/$defs/graph"},
+    "policy": {"$ref": "workflow-definition.schema.json#/$defs/policy"},
+    "triggers": {"$ref": "workflow-trigger.schema.json"},
+    "explanation": {"type": "string"},
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

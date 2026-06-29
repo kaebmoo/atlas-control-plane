@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://atlas.local/schemas/workflow-trigger.schema.json",
+  "title": "Atlas workflow trigger drafts",
+  "description": "Canonical trigger drafts exported by the visual workflow builder. workflow_definition_id is added when each trigger is persisted.",
+  "type": "array",
+  "items": {"$ref": "#/$defs/trigger"},
+  "$defs": {
+    "nonEmptyString": {"type": "string", "minLength": 1},
+    "manualOrWebhook": {
+      "type": "object",
+      "required": ["name", "type", "enabled", "config"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"$ref": "#/$defs/nonEmptyString"},
+        "type": {"enum": ["manual", "webhook"]},
+        "enabled": {"type": "boolean"},
+        "config": {"type": "object"}
+      }
+    },
+    "schedule": {
+      "type": "object",
+      "required": ["name", "type", "enabled", "config"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"$ref": "#/$defs/nonEmptyString"},
+        "type": {"const": "schedule"},
+        "enabled": {"type": "boolean"},
+        "config": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["interval_minutes"],
+              "additionalProperties": false,
+              "properties": {
+                "interval_minutes": {"type": "number", "exclusiveMinimum": 0}
+              }
+            },
+            {
+              "type": "object",
+              "required": ["daily_time"],
+              "additionalProperties": false,
+              "properties": {
+                "daily_time": {
+                  "type": "string",
+                  "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "workflowRunCompleted": {
+      "type": "object",
+      "required": ["name", "type", "enabled", "config"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"$ref": "#/$defs/nonEmptyString"},
+        "type": {"const": "workflow_run_completed"},
+        "enabled": {"type": "boolean"},
+        "config": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source_workflow_definition_id": {"$ref": "#/$defs/nonEmptyString"},
+            "state": {"$ref": "#/$defs/nonEmptyString"}
+          }
+        }
+      }
+    },
+    "artifactCreated": {
+      "type": "object",
+      "required": ["name", "type", "enabled", "config"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"$ref": "#/$defs/nonEmptyString"},
+        "type": {"const": "artifact_created"},
+        "enabled": {"type": "boolean"},
+        "config": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source_workflow_definition_id": {"$ref": "#/$defs/nonEmptyString"},
+            "key": {"$ref": "#/$defs/nonEmptyString"},
+            "kind": {"enum": ["text", "json", "markdown", "file_ref", "summary", "decision"]}
+          }
+        }
+      }
+    },
+    "workerStatusChanged": {
+      "type": "object",
+      "required": ["name", "type", "enabled", "config"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"$ref": "#/$defs/nonEmptyString"},
+        "type": {"const": "worker_status_changed"},
+        "enabled": {"type": "boolean"},
+        "config": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "worker_id": {"$ref": "#/$defs/nonEmptyString"},
+            "status": {"$ref": "#/$defs/nonEmptyString"}
+          }
+        }
+      }
+    },
+    "trigger": {
+      "oneOf": [
+        {"$ref": "#/$defs/manualOrWebhook"},
+        {"$ref": "#/$defs/schedule"},
+        {"$ref": "#/$defs/workflowRunCompleted"},
+        {"$ref": "#/$defs/artifactCreated"},
+        {"$ref": "#/$defs/workerStatusChanged"}
+      ]
+    }
+  }
+}

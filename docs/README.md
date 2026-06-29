@@ -32,6 +32,15 @@
 - [thClaws Capability Matrix](thclaws-capability-matrix.md) — ความสามารถที่ใช้ได้ทันที,
   workaround และข้อจำกัดของ thClaws
 
+## Specifications สำหรับ Programmer
+
+- [Visual Workflow Builder Specification (ไทย)](specs/workflow-visual-builder-spec-th.md) ·
+  [English](specs/workflow-visual-builder-spec-en.md) — visual grammar, drag/drop rules,
+  JSON mapping, validation, AI workflow และ QA criteria
+- [Workflow Definition JSON Schema](specs/workflow-definition.schema.json)
+- [Workflow Trigger JSON Schema](specs/workflow-trigger.schema.json)
+- [AI Workflow Draft JSON Schema](specs/workflow-ai-draft.schema.json)
+
 ## แผนงาน / Plans
 
 ไฟล์ใน [`plans/`](plans/) เป็นเอกสารออกแบบหรือแผนงาน ไม่ใช่คู่มือผู้ใช้:
@@ -66,6 +75,12 @@ docs/
 ├── prompts/
 │   ├── workflow-engine-spin-prompts.md
 │   └── sovereign-platform-spin-prompts.md
+├── specs/
+│   ├── workflow-visual-builder-spec-th.md
+│   ├── workflow-visual-builder-spec-en.md
+│   ├── workflow-definition.schema.json
+│   ├── workflow-trigger.schema.json
+│   └── workflow-ai-draft.schema.json
 ├── concepts-en.md
 ├── concepts-th.md
 ├── architecture.md

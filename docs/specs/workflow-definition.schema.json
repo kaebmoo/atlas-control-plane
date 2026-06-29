@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://atlas.local/schemas/workflow-definition.schema.json",
+  "title": "Atlas visual workflow definition",
+  "description": "Canonical semantic payload exported by the Atlas visual workflow builder. Editor layout state is intentionally excluded.",
+  "type": "object",
+  "required": ["name", "graph", "policy"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {"type": "string", "minLength": 1},
+    "description": {"type": "string"},
+    "graph": {"$ref": "#/$defs/graph"},
+    "policy": {"$ref": "#/$defs/policy"}
+  },
+  "$defs": {
+    "nonEmptyString": {"type": "string", "minLength": 1},
+    "artifactKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "workerNode": {
+      "type": "object",
+      "required": ["id", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "type": {"const": "worker"},
+        "prompt": {"type": "string"},
+        "worker_id": {"$ref": "#/$defs/nonEmptyString"},
+        "workspace_id": {"$ref": "#/$defs/nonEmptyString"},
+        "workspace_key": {"$ref": "#/$defs/nonEmptyString"},
+        "company": {"$ref": "#/$defs/nonEmptyString"},
+        "model": {"$ref": "#/$defs/nonEmptyString"},
+        "role": {"$ref": "#/$defs/nonEmptyString"},
+        "tags": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/nonEmptyString"},
+          "uniqueItems": true
+        },
+        "outputs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {"$ref": "#/$defs/artifactKey"}
+        },
+        "output_format": {"const": "json"},
+        "budget_units": {"type": "integer", "minimum": 1}
+      }
+    },
+    "managerNode": {
+      "type": "object",
+      "required": ["id", "type", "schema"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "type": {"const": "manager"},
+        "prompt": {"type": "string"},
+        "schema": {"const": "manager_decision_v1"},
+        "worker_id": {"$ref": "#/$defs/nonEmptyString"},
+        "workspace_id": {"$ref": "#/$defs/nonEmptyString"},
+        "workspace_key": {"$ref": "#/$defs/nonEmptyString"},
+        "company": {"$ref": "#/$defs/nonEmptyString"},
+        "model": {"$ref": "#/$defs/nonEmptyString"},
+        "role": {"$ref": "#/$defs/nonEmptyString"},
+        "tags": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/nonEmptyString"},
+          "uniqueItems": true
+        },
+        "budget_units": {"type": "integer", "minimum": 1}
+      }
+    },
+    "joinNode": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["id", "type", "mode"],
+          "additionalProperties": false,
+          "properties": {
+            "id": {"$ref": "#/$defs/nonEmptyString"},
+            "type": {"const": "join"},
+            "mode": {"enum": ["all", "any"]}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["id", "type", "mode", "quorum"],
+          "additionalProperties": false,
+          "properties": {
+            "id": {"$ref": "#/$defs/nonEmptyString"},
+            "type": {"const": "join"},
+            "mode": {"const": "quorum"},
+            "quorum": {"type": "integer", "minimum": 1}
+          }
+        }
+      ]
+    },
+    "humanGateNode": {
+      "type": "object",
+      "required": ["id", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "type": {"const": "human_gate"},
+        "label": {"type": "string"},
+        "reason": {"type": "string"},
+        "choices": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "label"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"$ref": "#/$defs/nonEmptyString"},
+              "label": {"$ref": "#/$defs/nonEmptyString"}
+            }
+          }
+        }
+      }
+    },
+    "node": {
+      "oneOf": [
+        {"$ref": "#/$defs/workerNode"},
+        {"$ref": "#/$defs/managerNode"},
+        {"$ref": "#/$defs/joinNode"},
+        {"$ref": "#/$defs/humanGateNode"}
+      ]
+    },
+    "condition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type"],
+          "additionalProperties": false,
+          "properties": {"type": {"const": "always"}}
+        },
+        {
+          "type": "object",
+          "required": ["type", "artifact", "value"],
+          "additionalProperties": false,
+          "properties": {
+            "type": {"const": "artifact_equals"},
+            "artifact": {"$ref": "#/$defs/artifactKey"},
+            "path": {"type": "string", "minLength": 1},
+            "value": true
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "artifact", "values"],
+          "additionalProperties": false,
+          "properties": {
+            "type": {"const": "artifact_in"},
+            "artifact": {"$ref": "#/$defs/artifactKey"},
+            "path": {"type": "string", "minLength": 1},
+            "values": {"type": "array", "minItems": 1}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "target"],
+          "additionalProperties": false,
+          "properties": {
+            "type": {"const": "manager_selected"},
+            "target": {"$ref": "#/$defs/nonEmptyString"}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "choice"],
+          "additionalProperties": false,
+          "properties": {
+            "type": {"const": "human_selected"},
+            "choice": {"$ref": "#/$defs/nonEmptyString"}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "node", "max"],
+          "additionalProperties": false,
+          "properties": {
+            "type": {"const": "max_iterations_below"},
+            "node": {"$ref": "#/$defs/nonEmptyString"},
+            "max": {"type": "integer", "minimum": 1}
+          }
+        }
+      ]
+    },
+    "edge": {
+      "type": "object",
+      "required": ["from", "to", "condition"],
+      "additionalProperties": false,
+      "properties": {
+        "from": {"$ref": "#/$defs/nonEmptyString"},
+        "to": {"$ref": "#/$defs/nonEmptyString"},
+        "condition": {"$ref": "#/$defs/condition"}
+      }
+    },
+    "graph": {
+      "type": "object",
+      "required": ["start", "nodes", "edges"],
+      "additionalProperties": false,
+      "properties": {
+        "start": {"$ref": "#/$defs/nonEmptyString"},
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/node"}
+        },
+        "edges": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/edge"}
+        }
+      }
+    },
+    "idList": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/nonEmptyString"},
+      "uniqueItems": true
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_jobs": {"type": "integer", "minimum": 1, "maximum": 100},
+        "max_iterations": {"type": "integer", "minimum": 1, "maximum": 100},
+        "max_attempts_per_node": {"type": "integer", "minimum": 1, "maximum": 25},
+        "max_minutes": {"type": "integer", "minimum": 1, "maximum": 1440},
+        "requires_human_after_iterations": {"type": "integer", "minimum": 1, "maximum": 100},
+        "max_budget_units": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "allowed_worker_ids": {"$ref": "#/$defs/idList"},
+        "allowed_workspace_ids": {"$ref": "#/$defs/idList"},
+        "stop_on_first_failure": {"type": "boolean"}
+      }
+    }
+  }
+}
