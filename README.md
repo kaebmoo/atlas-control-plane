@@ -856,8 +856,9 @@ atlas/
   router.py           routing decisions
   thclaws_client.py   thClaws HTTP/SSE client
   usage.py            usage totals, CSV, signed offline export, verification
-  packs.py            solution pack validate/import/export
+  packs.py            solution pack validate/import/export/sign
   packs/              shipped pack bundles (gov_complaint.json)
+  byok.py             write-only BYOK key injection (no model key in core)
   static/             dashboard HTML/CSS/JS
 fleet/                Atlas Fleet: instance registry + atlas-fleet CLI (separate component)
 docs/

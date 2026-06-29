@@ -127,10 +127,13 @@ class Registry:
         # world-readable. The trailing chmod tightens a pre-existing looser file.
         fd = os.open(self.secrets_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
+            # fchmod before writing: an existing file keeps its old mode through O_CREAT,
+            # but O_TRUNC emptied it, so tightening now means tokens are only ever written
+            # to a 0600 file (no world-readable window).
+            os.fchmod(fd, 0o600)
             os.write(fd, json.dumps(data).encode("utf-8"))
         finally:
             os.close(fd)
-        os.chmod(self.secrets_path, 0o600)
 
     def token_for(self, ref: str | None) -> str | None:
         if not ref:

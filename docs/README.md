@@ -53,6 +53,10 @@
   `/api/packs` endpoints, and the `gov_complaint` reference pack
 - [CDR Record Schema (proposed)](specs/cdr-schema.md) — Fleet's per-tenant usage/charge
   detail record CSV (export only, pending NT billing confirmation)
+- [BYOK Key Injection](specs/byok-key-injection.md) — write-only key-injection helper
+  (`atlas.byok`); Atlas core stores no model key
+- [Managed Inference Gateway (readiness)](specs/managed-inference.md) — multi-provider
+  gateway-worker + token/GPU-hour metering design (worker/gateway layer, not core)
 - [Workflow Definition JSON Schema](specs/workflow-definition.schema.json)
 - [Workflow Trigger JSON Schema](specs/workflow-trigger.schema.json)
 - [AI Workflow Draft JSON Schema](specs/workflow-ai-draft.schema.json)
