@@ -1613,7 +1613,7 @@ class Database:
                 """
                 SELECT * FROM session_bindings
                 WHERE conversation_id = ?
-                ORDER BY updated_at DESC
+                ORDER BY updated_at DESC, rowid DESC
                 LIMIT 1
                 """,
                 (conversation_id,),
@@ -1621,19 +1621,35 @@ class Database:
         return row_to_dict(row)
 
     def upsert_session_binding(self, conversation_id: str, worker_id: str, workspace_id: str | None, thclaws_session_id: str) -> None:
-        binding_id = new_id("ses")
         now = now_iso()
         with self._lock, self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO session_bindings(id, conversation_id, worker_id, workspace_id, thclaws_session_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(conversation_id, worker_id, workspace_id) DO UPDATE SET
-                  thclaws_session_id=excluded.thclaws_session_id,
-                  updated_at=excluded.updated_at
-                """,
-                (binding_id, conversation_id, worker_id, workspace_id, thclaws_session_id, now, now),
-            )
+            if workspace_id is None:
+                # SQLite treats NULL as distinct in a UNIQUE index, so the ON CONFLICT
+                # upsert never matches a workspace-less binding. Update it by hand so
+                # repeated runs reuse the row instead of piling up duplicates (which would
+                # make find_session_binding's "newest wins" lookup ambiguous).
+                updated = conn.execute(
+                    "UPDATE session_bindings SET thclaws_session_id = ?, updated_at = ?"
+                    " WHERE conversation_id = ? AND worker_id = ? AND workspace_id IS NULL",
+                    (thclaws_session_id, now, conversation_id, worker_id),
+                ).rowcount
+                if not updated:
+                    conn.execute(
+                        "INSERT INTO session_bindings(id, conversation_id, worker_id, workspace_id, thclaws_session_id, created_at, updated_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (new_id("ses"), conversation_id, worker_id, None, thclaws_session_id, now, now),
+                    )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO session_bindings(id, conversation_id, worker_id, workspace_id, thclaws_session_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(conversation_id, worker_id, workspace_id) DO UPDATE SET
+                      thclaws_session_id=excluded.thclaws_session_id,
+                      updated_at=excluded.updated_at
+                    """,
+                    (new_id("ses"), conversation_id, worker_id, workspace_id, thclaws_session_id, now, now),
+                )
             conn.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
                 (now, conversation_id),

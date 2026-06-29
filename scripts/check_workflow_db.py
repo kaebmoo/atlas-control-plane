@@ -92,6 +92,22 @@ def main() -> None:
         artifact = db.create_artifact({"run_id": run["id"], "key": "notes", "content": "ok"})
         assert db.list_artifacts(run_id=run["id"])[0]["id"] == artifact["id"]
 
+        # session bindings: a workspace-less binding (workspace_id=None) must upsert in
+        # place. SQLite treats NULL as distinct in a UNIQUE index, so without the IS NULL
+        # upsert path each run would insert a duplicate row and find_session_binding could
+        # return a stale session. Assert one row survives and the newest session wins.
+        worker = db.upsert_worker({"base_url": "http://w1.local", "name": "w1"})
+        conversation = db.create_conversation({"title": "binding"})
+        db.upsert_session_binding(conversation["id"], worker["id"], None, "sess-old")
+        db.upsert_session_binding(conversation["id"], worker["id"], None, "sess-new")
+        with db.connect() as conn:
+            binding_rows = conn.execute(
+                "SELECT thclaws_session_id FROM session_bindings WHERE conversation_id = ?",
+                (conversation["id"],),
+            ).fetchall()
+        assert len(binding_rows) == 1, f"workspace-less binding must upsert, got {len(binding_rows)} rows"
+        assert db.find_session_binding(conversation["id"])["thclaws_session_id"] == "sess-new"
+
         assert db.delete_workflow_definition(definition["id"])
         assert db.get_workflow_definition(definition["id"]) is None
 
