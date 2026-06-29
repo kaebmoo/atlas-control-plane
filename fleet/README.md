@@ -37,6 +37,7 @@ python3 -m fleet provision --tenant acme        # provision + register a local i
 python3 -m fleet list                            # show instances + status/version
 python3 -m fleet health                          # poll /healthz, update status/last_health_at
 python3 -m fleet usage-pull --from 2026-06-01 --to 2026-07-01   # raw usage events per instance
+python3 -m fleet cdr --from 2026-06-01 --to 2026-06-30 --out-dir ./cdr   # per-tenant CDR CSVs
 python3 -m fleet --registry /srv/fleet.sqlite list              # custom registry path
 ```
 
@@ -65,8 +66,16 @@ it. Two targets:
 
 `usage-pull` calls each instance's `GET /api/usage` (authenticated with the instance's
 seeded token), optionally bounded by `--from`/`--to`, and prints the **raw** usage events
-per instance. Fleet does not rate or aggregate here — central aggregation and CDR export
-land in M5/B3.
+per instance.
+
+## CDR export
+
+`cdr` pulls usage from every instance, aggregates per tenant per period, and writes one
+`cdr-<tenant>.csv` per tenant under `--out-dir`. Monthly vs annual is just the
+`--from`/`--to` range; re-exporting a period is byte-identical (deterministic). This is
+**export only** — no rating, no invoices (NT bills from the CDR). The record schema is
+proposed and pending NT confirmation — see
+[docs/specs/cdr-schema.md](../docs/specs/cdr-schema.md).
 
 ## Check
 

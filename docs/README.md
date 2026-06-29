@@ -51,6 +51,8 @@
   JSON mapping, validation, AI workflow และ QA criteria
 - [Solution Pack Format](specs/pack-format.md) — pack bundle schema, validation rules,
   `/api/packs` endpoints, and the `gov_complaint` reference pack
+- [CDR Record Schema (proposed)](specs/cdr-schema.md) — Fleet's per-tenant usage/charge
+  detail record CSV (export only, pending NT billing confirmation)
 - [Workflow Definition JSON Schema](specs/workflow-definition.schema.json)
 - [Workflow Trigger JSON Schema](specs/workflow-trigger.schema.json)
 - [AI Workflow Draft JSON Schema](specs/workflow-ai-draft.schema.json)

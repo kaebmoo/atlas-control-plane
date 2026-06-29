@@ -239,9 +239,12 @@ def pull_usage(
     from_at: str | None = None,
     to_at: str | None = None,
     instance_id: str | None = None,
+    strict: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
     """Pull raw usage_events from each instance's GET /api/usage (authenticated with the
-    instance's seeded token). Returns {instance_id: [events]}."""
+    instance's seeded token). Returns {instance_id: [events]}. With strict=True a failed
+    instance pull raises (used by CDR export so a billing artifact is never partial);
+    otherwise a failed instance yields an empty list and a stderr note (best-effort dump)."""
     targets = [registry.get(instance_id)] if instance_id else registry.list()
     result: dict[str, list[dict[str, Any]]] = {}
     for instance in targets:
@@ -256,6 +259,8 @@ def pull_usage(
                 payload = json.loads(resp.read())
             result[instance["id"]] = payload.get("usage", [])
         except (urllib.error.URLError, ConnectionError, OSError) as exc:
+            if strict:
+                raise RuntimeError(f"usage pull failed for instance {instance['id']} ({instance['base_url']}): {exc}") from exc
             result[instance["id"]] = []
             print(f"usage-pull failed for {instance['id']}: {exc}", file=sys.stderr)
     return result
@@ -307,6 +312,11 @@ def main(argv: list[str] | None = None) -> None:
     p_usage.add_argument("--to", dest="to_at", default=None)
     p_usage.add_argument("--instance", dest="instance_id", default=None)
 
+    p_cdr = sub.add_parser("cdr", help="export per-tenant CDR CSVs (proposed schema)")
+    p_cdr.add_argument("--from", dest="from_at", default=None)
+    p_cdr.add_argument("--to", dest="to_at", default=None)
+    p_cdr.add_argument("--out-dir", dest="out_dir", required=True)
+
     args = parser.parse_args(argv)
     registry = Registry(Path(args.registry))
 
@@ -327,6 +337,12 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "usage-pull":
         _print(pull_usage(registry, args.from_at, args.to_at, args.instance_id))
+        return
+    if args.command == "cdr":
+        from .cdr import pull_and_aggregate, write_cdr
+
+        written = write_cdr(args.out_dir, pull_and_aggregate(registry, args.from_at, args.to_at))
+        _print({tenant: str(path) for tenant, path in written.items()})
         return
 
 
