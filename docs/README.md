@@ -32,6 +32,13 @@
 - [thClaws Capability Matrix](thclaws-capability-matrix.md) — ความสามารถที่ใช้ได้ทันที,
   workaround และข้อจำกัดของ thClaws
 
+## การตัดสินใจเชิงสถาปัตยกรรม / ADRs
+
+- [ADR 0001 — Multi-tenancy: silo vs pooled](adr/0001-multi-tenancy-silo-vs-pooled.md)
+  — decision (silo / instance-per-tenant), the exact pooled change-list + migration path
+  if ever approved, and the revisit trigger. Atlas core stays `tenant_id`-free (guarded
+  by `scripts/check_silo.py`).
+
 ## ปฏิบัติการ / Operations
 
 - [Deployment (Production)](ops/deployment.md) — secure launcher, systemd unit,
@@ -91,6 +98,8 @@
 ```text
 docs/
 ├── README.md
+├── adr/
+│   └── 0001-multi-tenancy-silo-vs-pooled.md
 ├── guides/
 │   ├── web-user-guide-th.md
 │   └── web-user-guide-en.md

@@ -96,7 +96,7 @@ sequence above is the safe single-threaded order.
 | ✅ **M8** | Pack signing (HMAC/`ATLAS_SECRET_KEY`) + verify; tampered pack rejected; local pack registry listing; the public **marketplace service** documented as a future Fleet-side service (readiness, not built in core). | extend `scripts/check_packs.py` |
 | ✅ **B5** | Write-only key-injection helper that writes the target worker's env/config as a provisioning step (option-b); forward interface defined for a future thClaws save-key endpoint (option-a); Atlas core stores **no** model key; injection is audited; key never appears in DB/logs/API responses. | `scripts/check_byok_helper.py` (fake target) |
 | ✅ **M7/B7** | Gateway-worker design (multi-provider) + token/GPU-hour metering interface emitting extra CDR rows, documented as living in the worker/gateway layer; **no Atlas-core code**; readiness doc + interface spec only. | doc consistency (no core check) |
-| **M9** | `docs/adr/0001-multi-tenancy-silo-vs-pooled.md`: decision, forces, the exact pooled change-list/migration path, risks, and the revisit trigger. Silo invariant intact — a grep proves no `tenant_id` was added to core tables. | grep assertion in CI note (no core code) |
+| ✅ **M9** | `docs/adr/0001-multi-tenancy-silo-vs-pooled.md`: decision, forces, the exact pooled change-list/migration path, risks, and the revisit trigger. Silo invariant intact — a grep proves no `tenant_id` was added to core tables. | grep assertion in CI note (no core code) |
 | **GA wrap** | Security review checklist executed (auth, secrets, upload, SSRF to workers, RBAC); README + user guide + `docs/README.md` updated; **full completion gate green**; final report of what is built vs readiness-with-reason. | full gate + `/security-review` |
 
 > Every row above **also** carries a docs deliverable: at its close-out it updates
@@ -207,27 +207,22 @@ default assumption the agent uses, clearly flagged for later confirmation.
 | Provisioning target (GDCC/libvirt/k8s) | M4 | Target docker-compose/systemd on a VM via cloud-init; note GDCC/k8s as alternates | NT infra |
 | Per-instance HA vs single-VM+backup | GA | Single VM + scheduled `.backup` for GA; HA noted as Phase 3 | NT infra |
 
-## 8. Canonical completion gate (extend per stage)
+## 8. Canonical completion gate
+
+The whole gate is one runnable script, [`scripts/gate.sh`](../../scripts/gate.sh) — the
+single source of truth so a new check is actually enforced, not just listed:
 
 ```bash
-python3 -m py_compile atlas/config.py atlas/db.py atlas/app.py atlas/jobs.py \
-  atlas/workflows.py atlas/router.py atlas/workflow_templates.py atlas/usage.py \
-  atlas/auth.py atlas/admin.py \
-  scripts/check_workflows.py scripts/check_workflow_api.py scripts/check_usage.py \
-  scripts/check_auth.py
-node --check atlas/static/app.js
-python3 scripts/check_workflow_db.py
-python3 scripts/check_workflows.py
-python3 scripts/check_workflow_api.py
-python3 scripts/check_auth.py
-python3 scripts/check_usage.py
-# + each new stage appends its check:
-#   M3 → scripts/check_migrations.py
-#   M6 → scripts/check_packs.py
-#   M4 → fleet/check_fleet.py
-#   M5/B3 → scripts/check_cdr.py
-#   B5 → scripts/check_byok_helper.py
-#   docs → scripts/check_docs.py (route↔openapi↔api-reference parity + index links)
+scripts/gate.sh
+```
+
+It runs `py_compile` over all `atlas/` + `fleet/` + `scripts/` modules, `node --check`
+on the dashboard JS, and every hermetic check:
+
+```text
+check_workflow_db · check_workflows · check_workflow_api · check_auth · check_usage
+check_migrations (M3) · check_packs (M6 + M8 signing) · fleet/check_fleet (M4)
+check_cdr (M5/B3) · check_byok_helper (B5) · check_silo (M9 silo invariant)
 ```
 
 > Requires Python **3.11+** (the code uses `datetime.UTC`). The maintainer's
