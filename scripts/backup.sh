@@ -22,3 +22,12 @@ DEST="$DEST_DIR/atlas-$STAMP.sqlite"
 # the server keeps running (single writer). Restore: see docs/ops/backup-restore.md.
 sqlite3 "$DB" ".backup '$DEST'"
 echo "backup written: $DEST"
+
+# file_ref artifact bytes live outside SQLite under the upload dir; back them up too, AFTER
+# the DB snapshot so every artifact record in the snapshot has its file present on restore.
+UPLOAD_DIR="${ATLAS_UPLOAD_DIR:-$(dirname "$DB")/uploads}"
+if [[ -d "$UPLOAD_DIR" ]]; then
+  UPLOAD_DEST="$DEST_DIR/atlas-uploads-$STAMP.tar.gz"
+  tar -czf "$UPLOAD_DEST" -C "$(dirname "$UPLOAD_DIR")" "$(basename "$UPLOAD_DIR")"
+  echo "uploads written: $UPLOAD_DEST"
+fi
