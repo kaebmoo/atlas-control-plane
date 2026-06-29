@@ -23,7 +23,21 @@ _EVENT_TRIGGER_FILTERS = {
     "artifact_created": {"source_workflow_definition_id": "workflow_definition_id", "key": "key", "kind": "kind"},
     "worker_status_changed": {"worker_id": "worker_id", "status": "status"},
 }
+# Backstop against runaway event-driven automation (e.g. A->B->A completion-trigger loops).
+MAX_TRIGGER_CHAIN_DEPTH = 20
 LOGGER = logging.getLogger(__name__)
+
+
+def _trigger_chain_blocks(target_workflow_id: Any, source_workflow_id: Any, chain: list[Any] | None) -> bool:
+    """True if an event-driven trigger should be skipped to prevent runaway automation: the
+    target is the source workflow (direct self-trigger), the target already appears in the
+    chain of workflows that led here (a cycle such as A->B->A), or the chain is too deep."""
+    chain = chain or []
+    if target_workflow_id and target_workflow_id == source_workflow_id:
+        return True
+    if target_workflow_id and target_workflow_id in chain:
+        return True
+    return len(chain) >= MAX_TRIGGER_CHAIN_DEPTH
 
 
 def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -872,13 +886,20 @@ class WorkflowRunner:
             return
         run = self.db.get_workflow_run(run_id)
         if run:
+            # Carry the chain of workflows that led here (from this run's input) and append
+            # this workflow, so fire_internal can reject cycles like A->B->A.
+            chain = list((run.get("input") or {}).get("_trigger_chain") or [])
+            wf_id = run.get("workflow_definition_id")
+            if wf_id and wf_id not in chain:
+                chain.append(wf_id)
             self.trigger_service.fire_internal(
                 "workflow_run_completed",
                 {
                     "run_id": run_id,
-                    "workflow_definition_id": run.get("workflow_definition_id"),
+                    "workflow_definition_id": wf_id,
                     "state": run["state"],
                     "error": run.get("error"),
+                    "_trigger_chain": chain,
                 },
                 f"workflow_run_completed:{run_id}:{run['state']}",
             )
@@ -1182,11 +1203,15 @@ class WorkflowTriggerService:
             )
             return {"trigger": trigger, "event": event, "run": None}
 
-        if dedupe_key and self.db.has_workflow_trigger_event_dedupe(trigger_id, dedupe_key):
-            event = self.db.append_workflow_trigger_event(trigger_id, "ignored", payload=payload, dedupe_key=dedupe_key, error="duplicate dedupe_key")
-            return {"trigger": trigger, "event": event, "run": None}
+        if dedupe_key:
+            # Atomically claim the key; a concurrent fire with the same key loses the claim
+            # and is ignored (closes the check-then-insert race that could start two runs).
+            if not self.db.claim_trigger_dedupe(trigger_id, dedupe_key, payload):
+                event = self.db.append_workflow_trigger_event(trigger_id, "ignored", payload=payload, dedupe_key=dedupe_key, error="duplicate dedupe_key")
+                return {"trigger": trigger, "event": event, "run": None}
+        else:
+            self.db.append_workflow_trigger_event(trigger_id, "received", payload=payload, dedupe_key=dedupe_key)
 
-        self.db.append_workflow_trigger_event(trigger_id, "received", payload=payload, dedupe_key=dedupe_key)
         fired_at = now_iso()
         try:
             run = self.runner.start_workflow(trigger["workflow_definition_id"], payload)
@@ -1212,15 +1237,20 @@ class WorkflowTriggerService:
 
     def artifact_created(self, artifact: dict[str, Any]) -> list[dict[str, Any]]:
         run = self.db.get_workflow_run(artifact.get("run_id") or "") or {}
+        chain = list((run.get("input") or {}).get("_trigger_chain") or [])
+        wf_id = run.get("workflow_definition_id")
+        if wf_id and wf_id not in chain:
+            chain.append(wf_id)
         return self.fire_internal(
             "artifact_created",
             {
                 "artifact_id": artifact["id"],
                 "run_id": artifact.get("run_id"),
-                "workflow_definition_id": run.get("workflow_definition_id"),
+                "workflow_definition_id": wf_id,
                 "job_id": artifact.get("job_id"),
                 "key": artifact["key"],
                 "kind": artifact["kind"],
+                "_trigger_chain": chain,
             },
             f"artifact_created:{artifact['id']}",
         )
@@ -1228,13 +1258,17 @@ class WorkflowTriggerService:
     def fire_internal(self, event_type: str, payload: dict[str, Any], dedupe_key: str) -> list[dict[str, Any]]:
         results = []
         event_payload = {**payload, "event_type": event_type}
+        chain = payload.get("_trigger_chain") or []
         try:
             triggers = self.db.list_workflow_triggers(limit=500, enabled=True)
             for trigger in triggers:
                 if trigger.get("type") != event_type or not _event_trigger_matches(trigger, event_payload):
                     continue
-                # ponytail: self-triggering needs an explicit guarded design, otherwise one completion can loop forever.
-                if event_type in {"workflow_run_completed", "artifact_created"} and trigger["workflow_definition_id"] == payload.get("workflow_definition_id"):
+                # Block direct self-triggering, longer cycles (A->B->A), and runaway depth —
+                # otherwise event-driven triggers can loop forever.
+                if event_type in {"workflow_run_completed", "artifact_created"} and _trigger_chain_blocks(
+                    trigger["workflow_definition_id"], payload.get("workflow_definition_id"), chain
+                ):
                     continue
                 results.append(self.fire_trigger(trigger["id"], event_payload, dedupe_key))
         except Exception as exc:

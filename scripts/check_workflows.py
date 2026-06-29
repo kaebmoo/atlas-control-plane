@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 
 from atlas.db import Database, now_iso
 from atlas.router import Router
-from atlas.workflows import WorkflowRunner, render_prompt, validate_workflow_graph
+from atlas.workflows import MAX_TRIGGER_CHAIN_DEPTH, WorkflowRunner, _trigger_chain_blocks, render_prompt, validate_workflow_graph
 
 
 def main() -> None:
@@ -92,7 +92,18 @@ def main() -> None:
     check_human_gates()
     check_hardening()
     check_recovery()
+    check_trigger_chain_guard()
     print("workflow validation/render check ok")
+
+
+def check_trigger_chain_guard() -> None:
+    # Event-driven trigger cycles must be rejected: direct self-trigger, longer cycles
+    # (A->B->A where the target already appears in the chain), and runaway depth.
+    assert _trigger_chain_blocks("A", "A", [])                 # direct self-trigger
+    assert _trigger_chain_blocks("A", "B", ["A", "B"])         # cycle back to A
+    assert not _trigger_chain_blocks("B", "A", ["A"])          # legitimate A -> B hop
+    assert not _trigger_chain_blocks("C", "B", ["A", "B"])     # fresh target is allowed
+    assert _trigger_chain_blocks("Z", "Y", [str(i) for i in range(MAX_TRIGGER_CHAIN_DEPTH)])  # depth cap
 
 
 def check_runner() -> None:
