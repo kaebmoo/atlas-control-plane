@@ -214,6 +214,61 @@ def main() -> None:
         exported = export_pack(db, result["workflows"][0]["id"])
         assert exported["triggers"][0]["enabled"] is False, exported["triggers"][0]
 
+    # 7. A non-integer workflow version is rejected up front, and the failed import is
+    #    atomic — validate_pack runs before any write, so no partial workflow is left.
+    a_node = {"start": "a", "nodes": [{"id": "a", "type": "human_gate"}], "edges": []}
+    bad_version = {
+        "schema_version": 1,
+        "name": "bad-version",
+        "version": "1.0.0",
+        "workflows": [
+            {"name": "Good", "version": 1, "graph": deepcopy(a_node)},
+            {"name": "Bad", "version": "not-an-int", "graph": deepcopy(a_node)},
+        ],
+    }
+    assert_rejected(bad_version, "non-integer version")
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+        try:
+            import_pack(db, bad_version)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("import_pack must reject a bad-version bundle")
+        assert db.list_workflow_definitions() == [], "rejected import must leave no partial workflows"
+
+    # 8. Atomic rollback when a write fails mid-import (after validation passes): a forced
+    #    failure on the second workflow write must undo the first.
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+        two_ok = {
+            "schema_version": 1,
+            "name": "two",
+            "version": "1.0.0",
+            "workflows": [
+                {"name": "One", "graph": deepcopy(a_node)},
+                {"name": "Two", "graph": deepcopy(a_node)},
+            ],
+        }
+        original = db.create_workflow_definition
+        calls = {"n": 0}
+
+        def failing_create(payload, _original=original, _calls=calls):
+            _calls["n"] += 1
+            if _calls["n"] == 2:
+                raise RuntimeError("induced mid-write failure")
+            return _original(payload)
+
+        db.create_workflow_definition = failing_create
+        try:
+            import_pack(db, two_ok)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("import_pack must propagate a mid-write failure")
+        db.create_workflow_definition = original
+        assert db.list_workflow_definitions() == [], "mid-write failure must roll back the first workflow"
+
     print("packs check ok")
 
 

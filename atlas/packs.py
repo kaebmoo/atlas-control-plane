@@ -71,6 +71,12 @@ def validate_pack(bundle: Any) -> dict[str, Any]:
             raise ValueError(f"pack workflow at index {index} must be an object")
         if not isinstance(workflow.get("name"), str) or not workflow["name"].strip():
             raise ValueError(f"pack workflow at index {index} requires a name")
+        # `version` is converted with int() at import time; reject a non-integer here so a
+        # bad pack fails validation up front instead of crashing mid-import.
+        try:
+            int(workflow.get("version") or 1)
+        except (TypeError, ValueError):
+            raise ValueError(f"pack workflow at index {index} has a non-integer version: {workflow.get('version')!r}")
         # Run the real engine validators — never a bypass. Policy caps too, so an
         # imported pack cannot exceed limits the workflow API would reject.
         validate_workflow_graph(workflow.get("graph") or {}, workflow.get("policy"))
@@ -141,34 +147,43 @@ def import_pack(
     elif require_signature:
         raise ValueError("pack is unsigned but a signature is required")
     definitions: list[dict[str, Any]] = []
-    for workflow in bundle["workflows"]:
-        definitions.append(
-            db.create_workflow_definition(
-                {
-                    "name": workflow["name"],
-                    "description": workflow.get("description") or "",
-                    "version": int(workflow.get("version") or 1),
-                    "status": workflow.get("status") or "active",
-                    "graph": workflow.get("graph") or {},
-                    "policy": workflow.get("policy") or {},
-                }
-            )
-        )
-
     triggers: list[dict[str, Any]] = []
-    for trigger in bundle.get("triggers", []):
-        definition_id = definitions[trigger.get("workflow", 0)]["id"]
-        trigger_payload: dict[str, Any] = {
-            "workflow_definition_id": definition_id,
-            "name": trigger.get("name") or "Trigger",
-            "type": trigger.get("type") or "manual",
-            "config": trigger.get("config") or {},
-            "enabled": trigger.get("enabled", True),
-        }
-        # Mirror the trigger API: compute the first fire time so schedule triggers
-        # actually become due (None for non-schedule types).
-        trigger_payload["next_fire_at"] = next_fire_at_for_trigger(trigger_payload)
-        triggers.append(db.create_workflow_trigger(trigger_payload))
+    try:
+        for workflow in bundle["workflows"]:
+            definitions.append(
+                db.create_workflow_definition(
+                    {
+                        "name": workflow["name"],
+                        "description": workflow.get("description") or "",
+                        "version": int(workflow.get("version") or 1),
+                        "status": workflow.get("status") or "active",
+                        "graph": workflow.get("graph") or {},
+                        "policy": workflow.get("policy") or {},
+                    }
+                )
+            )
+
+        for trigger in bundle.get("triggers", []):
+            definition_id = definitions[trigger.get("workflow", 0)]["id"]
+            trigger_payload: dict[str, Any] = {
+                "workflow_definition_id": definition_id,
+                "name": trigger.get("name") or "Trigger",
+                "type": trigger.get("type") or "manual",
+                "config": trigger.get("config") or {},
+                "enabled": trigger.get("enabled", True),
+            }
+            # Mirror the trigger API: compute the first fire time so schedule triggers
+            # actually become due (None for non-schedule types).
+            trigger_payload["next_fire_at"] = next_fire_at_for_trigger(trigger_payload)
+            triggers.append(db.create_workflow_trigger(trigger_payload))
+    except Exception:
+        # Atomic import: undo anything already written so a failed import never leaves a
+        # partial pack (orphan workflows/triggers) behind.
+        for created in triggers:
+            db.delete_workflow_trigger(created["id"])
+        for created in definitions:
+            db.delete_workflow_definition(created["id"])
+        raise
 
     return {
         "pack": {"name": bundle["name"], "version": bundle["version"]},
