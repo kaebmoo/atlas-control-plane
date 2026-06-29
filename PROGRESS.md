@@ -14,4 +14,15 @@ stage at close-out (gate green + docs synced + committed).
 | M8 — pack signing | ✅ done | `sign_pack`/`verify_pack_signature` (HMAC-SHA256 over canonical bundle, `ATLAS_SECRET_KEY`); import verifies a present signature (tampered/wrong-key/no-key rejected), unsigned accepted unless `require_signature`; `python3 -m atlas.packs sign/verify` CLI; `signed` flag in listing. Marketplace = readiness doc (Fleet-side, not core). `check_packs.py` extended; pack-format.md + openapi + api-reference EN/TH updated. |
 | B5 + M7/B7 — BYOK / inference readiness | ✅ done | B5: `atlas/byok.py` write-only key injection (option-b env file 0600), audited, key never in Atlas DB/logs/responses; CLI reads key from `$ATLAS_BYOK_KEY` (never an arg); option-a (thClaws save-key) interface defined as a documented stub. `scripts/check_byok_helper.py` in gate (asserts key absent from DB file). M7/B7: `docs/specs/managed-inference.md` — gateway-worker + token/GPU-hour metering emits extra CDR rows; lives in worker/gateway layer, no Atlas-core change. Doc: `docs/specs/byok-key-injection.md`. |
 | M9 — pooled-tenancy ADR | ✅ done | `docs/adr/0001-multi-tenancy-silo-vs-pooled.md`: silo decision, exact pooled change-list (tenant_id on every table, scoping layer, cross-tenant RBAC, per-tenant limits, Fleet export scoping), staged migration + risks + test strategy, revisit trigger. No `tenant_id` in core — proven and guarded by `scripts/check_silo.py` (in gate). Docs/ADR only; zero core/tenant code. |
-| GA wrap — security + docs + green gate | ⬜ todo | |
+| GA wrap — security + docs + green gate | ✅ done | Full-surface security review (per-stage codex + a holistic `codex review --base main`): auth/RBAC on every new route, no plaintext key/token in logs (request log path-only)/DB (BYOK key absent; fleet token by ref + 0600)/responses, `/healthz` leaks nothing, ATLAS_SECRET_KEY signing, BYOK no-key-in-core. 3 pack findings fixed (import reference validation; version round-trip; non-string role → clean 400). Canonical gate `scripts/gate.sh` green from a clean tree; docs/README links all resolve. |
+
+## External confirmations still outstanding
+
+- **CDR record schema** — proposed (`x-schema: atlas.cdr.v1-proposed`); confirm fields/units with NT billing/mediation.
+- **thClaws save-key endpoint** — BYOK option-a is a documented stub; blocked on thClaws shipping the endpoint (option-b env injection works now).
+- **Provisioning target** — default docker-compose/systemd on a VM; GDCC/k8s noted as alternates (NT infra).
+- **Auth SSO/OIDC** — local users now; OIDC is a documented extension point (NT IdP).
+
+## Security findings
+
+No open findings. Everything codex surfaced across the run was fixed and guarded by a hermetic check (see per-stage rows). The one intentional unauthenticated route, `GET /healthz`, returns only `{ok, service, version}`.

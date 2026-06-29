@@ -80,7 +80,7 @@ def validate_pack(bundle: Any) -> dict[str, Any]:
     if not isinstance(roles, list):
         raise ValueError("pack roles must be a list")
     for role in roles:
-        if role not in ROLES:
+        if not isinstance(role, str) or role not in ROLES:
             raise ValueError(f"pack role is not a known RBAC role: {role}")
 
     triggers = bundle.get("triggers", [])
@@ -97,6 +97,30 @@ def validate_pack(bundle: Any) -> dict[str, Any]:
     return bundle
 
 
+def _validate_pack_references(db: Database, bundle: dict[str, Any]) -> None:
+    """Reject concrete worker/workspace ids that don't exist on this instance (they would
+    dangle and fail later at routing), while allowing role-only nodes so packs stay
+    portable across instances."""
+    worker_ids = {worker["id"] for worker in db.list_workers()}
+    workspace_ids = {workspace["id"] for workspace in db.list_workspaces()}
+    for index, workflow in enumerate(bundle["workflows"]):
+        graph = workflow.get("graph") or {}
+        for node in graph.get("nodes") or []:
+            worker_id = node.get("worker_id")
+            if worker_id and worker_id not in worker_ids:
+                raise ValueError(f"pack workflow {index} node {node.get('id')} references unknown worker_id: {worker_id}")
+            workspace_id = node.get("workspace_id")
+            if workspace_id and workspace_id not in workspace_ids:
+                raise ValueError(f"pack workflow {index} node {node.get('id')} references unknown workspace_id: {workspace_id}")
+        policy = workflow.get("policy") or {}
+        for worker_id in policy.get("allowed_worker_ids") or []:
+            if worker_id not in worker_ids:
+                raise ValueError(f"pack workflow {index} policy allowed_worker_ids references unknown worker: {worker_id}")
+        for workspace_id in policy.get("allowed_workspace_ids") or []:
+            if workspace_id not in workspace_ids:
+                raise ValueError(f"pack workflow {index} policy allowed_workspace_ids references unknown workspace: {workspace_id}")
+
+
 def import_pack(
     db: Database,
     bundle: dict[str, Any],
@@ -110,6 +134,7 @@ def import_pack(
     secret_key (a tampered or unverifiable signed pack is rejected). An unsigned pack is
     accepted unless require_signature is set. See docs/specs/pack-format.md."""
     validate_pack(bundle)
+    _validate_pack_references(db, bundle)
     if bundle.get("signature") is not None:
         if not verify_pack_signature(bundle, secret_key):
             raise ValueError("pack signature is invalid")
@@ -170,6 +195,7 @@ def export_pack(db: Database, definition_id: str) -> dict[str, Any]:
             {
                 "name": definition["name"],
                 "description": definition.get("description") or "",
+                "version": int(definition.get("version") or 1),
                 "status": definition.get("status") or "active",
                 "graph": definition.get("graph") or {},
                 "policy": definition.get("policy") or {},

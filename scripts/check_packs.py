@@ -142,6 +142,25 @@ def main() -> None:
         else:
             raise AssertionError("require_signature must reject an unsigned pack")
 
+        # Export preserves the definition version (no silent downgrade on round-trip).
+        versioned = db.create_workflow_definition(
+            {"name": "V2", "version": 2, "graph": bundle["workflows"][0]["graph"], "policy": {}}
+        )
+        exported_v2 = export_pack(db, versioned["id"])
+        assert exported_v2["workflows"][0]["version"] == 2, exported_v2["workflows"][0]
+        assert import_pack(db, exported_v2)["workflows"][0]["version"] == 2
+
+        # A pack with a concrete worker_id that doesn't exist here is rejected on import
+        # (role-only nodes stay portable).
+        dangling = deepcopy(bundle)
+        dangling["workflows"][0]["graph"]["nodes"][0]["worker_id"] = "wrk_does_not_exist"
+        try:
+            import_pack(db, dangling)
+        except ValueError as exc:
+            assert "unknown worker_id" in str(exc), str(exc)
+        else:
+            raise AssertionError("pack with an unknown concrete worker_id must be rejected")
+
     # The local registry listing reports the signed flag (shipped gov pack is unsigned).
     gov = next(entry for entry in list_available_packs() if entry.get("name") == "gov_complaint")
     assert gov["signed"] is False, gov
@@ -161,6 +180,10 @@ def main() -> None:
     bad_role = deepcopy(bundle)
     bad_role["roles"] = ["operator", "superuser"]
     assert_rejected(bad_role, "not a known RBAC role")
+
+    non_string_role = deepcopy(bundle)
+    non_string_role["roles"] = [{}]  # unhashable: must be a clean ValueError, not a 500
+    assert_rejected(non_string_role, "not a known RBAC role")
 
     bad_trigger = deepcopy(bundle)
     bad_trigger["triggers"][0]["type"] = "smoke_signal"

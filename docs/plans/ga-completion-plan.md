@@ -97,7 +97,7 @@ sequence above is the safe single-threaded order.
 | ✅ **B5** | Write-only key-injection helper that writes the target worker's env/config as a provisioning step (option-b); forward interface defined for a future thClaws save-key endpoint (option-a); Atlas core stores **no** model key; injection is audited; key never appears in DB/logs/API responses. | `scripts/check_byok_helper.py` (fake target) |
 | ✅ **M7/B7** | Gateway-worker design (multi-provider) + token/GPU-hour metering interface emitting extra CDR rows, documented as living in the worker/gateway layer; **no Atlas-core code**; readiness doc + interface spec only. | doc consistency (no core check) |
 | ✅ **M9** | `docs/adr/0001-multi-tenancy-silo-vs-pooled.md`: decision, forces, the exact pooled change-list/migration path, risks, and the revisit trigger. Silo invariant intact — a grep proves no `tenant_id` was added to core tables. | grep assertion in CI note (no core code) |
-| **GA wrap** | Security review checklist executed (auth, secrets, upload, SSRF to workers, RBAC); README + user guide + `docs/README.md` updated; **full completion gate green**; final report of what is built vs readiness-with-reason. | full gate + `/security-review` |
+| ✅ **GA wrap** | Security review checklist executed (auth, secrets, upload, SSRF to workers, RBAC); README + user guide + `docs/README.md` updated; **full completion gate green**; final report of what is built vs readiness-with-reason. | full gate + `/security-review` |
 
 > Every row above **also** carries a docs deliverable: at its close-out it updates
 > the docs its change touches and creates any new doc it introduces, per the

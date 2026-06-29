@@ -63,6 +63,13 @@ A bundle is rejected (`400`, clear error message) unless **all** hold:
 - every trigger's `workflow` index points at an existing workflow and its `type` passes
   `validate_workflow_trigger_payload`.
 
+On **import**, any concrete `worker_id` / `workspace_id` (or `policy.allowed_*` ids) in a
+workflow must exist on the importing instance — otherwise the pack is rejected rather
+than persisting a definition that would dangle at routing time. **Role-only** nodes carry
+no instance-specific ids and stay portable across instances (the recommended way to
+author packs). Export preserves each workflow's `version`, so export→import is a faithful
+round-trip.
+
 Validation never bypasses the real engine validators (graph **and** policy caps), so a
 pack can only create workflows that the workflow API would otherwise accept.
 
