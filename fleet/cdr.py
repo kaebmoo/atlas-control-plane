@@ -93,15 +93,31 @@ def _safe_name(tenant: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", tenant) or "tenant"
 
 
-def write_cdr(out_dir: Any, cdr_by_tenant: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    """Write one CDR CSV file per tenant under out_dir. Deterministic: same input ->
-    same filenames and same bytes. Returns {tenant: path}."""
+def _period_tag(period_start: str | None, period_end: str | None) -> str:
+    """Filename-safe tag for the export period so different periods never collide in the same
+    output directory. Unbounded ends fall back to 'begin'/'end'."""
+    start = _safe_name(str(period_start)) if period_start else "begin"
+    end = _safe_name(str(period_end)) if period_end else "end"
+    return f"{start}_{end}"
+
+
+def write_cdr(
+    out_dir: Any,
+    cdr_by_tenant: dict[str, list[dict[str, Any]]],
+    period_start: str | None = None,
+    period_end: str | None = None,
+) -> dict[str, Any]:
+    """Write one CDR CSV file per tenant under out_dir. The export period is encoded in the
+    filename, so exporting a different period into the same directory never overwrites an
+    earlier billing artifact. Deterministic: same input -> same filenames and same bytes.
+    Returns {tenant: path}."""
     from pathlib import Path
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Disambiguate tenants whose sanitized names collide (e.g. "a/b" vs "a:b") so no
-    # tenant's file is silently overwritten — one file per tenant is the contract.
+    period = _period_tag(period_start, period_end)
+    # Disambiguate tenants whose sanitized names collide (e.g. "a/b" vs "a:b") so no tenant's
+    # file is silently overwritten — one file per tenant per period is the contract.
     safe = {tenant: _safe_name(tenant) for tenant in cdr_by_tenant}
     collisions = {name for name, n in Counter(safe.values()).items() if n > 1}
     written: dict[str, Any] = {}
@@ -109,7 +125,7 @@ def write_cdr(out_dir: Any, cdr_by_tenant: dict[str, list[dict[str, Any]]]) -> d
         name = safe[tenant]
         if name in collisions:
             name = f"{name}-{hashlib.sha256(tenant.encode('utf-8')).hexdigest()[:8]}"
-        path = out_dir / f"cdr-{name}.csv"
+        path = out_dir / f"cdr-{name}-{period}.csv"
         path.write_text(cdr_csv(cdr_by_tenant[tenant]), encoding="utf-8")
         written[tenant] = path
     return written

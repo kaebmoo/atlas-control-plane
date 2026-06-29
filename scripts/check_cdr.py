@@ -81,6 +81,15 @@ def main() -> None:
         paths = write_cdr(Path(tmp) / "collide", collide)
         assert len(set(str(p) for p in paths.values())) == 2, paths
 
+        # Different periods exported to the SAME directory must not overwrite each other.
+        june = aggregate_cdr({"tenant-a": [_run_event(1)]}, "2026-06-01", "2026-06-30")
+        july = aggregate_cdr({"tenant-a": [_run_event(1)]}, "2026-07-01", "2026-07-31")
+        shared = Path(tmp) / "monthly"
+        june_path = write_cdr(shared, june, "2026-06-01", "2026-06-30")["tenant-a"]
+        july_path = write_cdr(shared, july, "2026-07-01", "2026-07-31")["tenant-a"]
+        assert june_path != july_path, "different periods must not share a filename"
+        assert Path(june_path).exists() and Path(july_path).exists(), "both period files must survive"
+
     # A CDR export must fail loudly if any instance pull fails (no silent partial bill).
     from fleet.fleet import Registry
     from fleet.cdr import pull_and_aggregate
