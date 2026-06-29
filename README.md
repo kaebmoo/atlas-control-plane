@@ -819,3 +819,19 @@ artifacts, lifecycle and restart-recovery controls, event triggers, human
 approval/choice gates, bounded manager-directed routing, the validated builder
 surface, worker suggestions, and built-in templates. Milestones 1–15 are
 complete.
+
+## License
+
+Atlas is **source-available** under the [Atlas Source-Available License 1.0](LICENSE)
+— © 2026 Pornthep Nivatyakul ([@kaebmoo](https://github.com/kaebmoo)).
+
+- **Internal and personal use is free.** Individuals and organizations may use,
+  modify, and self-host Atlas for their own internal purposes, with no fee and no
+  obligation to publish their changes.
+- **Offering Atlas to third parties as a service** (SaaS, hosted, managed,
+  white-labeled, or embedded in a product for others) requires a **commercial
+  license** from the author, which carries a license fee and a source-disclosure
+  requirement.
+
+This is not an OSI-approved open-source license. For commercial licensing,
+contact [@kaebmoo](https://github.com/kaebmoo).
