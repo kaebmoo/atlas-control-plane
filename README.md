@@ -68,6 +68,8 @@ The workflow implementation checklist is in
 - [Documentation Index](docs/README.md)
 - [คู่มือใช้งานผ่านเว็บ (ภาษาไทย)](docs/guides/web-user-guide-th.md)
 - [Web User Guide (English)](docs/guides/web-user-guide-en.md)
+- [API Reference](docs/specs/api-reference-en.md) ·
+  [ภาษาไทย](docs/specs/api-reference-th.md) · [OpenAPI](docs/specs/openapi.yaml)
 - [Visual Workflow Builder Specification](docs/specs/workflow-visual-builder-spec-en.md) ·
   [ภาษาไทย](docs/specs/workflow-visual-builder-spec-th.md)
 - [Workflow Examples](docs/workflow-examples.md)

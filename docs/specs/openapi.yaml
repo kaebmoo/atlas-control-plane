@@ -1,0 +1,1549 @@
+openapi: 3.1.0
+info:
+  title: Atlas Control Plane API
+  version: 1.0.0
+  description: |
+    Current HTTP API implemented by atlas/app.py as of 2026-06-29. Workflow and
+    trigger request schemas describe the preferred canonical client shape; the
+    backend also accepts some shorthand/defaulted fields documented in the guides.
+    All API errors use {"error":"message"}. Authentication is deployment-dependent:
+    ATLAS_API_TOKEN enables bearer/query-token checks, while loopback may be exempt.
+servers:
+  - url: http://127.0.0.1:8787
+    description: Default local server
+security:
+  - bearerAuth: []
+  - queryToken: []
+  - {}
+tags:
+  - name: System
+  - name: Workers
+  - name: Workspaces
+  - name: Conversations
+  - name: Routing
+  - name: Jobs
+  - name: Workflows
+  - name: Workflow Runs
+  - name: Artifacts
+  - name: Approvals
+  - name: Triggers
+  - name: Audit
+paths:
+  /api/health:
+    get:
+      tags: [System]
+      operationId: getHealth
+      summary: Read Atlas health and worker count
+      responses:
+        '200':
+          description: Health information
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, service, db, workers]
+                properties:
+                  ok: {type: boolean}
+                  service: {type: string}
+                  db: {type: string}
+                  workers: {type: integer}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workers:
+    get:
+      tags: [Workers]
+      operationId: listWorkers
+      summary: List workers without exposing stored tokens
+      responses:
+        '200':
+          description: Worker list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workers]
+                properties:
+                  workers:
+                    type: array
+                    items: {$ref: '#/components/schemas/Worker'}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Workers]
+      operationId: upsertWorker
+      summary: Create or update a worker by id or base_url
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/WorkerInput'}
+      responses:
+        '201':
+          description: Worker saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  worker: {$ref: '#/components/schemas/Worker'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workers/poll:
+    post:
+      tags: [Workers]
+      operationId: pollAllWorkers
+      summary: Poll health and capabilities for every worker
+      responses:
+        '200':
+          description: Updated workers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workers:
+                    type: array
+                    items: {$ref: '#/components/schemas/Worker'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workers/{worker_id}:
+    parameters:
+      - {$ref: '#/components/parameters/WorkerId'}
+    get:
+      tags: [Workers]
+      operationId: getWorker
+      summary: Get one worker
+      responses:
+        '200':
+          description: Worker
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  worker: {$ref: '#/components/schemas/Worker'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Workers]
+      operationId: deleteWorker
+      summary: Delete a worker and cascade its workspaces
+      responses:
+        '200': {$ref: '#/components/responses/Deleted'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workers/{worker_id}/poll:
+    parameters:
+      - {$ref: '#/components/parameters/WorkerId'}
+    post:
+      tags: [Workers]
+      operationId: pollWorker
+      summary: Poll one worker
+      responses:
+        '200':
+          description: Updated worker
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  worker: {$ref: '#/components/schemas/Worker'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workspaces:
+    get:
+      tags: [Workspaces]
+      operationId: listWorkspaces
+      summary: List workspaces with worker name/status
+      responses:
+        '200':
+          description: Workspace list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workspaces:
+                    type: array
+                    items: {$ref: '#/components/schemas/Workspace'}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Workspaces]
+      operationId: upsertWorkspace
+      summary: Create or update a workspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/WorkspaceInput'}
+      responses:
+        '201':
+          description: Workspace saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workspace: {$ref: '#/components/schemas/Workspace'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workspaces/{workspace_id}:
+    parameters:
+      - {$ref: '#/components/parameters/WorkspaceId'}
+    get:
+      tags: [Workspaces]
+      operationId: getWorkspace
+      summary: Get one workspace
+      responses:
+        '200':
+          description: Workspace
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workspace: {$ref: '#/components/schemas/Workspace'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Workspaces]
+      operationId: deleteWorkspace
+      summary: Delete one workspace
+      responses:
+        '200': {$ref: '#/components/responses/Deleted'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/conversations:
+    get:
+      tags: [Conversations]
+      operationId: listConversations
+      summary: List the 100 most recently updated conversations
+      responses:
+        '200':
+          description: Conversation list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  conversations:
+                    type: array
+                    items: {$ref: '#/components/schemas/Conversation'}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Conversations]
+      operationId: createConversation
+      summary: Create a conversation
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConversationInput'}
+      responses:
+        '201':
+          description: Conversation created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  conversation: {$ref: '#/components/schemas/Conversation'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/routes/resolve:
+    post:
+      tags: [Routing]
+      operationId: resolveRoute
+      summary: Preview worker/workspace routing without creating a job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RouteRequest'}
+      responses:
+        '200':
+          description: Route decision
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RouteResponse'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/jobs:
+    get:
+      tags: [Jobs]
+      operationId: listJobs
+      summary: List jobs newest first
+      parameters:
+        - {$ref: '#/components/parameters/Limit100'}
+      responses:
+        '200':
+          description: Job list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items: {$ref: '#/components/schemas/Job'}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Jobs]
+      operationId: createJob
+      summary: Route and start a job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/JobRequest'}
+      responses:
+        '202':
+          description: Job accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: {$ref: '#/components/schemas/Job'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/jobs/{job_id}:
+    parameters:
+      - {$ref: '#/components/parameters/JobId'}
+    get:
+      tags: [Jobs]
+      operationId: getJob
+      summary: Get one job
+      responses:
+        '200':
+          description: Job
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: {$ref: '#/components/schemas/Job'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/jobs/{job_id}/cancel:
+    parameters:
+      - {$ref: '#/components/parameters/JobId'}
+    post:
+      tags: [Jobs]
+      operationId: cancelJob
+      summary: Request best-effort cancellation
+      responses:
+        '200':
+          description: Updated job
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: {$ref: '#/components/schemas/Job'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/jobs/{job_id}/events:
+    parameters:
+      - {$ref: '#/components/parameters/JobId'}
+      - name: after
+        in: query
+        schema: {type: integer, default: 0, minimum: 0}
+        description: Replay only events with seq greater than this value
+    get:
+      tags: [Jobs]
+      operationId: streamJobEvents
+      summary: Replay and follow job events over Server-Sent Events
+      responses:
+        '200':
+          description: SSE frames with id, event, and JSON data
+          content:
+            text/event-stream:
+              schema: {type: string}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflows:
+    get:
+      tags: [Workflows]
+      operationId: listWorkflows
+      summary: List workflow definitions
+      parameters:
+        - {$ref: '#/components/parameters/Limit100'}
+      responses:
+        '200':
+          description: Workflow definitions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflows:
+                    type: array
+                    items: {$ref: '#/components/schemas/WorkflowDefinition'}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Workflows]
+      operationId: createWorkflow
+      summary: Validate and create a workflow definition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/WorkflowCreateInput'}
+      responses:
+        '201':
+          description: Workflow created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflow: {$ref: '#/components/schemas/WorkflowDefinition'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflow-templates:
+    get:
+      tags: [Workflows]
+      operationId: listWorkflowTemplates
+      summary: List built-in workflow templates
+      responses:
+        '200':
+          description: Templates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  templates:
+                    type: array
+                    items: {$ref: '#/components/schemas/WorkflowTemplate'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflows/draft:
+    post:
+      tags: [Workflows]
+      operationId: draftWorkflow
+      summary: Ask a workflow_builder worker for a validated draft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plain_language_prompt]
+              properties:
+                plain_language_prompt: {type: string, minLength: 1}
+      responses:
+        '201':
+          description: Validated AI draft
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  draft:
+                    $ref: './workflow-ai-draft.schema.json'
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflows/suggest-workers:
+    post:
+      tags: [Workflows]
+      operationId: suggestWorkflowWorkers
+      summary: Suggest real workers/workspaces for unresolved nodes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [graph]
+              properties:
+                graph:
+                  $ref: './workflow-definition.schema.json#/$defs/graph'
+                policy:
+                  $ref: './workflow-definition.schema.json#/$defs/policy'
+      responses:
+        '200':
+          description: Suggestions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  suggestions:
+                    type: array
+                    items: {$ref: '#/components/schemas/WorkerSuggestion'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflows/{workflow_id}:
+    parameters:
+      - {$ref: '#/components/parameters/WorkflowId'}
+    get:
+      tags: [Workflows]
+      operationId: getWorkflow
+      summary: Get one workflow definition
+      responses:
+        '200':
+          description: Workflow
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflow: {$ref: '#/components/schemas/WorkflowDefinition'}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      tags: [Workflows]
+      operationId: updateWorkflow
+      summary: Validate and update a workflow definition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+                description: {type: string}
+                version: {type: integer}
+                status: {type: string}
+                graph:
+                  $ref: './workflow-definition.schema.json#/$defs/graph'
+                policy:
+                  $ref: './workflow-definition.schema.json#/$defs/policy'
+      responses:
+        '200':
+          description: Updated workflow
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflow: {$ref: '#/components/schemas/WorkflowDefinition'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Workflows]
+      operationId: deleteWorkflow
+      summary: Delete a workflow definition
+      responses:
+        '200': {$ref: '#/components/responses/Deleted'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflows/{workflow_id}/validate:
+    parameters:
+      - {$ref: '#/components/parameters/WorkflowId'}
+    post:
+      tags: [Workflows]
+      operationId: validateWorkflow
+      summary: Validate graph/policy using a saved workflow as fallback
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/WorkflowPreview'}
+      responses:
+        '200':
+          description: Valid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {type: boolean, const: true}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflows/{workflow_id}/explain:
+    parameters:
+      - {$ref: '#/components/parameters/WorkflowId'}
+    post:
+      tags: [Workflows]
+      operationId: explainWorkflow
+      summary: Explain the saved workflow using AI when configured, otherwise locally
+      responses:
+        '200':
+          description: Explanation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  explanation: {type: string}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflows/{workflow_id}/repair:
+    parameters:
+      - {$ref: '#/components/parameters/WorkflowId'}
+    post:
+      tags: [Workflows]
+      operationId: repairWorkflow
+      summary: Validate or ask the workflow_builder worker for a repaired preview
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                graph:
+                  $ref: './workflow-definition.schema.json#/$defs/graph'
+                policy:
+                  $ref: './workflow-definition.schema.json#/$defs/policy'
+                triggers:
+                  type: array
+                  items: {$ref: '#/components/schemas/TriggerDraft'}
+      responses:
+        '200':
+          description: Repaired or already-valid draft; never auto-saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  draft:
+                    $ref: './workflow-ai-draft.schema.json'
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflows/{workflow_id}/suggest-triggers:
+    parameters:
+      - {$ref: '#/components/parameters/WorkflowId'}
+    post:
+      tags: [Workflows]
+      operationId: suggestWorkflowTriggers
+      summary: Ask the workflow_builder worker for validated trigger drafts
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                plain_language_prompt: {type: string}
+      responses:
+        '200':
+          description: Trigger drafts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  triggers:
+                    type: array
+                    items: {$ref: '#/components/schemas/TriggerDraft'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflow-runs:
+    get:
+      tags: [Workflow Runs]
+      operationId: listWorkflowRuns
+      summary: List workflow runs
+      parameters:
+        - {$ref: '#/components/parameters/Limit100'}
+        - name: workflow_definition_id
+          in: query
+          schema: {type: string}
+      responses:
+        '200':
+          description: Runs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runs:
+                    type: array
+                    items: {$ref: '#/components/schemas/WorkflowRun'}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Workflow Runs]
+      operationId: createWorkflowRun
+      summary: Start a saved workflow asynchronously
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workflow_definition_id]
+              properties:
+                workflow_definition_id: {type: string, minLength: 1}
+                input: {type: object, additionalProperties: true}
+      responses:
+        '202':
+          description: Run accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run: {$ref: '#/components/schemas/WorkflowRun'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflow-runs/{run_id}:
+    parameters:
+      - {$ref: '#/components/parameters/RunId'}
+    get:
+      tags: [Workflow Runs]
+      operationId: getWorkflowRun
+      summary: Get run, runtime nodes, traversed edges, and approvals
+      responses:
+        '200':
+          description: Run detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run: {$ref: '#/components/schemas/WorkflowRun'}
+                  nodes: {type: array, items: {$ref: '#/components/schemas/RuntimeNode'}}
+                  edges: {type: array, items: {$ref: '#/components/schemas/RuntimeEdge'}}
+                  approvals: {type: array, items: {$ref: '#/components/schemas/Approval'}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflow-runs/{run_id}/artifacts:
+    parameters:
+      - {$ref: '#/components/parameters/RunId'}
+    get:
+      tags: [Artifacts]
+      operationId: listRunArtifacts
+      summary: List artifacts for a run
+      responses:
+        '200':
+          description: Artifacts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifacts: {type: array, items: {$ref: '#/components/schemas/Artifact'}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflow-runs/{run_id}/files:
+    parameters:
+      - {$ref: '#/components/parameters/RunId'}
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: '^[A-Za-z_][A-Za-z0-9_.-]{0,127}$'
+      - name: X-Filename
+        in: header
+        required: false
+        schema: {type: string}
+      - name: Content-Length
+        in: header
+        required: true
+        schema: {type: integer, minimum: 0}
+    post:
+      tags: [Artifacts]
+      operationId: uploadRunFile
+      summary: Upload a direct binary body as a file_ref artifact
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+          application/pdf:
+            schema: {type: string, format: binary}
+      responses:
+        '201':
+          description: File artifact created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifact: {$ref: '#/components/schemas/Artifact'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflow-runs/{run_id}/events:
+    parameters:
+      - {$ref: '#/components/parameters/RunId'}
+      - name: limit
+        in: query
+        schema: {type: integer, default: 500, minimum: 1}
+    get:
+      tags: [Workflow Runs]
+      operationId: listWorkflowRunEvents
+      summary: List persisted workflow lifecycle events
+      responses:
+        '200':
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events: {type: array, items: {$ref: '#/components/schemas/WorkflowEvent'}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflow-runs/{run_id}/pause:
+    parameters: [{$ref: '#/components/parameters/RunId'}]
+    post:
+      tags: [Workflow Runs]
+      operationId: pauseWorkflowRun
+      summary: Pause a running workflow
+      responses:
+        '200': {$ref: '#/components/responses/RunResponse'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflow-runs/{run_id}/resume:
+    parameters: [{$ref: '#/components/parameters/RunId'}]
+    post:
+      tags: [Workflow Runs]
+      operationId: resumeWorkflowRun
+      summary: Resume a paused run or authorize recovery retry
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                retry_interrupted: {type: boolean, default: false}
+      responses:
+        '202': {$ref: '#/components/responses/RunResponse'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflow-runs/{run_id}/cancel:
+    parameters: [{$ref: '#/components/parameters/RunId'}]
+    post:
+      tags: [Workflow Runs]
+      operationId: cancelWorkflowRun
+      summary: Cancel a non-terminal workflow run
+      responses:
+        '200': {$ref: '#/components/responses/RunResponse'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/artifacts:
+    post:
+      tags: [Artifacts]
+      operationId: createArtifact
+      summary: Create an inline artifact on an existing run
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ArtifactInput'}
+      responses:
+        '201':
+          description: Artifact created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifact: {$ref: '#/components/schemas/Artifact'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/artifacts/{artifact_id}:
+    parameters: [{$ref: '#/components/parameters/ArtifactId'}]
+    get:
+      tags: [Artifacts]
+      operationId: getArtifact
+      summary: Get artifact metadata and inline content
+      responses:
+        '200':
+          description: Artifact
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifact: {$ref: '#/components/schemas/Artifact'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/artifacts/{artifact_id}/content:
+    parameters: [{$ref: '#/components/parameters/ArtifactId'}]
+    get:
+      tags: [Artifacts]
+      operationId: downloadArtifactContent
+      summary: Download bytes for a file_ref artifact
+      responses:
+        '200':
+          description: Stored file bytes with Content-Disposition attachment
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/approvals:
+    get:
+      tags: [Approvals]
+      operationId: listApprovals
+      summary: List approvals with optional filters
+      parameters:
+        - {$ref: '#/components/parameters/Limit100'}
+        - name: state
+          in: query
+          schema: {type: string}
+        - name: run_id
+          in: query
+          schema: {type: string}
+      responses:
+        '200':
+          description: Approvals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approvals: {type: array, items: {$ref: '#/components/schemas/Approval'}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/approvals/{approval_id}/approve:
+    parameters: [{$ref: '#/components/parameters/ApprovalId'}]
+    post:
+      tags: [Approvals]
+      operationId: approveWorkflowGate
+      summary: Approve a pending gate without choices
+      responses:
+        '202': {$ref: '#/components/responses/ApprovalDecision'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/approvals/{approval_id}/reject:
+    parameters: [{$ref: '#/components/parameters/ApprovalId'}]
+    post:
+      tags: [Approvals]
+      operationId: rejectWorkflowGate
+      summary: Reject a pending gate and fail the run
+      responses:
+        '200': {$ref: '#/components/responses/ApprovalDecision'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/approvals/{approval_id}/choose:
+    parameters: [{$ref: '#/components/parameters/ApprovalId'}]
+    post:
+      tags: [Approvals]
+      operationId: chooseWorkflowGateBranch
+      summary: Choose a declared branch on a pending gate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [choice]
+              properties:
+                choice: {type: string, minLength: 1}
+      responses:
+        '202': {$ref: '#/components/responses/ApprovalDecision'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflow-triggers:
+    get:
+      tags: [Triggers]
+      operationId: listWorkflowTriggers
+      summary: List workflow triggers
+      parameters:
+        - {$ref: '#/components/parameters/Limit100'}
+        - name: workflow_definition_id
+          in: query
+          schema: {type: string}
+      responses:
+        '200':
+          description: Triggers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  triggers: {type: array, items: {$ref: '#/components/schemas/WorkflowTrigger'}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Triggers]
+      operationId: createWorkflowTrigger
+      summary: Create a trigger for a saved workflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/WorkflowTriggerInput'}
+      responses:
+        '201':
+          description: Trigger created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trigger: {$ref: '#/components/schemas/WorkflowTrigger'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflow-triggers/{trigger_id}:
+    parameters: [{$ref: '#/components/parameters/TriggerId'}]
+    get:
+      tags: [Triggers]
+      operationId: getWorkflowTrigger
+      summary: Get one trigger
+      responses:
+        '200':
+          description: Trigger
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trigger: {$ref: '#/components/schemas/WorkflowTrigger'}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      tags: [Triggers]
+      operationId: updateWorkflowTrigger
+      summary: Update and revalidate a trigger
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+                type: {$ref: '#/components/schemas/TriggerType'}
+                config: {type: object, additionalProperties: true}
+                enabled: {type: boolean}
+      responses:
+        '200':
+          description: Updated trigger
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trigger: {$ref: '#/components/schemas/WorkflowTrigger'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Triggers]
+      operationId: deleteWorkflowTrigger
+      summary: Delete a trigger and its events
+      responses:
+        '200': {$ref: '#/components/responses/Deleted'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflow-triggers/{trigger_id}/fire:
+    parameters: [{$ref: '#/components/parameters/TriggerId'}]
+    post:
+      tags: [Triggers]
+      operationId: fireWorkflowTrigger
+      summary: Fire manual, schedule, or webhook trigger
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                payload: {type: object, additionalProperties: true}
+                dedupe_key: {type: string}
+      responses:
+        '202':
+          description: Trigger event and optionally a started run
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/workflow-triggers/{trigger_id}/events:
+    parameters:
+      - {$ref: '#/components/parameters/TriggerId'}
+      - name: limit
+        in: query
+        schema: {type: integer, default: 100, minimum: 1}
+    get:
+      tags: [Triggers]
+      operationId: listWorkflowTriggerEvents
+      summary: List trigger delivery/run events
+      responses:
+        '200':
+          description: Trigger events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events: {type: array, items: {$ref: '#/components/schemas/TriggerEvent'}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/audit:
+    get:
+      tags: [Audit]
+      operationId: listAudit
+      summary: List audit entries newest first
+      parameters:
+        - {$ref: '#/components/parameters/Limit100'}
+      responses:
+        '200':
+          description: Audit entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  audit: {type: array, items: {$ref: '#/components/schemas/AuditEntry'}}
+        default: {$ref: '#/components/responses/Error'}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: ATLAS_API_TOKEN in the Authorization header
+    queryToken:
+      type: apiKey
+      in: query
+      name: token
+      description: Primarily used by browser EventSource, which cannot set Authorization headers
+
+  parameters:
+    Limit100:
+      name: limit
+      in: query
+      schema: {type: integer, default: 100, minimum: 1}
+    WorkerId: {name: worker_id, in: path, required: true, schema: {type: string}}
+    WorkspaceId: {name: workspace_id, in: path, required: true, schema: {type: string}}
+    JobId: {name: job_id, in: path, required: true, schema: {type: string}}
+    WorkflowId: {name: workflow_id, in: path, required: true, schema: {type: string}}
+    RunId: {name: run_id, in: path, required: true, schema: {type: string}}
+    ArtifactId: {name: artifact_id, in: path, required: true, schema: {type: string}}
+    ApprovalId: {name: approval_id, in: path, required: true, schema: {type: string}}
+    TriggerId: {name: trigger_id, in: path, required: true, schema: {type: string}}
+
+  responses:
+    Error:
+      description: Error response; normally 400, 401, 404, or 500
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Deleted:
+      description: Resource deleted
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [deleted]
+            properties:
+              deleted: {type: boolean, const: true}
+    RunResponse:
+      description: Updated workflow run
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              run: {$ref: '#/components/schemas/WorkflowRun'}
+    ApprovalDecision:
+      description: Approval and updated run
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              approval: {$ref: '#/components/schemas/Approval'}
+              run: {$ref: '#/components/schemas/WorkflowRun'}
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
+
+    WorkerInput:
+      type: object
+      required: [base_url]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        base_url: {type: string, minLength: 1}
+        token: {type: string, description: Blank retains the existing token on upsert}
+        role: {type: string}
+        tags:
+          oneOf:
+            - {type: string, description: Comma-separated tags}
+            - {type: array, items: {type: string}}
+      additionalProperties: true
+
+    Worker:
+      type: object
+      required: [id, name, base_url, status, token_set]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        base_url: {type: string}
+        role: {type: string}
+        tags: {type: array, items: {type: string}}
+        status: {type: string}
+        token_set: {type: boolean}
+        last_seen_at: {type: [string, 'null'], format: date-time}
+        agent_info: {type: object, additionalProperties: true}
+        last_error: {type: [string, 'null']}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+      additionalProperties: true
+
+    WorkspaceInput:
+      type: object
+      required: [worker_id, workspace_key, workspace_dir]
+      properties:
+        id: {type: string}
+        worker_id: {type: string}
+        workspace_key: {type: string}
+        workspace_dir: {type: string}
+        company: {type: string}
+        tags:
+          oneOf:
+            - {type: string}
+            - {type: array, items: {type: string}}
+      additionalProperties: true
+
+    Workspace:
+      allOf:
+        - {$ref: '#/components/schemas/WorkspaceInput'}
+        - type: object
+          required: [id, created_at, updated_at]
+          properties:
+            worker_name: {type: string}
+            worker_status: {type: string}
+            created_at: {type: string, format: date-time}
+            updated_at: {type: string, format: date-time}
+          additionalProperties: true
+
+    ConversationInput:
+      type: object
+      properties:
+        id: {type: string}
+        title: {type: string}
+        preferred_worker_id: {type: string}
+        preferred_workspace_id: {type: string}
+        workspace_key: {type: string}
+        company: {type: string}
+        metadata: {type: object, additionalProperties: true}
+      additionalProperties: true
+
+    Conversation:
+      allOf:
+        - {$ref: '#/components/schemas/ConversationInput'}
+        - type: object
+          required: [id, title, created_at, updated_at]
+          properties:
+            created_at: {type: string, format: date-time}
+            updated_at: {type: string, format: date-time}
+          additionalProperties: true
+
+    RouteHints:
+      type: object
+      properties:
+        conversation_id: {type: string}
+        worker_id: {type: string}
+        workspace_id: {type: string}
+        workspace_key: {type: string}
+        company: {type: string}
+        role: {type: string}
+        tags:
+          oneOf:
+            - {type: string}
+            - {type: array, items: {type: string}}
+        prompt: {type: string}
+        allowed_worker_ids: {type: array, items: {type: string}}
+        allowed_workspace_ids: {type: array, items: {type: string}}
+      additionalProperties: true
+
+    RouteRequest:
+      allOf:
+        - {$ref: '#/components/schemas/RouteHints'}
+
+    RouteResponse:
+      type: object
+      required: [worker, reason]
+      properties:
+        worker: {$ref: '#/components/schemas/Worker'}
+        workspace:
+          oneOf:
+            - {$ref: '#/components/schemas/Workspace'}
+            - {type: 'null'}
+        reason: {type: string}
+        thclaws_session_id: {type: [string, 'null']}
+
+    HandoffInput:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: {type: boolean}
+        worker_id: {type: string}
+        workspace_id: {type: string}
+        prompt: {type: string}
+
+    JobRequest:
+      type: object
+      required: [prompt]
+      properties:
+        prompt: {type: string, minLength: 1}
+        conversation_id: {type: string}
+        worker_id: {type: string}
+        workspace_id: {type: string}
+        workspace_key: {type: string}
+        company: {type: string}
+        role: {type: string}
+        tags:
+          oneOf:
+            - {type: string}
+            - {type: array, items: {type: string}}
+        model: {type: string}
+        parent_job_id: {type: string}
+        allowed_worker_ids: {type: array, items: {type: string}}
+        allowed_workspace_ids: {type: array, items: {type: string}}
+        handoff: {$ref: '#/components/schemas/HandoffInput'}
+      additionalProperties: true
+
+    Job:
+      type: object
+      required: [id, worker_id, state, prompt, assistant_text, created_at, updated_at]
+      properties:
+        id: {type: string}
+        conversation_id: {type: [string, 'null']}
+        worker_id: {type: string}
+        workspace_id: {type: [string, 'null']}
+        parent_job_id: {type: [string, 'null']}
+        state: {enum: [queued, running, cancel_requested, succeeded, failed, cancelled]}
+        prompt: {type: string}
+        model: {type: string}
+        route_reason: {type: string}
+        thclaws_session_id: {type: [string, 'null']}
+        assistant_text: {type: string}
+        error: {type: [string, 'null']}
+        cancel_requested: {type: [integer, boolean]}
+        handoff_worker_id: {type: [string, 'null']}
+        handoff_workspace_id: {type: [string, 'null']}
+        handoff_prompt: {type: string}
+        handoff_job_id: {type: [string, 'null']}
+        handoff_error: {type: [string, 'null']}
+        created_at: {type: string, format: date-time}
+        started_at: {type: [string, 'null'], format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+        updated_at: {type: string, format: date-time}
+      additionalProperties: true
+
+    WorkflowDefinition:
+      type: object
+      required: [id, name, description, graph, policy, version, status]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        version: {type: integer}
+        status: {type: string}
+        graph:
+          $ref: './workflow-definition.schema.json#/$defs/graph'
+        policy:
+          $ref: './workflow-definition.schema.json#/$defs/policy'
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+      additionalProperties: true
+
+    WorkflowCreateInput:
+      type: object
+      required: [graph]
+      properties:
+        id: {type: string}
+        name: {type: string, default: Untitled workflow}
+        description: {type: string}
+        version: {type: integer, minimum: 1, default: 1}
+        status: {type: string, default: draft}
+        graph:
+          $ref: './workflow-definition.schema.json#/$defs/graph'
+        policy:
+          $ref: './workflow-definition.schema.json#/$defs/policy'
+      additionalProperties: true
+
+    WorkflowTemplate:
+      type: object
+      required: [id, name, description, graph, policy]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        graph:
+          $ref: './workflow-definition.schema.json#/$defs/graph'
+        policy:
+          $ref: './workflow-definition.schema.json#/$defs/policy'
+      additionalProperties: true
+
+    WorkflowPreview:
+      type: object
+      properties:
+        graph:
+          $ref: './workflow-definition.schema.json#/$defs/graph'
+        policy:
+          $ref: './workflow-definition.schema.json#/$defs/policy'
+
+    WorkerSuggestion:
+      type: object
+      required: [node_id, role, reason, state]
+      properties:
+        node_id: {type: string}
+        role: {type: string}
+        worker_id: {type: string}
+        workspace_id: {type: string}
+        reason: {type: string}
+        state: {enum: [matched, fallback, unavailable]}
+
+    WorkflowRun:
+      type: object
+      required: [id, name, state, input, current_nodes, counters]
+      properties:
+        id: {type: string}
+        workflow_definition_id: {type: [string, 'null']}
+        name: {type: string}
+        state: {enum: [queued, running, paused, waiting_for_human, recovery_required, succeeded, failed, cancelled]}
+        input: {type: object, additionalProperties: true}
+        current_nodes: {type: array, items: {type: string}}
+        counters: {type: object, additionalProperties: true}
+        error: {type: [string, 'null']}
+        created_at: {type: string, format: date-time}
+        started_at: {type: [string, 'null'], format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+        updated_at: {type: string, format: date-time}
+      additionalProperties: true
+
+    RuntimeNode:
+      type: object
+      properties:
+        id: {type: string}
+        run_id: {type: string}
+        node_key: {type: string}
+        state: {type: string}
+        job_id: {type: [string, 'null']}
+        attempt: {type: integer}
+        input_artifacts: {type: array, items: {type: string}}
+        output_artifacts: {type: array, items: {type: string}}
+        error: {type: [string, 'null']}
+      additionalProperties: true
+
+    RuntimeEdge:
+      type: object
+      properties:
+        id: {type: string}
+        run_id: {type: string}
+        from_node: {type: string}
+        to_node: {type: string}
+        condition_result: {type: object, additionalProperties: true}
+        created_at: {type: string, format: date-time}
+      additionalProperties: true
+
+    WorkflowEvent:
+      type: object
+      properties:
+        id: {type: integer}
+        run_id: {type: string}
+        seq: {type: integer}
+        event_type: {type: string}
+        node_key: {type: [string, 'null']}
+        payload: {type: object, additionalProperties: true}
+        created_at: {type: string, format: date-time}
+      additionalProperties: true
+
+    ArtifactInput:
+      type: object
+      required: [run_id, key]
+      properties:
+        id: {type: string}
+        run_id: {type: string}
+        job_id: {type: string}
+        key: {type: string, minLength: 1}
+        kind: {enum: [text, json, markdown, file_ref, summary, decision], default: text}
+        content: {}
+        metadata: {type: object, additionalProperties: true}
+      additionalProperties: false
+
+    Artifact:
+      type: object
+      required: [id, key, kind, content, metadata]
+      properties:
+        id: {type: string}
+        run_id: {type: [string, 'null']}
+        job_id: {type: [string, 'null']}
+        key: {type: string}
+        kind: {enum: [text, json, markdown, file_ref, summary, decision]}
+        content: {}
+        metadata: {type: object, additionalProperties: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+      additionalProperties: true
+
+    Approval:
+      type: object
+      properties:
+        id: {type: string}
+        run_id: {type: string}
+        workflow_node_id: {type: [string, 'null']}
+        node_key: {type: string}
+        approval_key: {type: string}
+        label: {type: string}
+        reason: {type: string}
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              label: {type: string}
+        selected_choice: {type: [string, 'null']}
+        state: {type: string}
+        created_at: {type: string, format: date-time}
+        decided_at: {type: [string, 'null'], format: date-time}
+        updated_at: {type: string, format: date-time}
+      additionalProperties: true
+
+    TriggerType:
+      enum: [manual, schedule, webhook, workflow_run_completed, artifact_created, worker_status_changed]
+
+    TriggerDraft:
+      type: object
+      properties:
+        name: {type: string}
+        type: {$ref: '#/components/schemas/TriggerType'}
+        config: {type: object, additionalProperties: true}
+        enabled: {type: boolean}
+      additionalProperties: false
+
+    WorkflowTriggerInput:
+      type: object
+      required: [workflow_definition_id]
+      properties:
+        workflow_definition_id: {type: string, minLength: 1}
+        name: {type: string}
+        type: {$ref: '#/components/schemas/TriggerType'}
+        config: {type: object, additionalProperties: true}
+        enabled: {type: boolean}
+      additionalProperties: true
+
+    WorkflowTrigger:
+      allOf:
+        - {$ref: '#/components/schemas/WorkflowTriggerInput'}
+        - type: object
+          required: [id, name, type, config, enabled, created_at, updated_at]
+          properties:
+            id: {type: string}
+            last_fired_at: {type: [string, 'null'], format: date-time}
+            next_fire_at: {type: [string, 'null'], format: date-time}
+            last_event_state: {type: [string, 'null']}
+            last_event_error: {type: [string, 'null']}
+            last_event_at: {type: [string, 'null'], format: date-time}
+            created_at: {type: string, format: date-time}
+            updated_at: {type: string, format: date-time}
+          additionalProperties: true
+
+    TriggerEvent:
+      type: object
+      properties:
+        id: {type: string}
+        trigger_id: {type: string}
+        run_id: {type: [string, 'null']}
+        payload: {type: object, additionalProperties: true}
+        state: {type: string}
+        error: {type: [string, 'null']}
+        dedupe_key: {type: [string, 'null']}
+        created_at: {type: string, format: date-time}
+      additionalProperties: true
+
+    AuditEntry:
+      type: object
+      properties:
+        id: {type: integer}
+        action: {type: string}
+        actor: {type: string}
+        resource_type: {type: string}
+        resource_id: {type: string}
+        details: {type: object, additionalProperties: true}
+        created_at: {type: string, format: date-time}
+      additionalProperties: true

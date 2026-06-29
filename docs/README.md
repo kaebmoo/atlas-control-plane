@@ -34,6 +34,9 @@
 
 ## Specifications สำหรับ Programmer
 
+- [API Reference (ไทย)](specs/api-reference-th.md) ·
+  [English](specs/api-reference-en.md) · [OpenAPI 3.1](specs/openapi.yaml) — endpoints,
+  authentication, payloads, SSE, files, errors และ client checklist
 - [Visual Workflow Builder Specification (ไทย)](specs/workflow-visual-builder-spec-th.md) ·
   [English](specs/workflow-visual-builder-spec-en.md) — visual grammar, drag/drop rules,
   JSON mapping, validation, AI workflow และ QA criteria
@@ -76,6 +79,9 @@ docs/
 │   ├── workflow-engine-spin-prompts.md
 │   └── sovereign-platform-spin-prompts.md
 ├── specs/
+│   ├── api-reference-th.md
+│   ├── api-reference-en.md
+│   ├── openapi.yaml
 │   ├── workflow-visual-builder-spec-th.md
 │   ├── workflow-visual-builder-spec-en.md
 │   ├── workflow-definition.schema.json
