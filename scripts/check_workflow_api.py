@@ -82,6 +82,13 @@ def main() -> None:
 
             updated = request(base_url, "PUT", f"/api/workflows/{workflow_id}", {"description": "updated"})["workflow"]
             assert updated["description"] == "updated"
+            # PUT must reject a non-integer version (would later break pack export) and a
+            # status carrying unsafe characters; a valid integer version is accepted.
+            bad_version = request_error(base_url, "PUT", f"/api/workflows/{workflow_id}", {"version": "1.0.0"})
+            assert "integer" in bad_version["error"], bad_version
+            bad_status = request_error(base_url, "PUT", f"/api/workflows/{workflow_id}", {"status": 'x" onmouseover="y'})
+            assert "status" in bad_status["error"], bad_status
+            assert request(base_url, "PUT", f"/api/workflows/{workflow_id}", {"version": 3})["workflow"]["version"] == 3
             assert "starts at only" in request(base_url, "POST", f"/api/workflows/{workflow_id}/explain")["explanation"]
             assert request(base_url, "POST", f"/api/workflows/{workflow_id}/repair")["draft"]["explanation"] == "Workflow already validates."
 
@@ -401,6 +408,11 @@ def check_milestones_9_and_10(base_url: str) -> None:
     javascript = request_text(base_url, "/static/app.js")
     assert all(marker in html for marker in ["workflowPolicyForm", "explainWorkflowBtn", "repairWorkflowBtn", "suggestWorkersBtn"])
     assert all(marker in javascript for marker in ["syncPolicyFormFromJson", "Validated repair copied", "applyWorkerSuggestion", "toggleTrigger"])
+    # Security regression guards: status is whitelist-sanitized before it reaches a class
+    # attribute (stored-XSS), and artifact downloads go through an authenticated fetch
+    # rather than a token-less <a href> (401 under auth).
+    assert "replace(/[^A-Za-z0-9-]/g" in javascript, "statusClass must whitelist-sanitize the status token"
+    assert "downloadArtifact" in javascript and 'href="/api/artifacts/' not in javascript, "artifact download must use authenticated fetch"
 
 
 def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) -> None:

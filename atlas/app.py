@@ -446,6 +446,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 graph = payload.get("graph", workflow["graph"])
                 policy = payload.get("policy", workflow.get("policy") or {})
                 _validate_workflow_payload(runtime, {"graph": graph, "policy": policy})
+                _validate_workflow_metadata(payload)
                 updated = runtime.db.update_workflow_definition(workflow_id, payload)
                 self._json({"workflow": updated})
                 return
@@ -927,6 +928,24 @@ def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any]) -
     _validate_workflow_references(runtime, graph, policy)
     _validate_workflow_policy(policy)
     _validate_workflow_draft_triggers(payload.get("triggers") or [])
+
+
+def _validate_workflow_metadata(payload: dict[str, Any]) -> None:
+    """Validate the additive metadata fields a PUT can persist. OpenAPI types `version` as
+    an integer; reject a non-integer (a string version is stored as-is and later breaks pack
+    export). `status` feeds a dashboard class attribute, so restrict it to a safe token
+    (defense in depth with the client-side sanitizer). Normalizes a digit-string version."""
+    if "version" in payload:
+        version = payload["version"]
+        if isinstance(version, str) and version.isdigit():
+            version = int(version)
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            raise ValueError("workflow version must be an integer >= 1")
+        payload["version"] = version
+    if "status" in payload:
+        status = payload["status"]
+        if not isinstance(status, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", status):
+            raise ValueError("workflow status must match [A-Za-z0-9_-]+")
 
 
 def _validate_workflow_references(

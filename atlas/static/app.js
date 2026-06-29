@@ -69,7 +69,10 @@ function escapeHtml(value) {
 }
 
 function statusClass(value) {
-  return String(value || "unknown").replaceAll("_", "-");
+  // Whitelist to a safe CSS-class token: the result flows into class="status ${...}", so any
+  // character outside [A-Za-z0-9-] (e.g. a quote) could break out of the attribute and inject
+  // markup. An operator can set an arbitrary workflow status via PUT, so sanitize at the sink.
+  return String(value || "unknown").replaceAll("_", "-").replace(/[^A-Za-z0-9-]/g, "") || "unknown";
 }
 
 function shortId(value) {
@@ -662,10 +665,10 @@ function renderWorkflowRuns() {
   $("#workflowArtifactList").textContent = state.workflowArtifacts.length ? prettyJson(state.workflowArtifacts) : "";
   const files = state.workflowArtifacts.filter((artifact) => artifact.kind === "file_ref");
   $("#workflowArtifactDownloads").innerHTML = files.map((artifact) => `
-    <a class="workflow-run-item" href="/api/artifacts/${encodeURIComponent(artifact.id)}/content">
+    <button type="button" class="workflow-run-item download-artifact" data-artifact-id="${escapeHtml(artifact.id)}" data-filename="${escapeHtml(artifact.metadata?.filename || artifact.key)}">
       <span>${escapeHtml(artifact.metadata?.filename || artifact.key)}</span>
       <span class="item-sub">${escapeHtml(artifact.metadata?.size ?? 0)} bytes · ${escapeHtml(artifact.metadata?.sha256 || "")}</span>
-    </a>
+    </button>
   `).join("");
   const selectedRun = state.workflowRunDetail?.run;
   $("#pauseWorkflowRunBtn").disabled = selectedRun?.state !== "running";
@@ -791,6 +794,25 @@ async function downloadUsage(format) {
   const link = document.createElement("a");
   link.href = url;
   link.download = format === "csv" ? "usage.csv" : "usage.json";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Authenticated artifact download: a plain <a href> can't attach the Bearer token, so an
+// auth-enabled instance would 401. Fetch with the header (like downloadUsage) and save the blob.
+async function downloadArtifact(artifactId, filename) {
+  const headers = new Headers();
+  const token = localStorage.getItem("atlasApiToken");
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(`/api/artifacts/${encodeURIComponent(artifactId)}/content`, { headers });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename || "artifact";
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -1363,7 +1385,7 @@ function closeModals() {
 
 async function deleteWorker(workerId) {
   const worker = state.workers.find((item) => item.id === workerId);
-  if (!confirm(`Delete worker ${worker?.name || workerId}? Its workspaces will be removed too.`)) return;
+  if (!confirm(`Delete worker ${worker?.name || workerId}? Its workspaces will be removed too. Workers with job history are kept for audit and cannot be deleted.`)) return;
   await api(`/api/workers/${workerId}`, { method: "DELETE" });
   if (state.selectedJobId) state.selectedJobId = null;
   toast("Worker deleted");
@@ -1408,6 +1430,11 @@ document.addEventListener("click", async (event) => {
   const pollButton = event.target.closest(".poll-worker");
   if (pollButton) {
     await pollWorker(pollButton.dataset.workerId).catch((error) => toast(error.message));
+    return;
+  }
+  const downloadArtifactButton = event.target.closest(".download-artifact");
+  if (downloadArtifactButton) {
+    await downloadArtifact(downloadArtifactButton.dataset.artifactId, downloadArtifactButton.dataset.filename).catch((error) => toast(error.message));
     return;
   }
   const workflowItem = event.target.closest(".workflow-item");
