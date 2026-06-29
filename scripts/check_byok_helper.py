@@ -16,6 +16,10 @@ from atlas.db import Database
 SECRET = "sk-super-secret-byok-value-9f83a1c2"
 
 
+def _boom(*_args: object, **_kwargs: object) -> None:
+    raise OSError("simulated disk error")
+
+
 def main() -> None:
     with TemporaryDirectory() as tmp:
         db = Database(Path(tmp) / "atlas.sqlite")
@@ -72,6 +76,27 @@ def main() -> None:
         assert stat.S_IMODE(loose.stat().st_mode) == 0o600, oct(loose.stat().st_mode)
         body = loose.read_text(encoding="utf-8")
         assert "OTHER=keep" in body and "ANTHROPIC_API_KEY=sk-y-secret" in body, body
+
+        # 7. atomic_write_0600: a failed swap must leave the previous secret file intact (no
+        #    truncation) and clean up the temp — unlike an in-place O_TRUNC.
+        from atlas.db import atomic_write_0600
+
+        secret_file = Path(tmp) / "atomic.env"
+        atomic_write_0600(secret_file, b"OPENAI_API_KEY=v1\n")
+        assert secret_file.read_bytes() == b"OPENAI_API_KEY=v1\n"
+        assert stat.S_IMODE(secret_file.stat().st_mode) == 0o600
+        original_replace = os.replace
+        os.replace = _boom  # simulate a disk error during the atomic swap
+        try:
+            atomic_write_0600(secret_file, b"OPENAI_API_KEY=v2\n")
+        except OSError:
+            pass
+        else:
+            raise AssertionError("atomic_write_0600 must propagate the failure")
+        finally:
+            os.replace = original_replace
+        assert secret_file.read_bytes() == b"OPENAI_API_KEY=v1\n", "failed write must preserve the original"
+        assert not list(secret_file.parent.glob(".atomic.env.tmp-*")), "failed write must clean up its temp"
 
     print("byok helper check ok")
 

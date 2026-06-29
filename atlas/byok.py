@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .db import Database
+from .db import Database, atomic_write_0600
 
 # Default env var per provider; override with --env-var for anything else.
 _PROVIDER_ENV_VARS = {
@@ -39,10 +39,11 @@ def env_var_for(provider: str, override: str | None = None) -> str:
 
 
 def _write_env_file(path: Path, env_var: str, value: str) -> None:
-    """Upsert `env_var=value` in a KEY=VALUE env file, created/kept at 0600 so the secret
-    is never momentarily world-readable (umask only clears bits, so 0o600 holds)."""
+    """Upsert `env_var=value` in a KEY=VALUE env file. The new content is written through a
+    0600 temp file and atomically replaced, so a short write or disk error can never leave
+    the existing env file truncated/empty (it stays intact until the replace succeeds), and
+    the secret is never written to a world-readable file."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
     if path.exists():
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -56,15 +57,7 @@ def _write_env_file(path: Path, env_var: str, value: str) -> None:
             out.append(line)
     if not replaced:
         out.append(f"{env_var}={value}")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        # fchmod BEFORE writing: an existing file keeps its old (maybe 0644) mode through
-        # O_CREAT, but O_TRUNC has emptied it, so tightening to 0600 now means the secret
-        # bytes are only ever written to a 0600 file — no world-readable window.
-        os.fchmod(fd, 0o600)
-        os.write(fd, ("\n".join(out) + "\n").encode("utf-8"))
-    finally:
-        os.close(fd)
+    atomic_write_0600(path, ("\n".join(out) + "\n").encode("utf-8"))
 
 
 def inject_worker_key(
