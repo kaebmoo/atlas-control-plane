@@ -65,6 +65,43 @@ def atomic_write_0600(path: Path, data: bytes) -> None:
         raise
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write text atomically (unique temp + fsync + os.replace) at default perms. For durable
+    artifacts that must never be left truncated by a crash or an in-place rewrite — CDR bills,
+    signed usage exports — but that are meant to be read by other users, unlike the 0600
+    secret writer above."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+_SAFE_COLUMN_CHARS = set("abcdefghijklmnopqrstuvwxyz_")
+
+
+def _set_clause(fields: dict[str, Any]) -> str:
+    """Build a `col = ?, ...` assignment clause for an UPDATE, asserting every key is a bare
+    [a-z_] identifier. Values are always bound with `?`; this constrains the only
+    string-interpolated part (the column names) so the clause is injection-safe BY
+    CONSTRUCTION — not merely because every current caller happens to pass literal column
+    names. A non-identifier key (e.g. attacker-controlled) raises instead of reaching SQL."""
+    bad = [key for key in fields if not key or set(key) - _SAFE_COLUMN_CHARS]
+    if bad:
+        raise ValueError(f"unsafe column name(s) in update: {bad}")
+    return ", ".join(f"{key} = ?" for key in fields)
+
+
 def encode_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
 
@@ -696,7 +733,7 @@ class Database:
         if not fields:
             return user
         fields["updated_at"] = now_iso()
-        assignments = ", ".join(f"{key} = ?" for key in fields)
+        assignments = _set_clause(fields)
         try:
             with self._lock, self.connect() as conn:
                 conn.execute(f"UPDATE users SET {assignments} WHERE id = ?", [*fields.values(), user_id])
@@ -868,7 +905,7 @@ class Database:
         if not fields:
             return self.get_workflow_definition(definition_id)
         fields["updated_at"] = now_iso()
-        assignments = ", ".join(f"{key} = ?" for key in fields)
+        assignments = _set_clause(fields)
         with self._lock, self.connect() as conn:
             cursor = conn.execute(f"UPDATE workflow_definitions SET {assignments} WHERE id = ?", list(fields.values()) + [definition_id])
         if cursor.rowcount:
@@ -944,7 +981,7 @@ class Database:
             if key in fields:
                 fields[key] = encode_json(fields[key])
         fields["updated_at"] = now_iso()
-        assignments = ", ".join(f"{key} = ?" for key in fields)
+        assignments = _set_clause(fields)
         with self._lock, self.connect() as conn:
             conn.execute(f"UPDATE workflow_runs SET {assignments} WHERE id = ?", list(fields.values()) + [run_id])
 
@@ -962,7 +999,7 @@ class Database:
             if key in fields:
                 fields[key] = encode_json(fields[key])
         fields = {"state": state, **fields, "updated_at": now_iso()}
-        assignments = ", ".join(f"{key} = ?" for key in fields)
+        assignments = _set_clause(fields)
         if allowed_from is None:
             predicate, extra = "state NOT IN ('succeeded', 'failed', 'cancelled')", []
         else:
@@ -1024,7 +1061,7 @@ class Database:
             if key in fields:
                 fields[key] = encode_json(fields[key])
         fields["updated_at"] = now_iso()
-        assignments = ", ".join(f"{key} = ?" for key in fields)
+        assignments = _set_clause(fields)
         with self._lock, self.connect() as conn:
             conn.execute(f"UPDATE workflow_nodes SET {assignments} WHERE id = ?", list(fields.values()) + [node_id])
 
@@ -1256,7 +1293,7 @@ class Database:
         if not fields:
             return self.get_workflow_trigger(trigger_id)
         fields["updated_at"] = now_iso()
-        assignments = ", ".join(f"{key} = ?" for key in fields)
+        assignments = _set_clause(fields)
         with self._lock, self.connect() as conn:
             cursor = conn.execute(f"UPDATE workflow_triggers SET {assignments} WHERE id = ?", list(fields.values()) + [trigger_id])
         if cursor.rowcount:
@@ -1537,7 +1574,7 @@ class Database:
         nonce = secrets.token_bytes(16)
         plaintext = token.encode("utf-8")
         encryption_key, mac_key = self._worker_token_keys()
-        ciphertext = bytes(value ^ mask for value, mask in zip(plaintext, self._keystream(encryption_key, nonce, len(plaintext))))
+        ciphertext = bytes(value ^ mask for value, mask in zip(plaintext, self._keystream(encryption_key, nonce, len(plaintext)), strict=True))
         tag = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
         encoded = base64.urlsafe_b64encode(nonce + ciphertext + tag).decode("ascii")
         return _WORKER_TOKEN_MARKER + encoded
@@ -1563,7 +1600,7 @@ class Database:
         actual_tag = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
         if not hmac.compare_digest(actual_tag, expected_tag):
             raise ValueError("stored worker token could not be authenticated; check ATLAS_SECRET_KEY")
-        plaintext = bytes(value ^ mask for value, mask in zip(ciphertext, self._keystream(encryption_key, nonce, len(ciphertext))))
+        plaintext = bytes(value ^ mask for value, mask in zip(ciphertext, self._keystream(encryption_key, nonce, len(ciphertext)), strict=True))
         return plaintext.decode("utf-8")
 
     def _worker_token_keys(self) -> tuple[bytes, bytes]:
@@ -1816,7 +1853,7 @@ class Database:
         if not fields:
             return
         fields["updated_at"] = now_iso()
-        assignments = ", ".join(f"{key} = ?" for key in fields)
+        assignments = _set_clause(fields)
         values = list(fields.values()) + [job_id]
         with self._lock, self.connect() as conn:
             conn.execute(f"UPDATE jobs SET {assignments} WHERE id = ?", values)

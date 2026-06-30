@@ -75,8 +75,8 @@ def validate_pack(bundle: Any) -> dict[str, Any]:
         # bad pack fails validation up front instead of crashing mid-import.
         try:
             int(workflow.get("version") or 1)
-        except (TypeError, ValueError):
-            raise ValueError(f"pack workflow at index {index} has a non-integer version: {workflow.get('version')!r}")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"pack workflow at index {index} has a non-integer version: {workflow.get('version')!r}") from exc
         # Run the real engine validators — never a bypass. Policy caps too, so an
         # imported pack cannot exceed limits the workflow API would reject.
         validate_workflow_graph(workflow.get("graph") or {}, workflow.get("policy"))

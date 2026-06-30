@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .db import Database, now_iso
+from .db import Database, atomic_write_text, now_iso
 
 
 USAGE_EXPORT_SCHEMA = "atlas.usage.v1"
@@ -152,8 +152,8 @@ def write_signed_usage_export(
     to_at: str | None = None,
 ) -> dict[str, Any]:
     export = create_signed_usage_export(db, secret_key, from_at, to_at)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(export, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    # Atomic: re-exporting to the same path must never truncate a prior signed export on crash.
+    atomic_write_text(path, json.dumps(export, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n")
     return export
 
 

@@ -439,7 +439,6 @@ class WorkflowRunner:
         choice: str | None,
     ) -> None:
         node_map = {node["id"]: node for node in graph["nodes"]}
-        gate = node_map[approval["node_key"]]
         counters = run.get("counters") or {}
         completed_nodes = counters.setdefault("completed_nodes", [])
         completed = set(completed_nodes)

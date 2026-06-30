@@ -11,13 +11,12 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
-import os
 import re
-import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from atlas.db import atomic_write_text
 from .fleet import Registry, pull_usage
 
 # Marker noting the schema is proposed (the CSV carries it as x-schema, per the GA
@@ -135,28 +134,9 @@ def write_cdr(
         if name in collisions:
             name = f"{name}-{hashlib.sha256(tenant.encode('utf-8')).hexdigest()[:8]}"
         path = out_dir / f"cdr-{name}-{period}.csv"
-        _atomic_write_text(path, cdr_csv(cdr_by_tenant[tenant]))
+        atomic_write_text(path, cdr_csv(cdr_by_tenant[tenant]))
         written[tenant] = path
     return written
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write text via a temp file + os.replace so a crash (or a re-export of an existing
-    period) can never truncate a previously-good billing CSV in place. Not 0600 — CDRs are
-    meant to be read by NT's ingest, unlike the secret sidecar."""
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
-    try:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
 
 
 def pull_and_aggregate(
