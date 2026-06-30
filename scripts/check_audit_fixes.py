@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 
 from atlas.app import _LIMIT_CAP, _parse_limit, _validate_artifact_payload, cli_config
 from atlas.byok import _write_env_file
-from atlas.db import Database, atomic_write_0600, now_iso
+from atlas.db import Database, _set_clause, atomic_write_0600, atomic_write_text, now_iso
 from atlas.jobs import JobManager
 from atlas.packs import _validate_pack_references
 from atlas.thclaws_client import SseEvent, ThClawsError, extract_session_id, extract_text, iter_sse
@@ -191,6 +191,31 @@ def check_schedule_advances_past_stuck_claim(db: Database) -> None:
     assert updated["next_fire_at"] != past, "stuck schedule slot must advance"
     assert _parse_utc(updated["next_fire_at"]) > datetime.now(UTC), "advanced slot must be in the future"
     assert len(db.list_workflow_runs(limit=10)) == runs_before, "a duplicate slot must not start a run"
+
+
+def check_set_clause_guard() -> None:
+    """_set_clause must reject any non-[a-z_] column name, making the f-string UPDATE builders
+    injection-safe by construction (not merely because callers happen to pass literal names)."""
+    assert _set_clause({"name": 1, "updated_at": 2}) == "name = ?, updated_at = ?"
+    for bad in ("name=1; DROP", "a b", "Name", "col;", "x'", ""):
+        try:
+            _set_clause({bad: 1})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"unsafe column name must be rejected: {bad!r}")
+
+
+def check_atomic_write_text(tmp: Path) -> None:
+    """atomic_write_text replaces atomically and never leaves a temp behind; a re-write keeps
+    the file valid (durable-artifact write for CDR bills / signed usage exports)."""
+    path = tmp / "artifact.json"
+    atomic_write_text(path, '{"a":1}')
+    assert path.read_text() == '{"a":1}'
+    atomic_write_text(path, '{"a":2}')  # re-write to the same path
+    assert path.read_text() == '{"a":2}'
+    leftovers = [p.name for p in path.parent.glob(".artifact.json.tmp-*")]
+    assert not leftovers, f"atomic_write_text left a temp file: {leftovers}"
 
 
 def check_atomic_write_concurrent() -> None:
@@ -457,6 +482,8 @@ def main() -> None:
         check_iter_sse_deadline()
         check_resume_rearm(Database(Path(tmp) / "rearm.sqlite"))
         check_pack_workspace_ownership(Database(Path(tmp) / "packws.sqlite"))
+        check_set_clause_guard()
+        check_atomic_write_text(Path(tmp))
     print("audit fixes check ok")
 
 
