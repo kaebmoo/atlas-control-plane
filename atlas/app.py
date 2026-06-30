@@ -868,7 +868,14 @@ class AtlasHandler(BaseHTTPRequestHandler):
             return True
         authorization = self.headers.get("Authorization") or ""
         bearer_token = authorization[7:] if authorization.startswith("Bearer ") else None
-        raw_token = bearer_token or parse_qs(urlparse(self.path).query).get("token", [None])[0]
+        raw_token = bearer_token
+        if not raw_token:
+            # The ?token= query fallback exists ONLY for browser EventSource, which cannot set
+            # an Authorization header — and is restricted to the SSE event streams so a
+            # long-lived token can't be placed in (and logged from) arbitrary request URLs.
+            parsed = urlparse(self.path)
+            if self.command == "GET" and parsed.path.endswith("/events"):
+                raw_token = parse_qs(parsed.query).get("token", [None])[0]
         if not raw_token:
             return False
         legacy_token = runtime.config.api_token
