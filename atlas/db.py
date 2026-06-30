@@ -42,7 +42,10 @@ def atomic_write_0600(path: Path, data: bytes) -> None:
     (BYOK env, fleet token sidecar)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    # Unique per call: PID alone collides across concurrent threads/calls in one process,
+    # where one writer's os.replace would yank the temp out from under another (FileNotFoundError)
+    # or two writers would interleave on the same temp path.
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
@@ -87,10 +90,12 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
         "counters",
         "details",
         "graph",
+        "graph_snapshot",
         "input",
         "metadata",
         "payload",
         "policy",
+        "policy_snapshot",
     }
     for key in list_fields | json_fields:
         if key in data:
@@ -436,6 +441,21 @@ def _migration_003_approval_columns(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_004_workflow_run_snapshot(conn: sqlite3.Connection) -> None:
+    # Snapshot the graph/policy a run started with, so resume/recovery executes the SAME
+    # definition the run began on even if the live workflow_definition is edited or deleted
+    # mid-flight. NULL on rows created before this migration -> callers fall back to the
+    # live definition for those legacy runs.
+    _add_missing_columns(
+        conn,
+        "workflow_runs",
+        {
+            "graph_snapshot": "TEXT",
+            "policy_snapshot": "TEXT",
+        },
+    )
+
+
 # Ordered, append-only migration steps. A step is either a SQL string (run via
 # executescript) or a callable(conn). The 1-based index is the schema version.
 # Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
@@ -447,6 +467,7 @@ MIGRATIONS: list[str | Any] = [
     SCHEMA,
     _migration_002_jobs_columns,
     _migration_003_approval_columns,
+    _migration_004_workflow_run_snapshot,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -870,9 +891,10 @@ class Database:
                 """
                 INSERT INTO workflow_runs(
                   id, workflow_definition_id, name, state, input, current_nodes,
-                  counters, error, created_at, started_at, finished_at, updated_at
+                  counters, error, created_at, started_at, finished_at, updated_at,
+                  graph_snapshot, policy_snapshot
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -887,6 +909,8 @@ class Database:
                     payload.get("started_at"),
                     payload.get("finished_at"),
                     now,
+                    encode_json(payload["graph_snapshot"]) if payload.get("graph_snapshot") is not None else None,
+                    encode_json(payload["policy_snapshot"]) if payload.get("policy_snapshot") is not None else None,
                 ),
             )
         self.audit("workflow_run.create", "workflow_run", run_id, {"workflow_definition_id": payload.get("workflow_definition_id")})
@@ -923,6 +947,25 @@ class Database:
         assignments = ", ".join(f"{key} = ?" for key in fields)
         with self._lock, self.connect() as conn:
             conn.execute(f"UPDATE workflow_runs SET {assignments} WHERE id = ?", list(fields.values()) + [run_id])
+
+    def finalize_workflow_run(self, run_id: str, state: str, **fields: Any) -> bool:
+        """Atomically move a run to a terminal state, but ONLY if it is not already
+        terminal. Returns True iff this call performed the transition. The WHERE predicate
+        makes the check-and-set a single SQL statement, so a finishing runner thread can
+        never overwrite a concurrent cancel (cancelled -> succeeded) nor double-emit
+        run_finished/usage."""
+        for key in ("current_nodes", "counters"):
+            if key in fields:
+                fields[key] = encode_json(fields[key])
+        fields = {"state": state, **fields, "updated_at": now_iso()}
+        assignments = ", ".join(f"{key} = ?" for key in fields)
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE workflow_runs SET {assignments} "
+                "WHERE id = ? AND state NOT IN ('succeeded', 'failed', 'cancelled')",
+                list(fields.values()) + [run_id],
+            )
+        return cursor.rowcount > 0
 
     def create_workflow_node(self, payload: dict[str, Any]) -> dict[str, Any]:
         node_id = payload.get("id") or new_id("wfn")
@@ -1397,6 +1440,8 @@ class Database:
         tags = payload.get("tags") or []
         if isinstance(tags, str):
             tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
+        if not payload.get("base_url"):
+            raise ValueError("base_url is required")
         base_url = str(payload["base_url"]).rstrip("/")
         with self._lock, self.connect() as conn:
             existing = conn.execute("SELECT id, created_at, token FROM workers WHERE id = ? OR base_url = ?", (worker_id, base_url)).fetchone()
@@ -1572,6 +1617,9 @@ class Database:
         tags = payload.get("tags") or []
         if isinstance(tags, str):
             tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
+        for required in ("worker_id", "workspace_key", "workspace_dir"):
+            if not payload.get(required):
+                raise ValueError(f"{required} is required")
         with self._lock, self.connect() as conn:
             existing = conn.execute(
                 "SELECT id, created_at FROM workspaces WHERE id = ? OR (worker_id = ? AND workspace_key = ?)",
@@ -1763,9 +1811,34 @@ class Database:
         with self._lock, self.connect() as conn:
             conn.execute(f"UPDATE jobs SET {assignments} WHERE id = ?", values)
 
-    def mark_cancel_requested(self, job_id: str) -> None:
-        self.update_job(job_id, cancel_requested=1, state="cancel_requested")
-        self.audit("job.cancel_requested", "job", job_id)
+    def mark_cancel_requested(self, job_id: str) -> bool:
+        """Request cancellation atomically, but ONLY if the job is not already terminal —
+        a completion landing between a caller's state read and this write must not regress a
+        succeeded/failed job back to 'cancel_requested'. Returns True iff the flag was set."""
+        now = now_iso()
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE jobs SET cancel_requested = 1, state = 'cancel_requested', updated_at = ? "
+                "WHERE id = ? AND state NOT IN ('succeeded', 'failed', 'cancelled')",
+                (now, job_id),
+            )
+        if cursor.rowcount:
+            self.audit("job.cancel_requested", "job", job_id)
+        return cursor.rowcount > 0
+
+    def try_start_job(self, job_id: str) -> bool:
+        """Atomically claim a queued job into 'running', but ONLY if it is still queued and no
+        cancel has been requested. Returns True iff this call started it. The single
+        check-and-set UPDATE closes the TOCTOU window where a cancel landing between a plain
+        is_cancel_requested() check and the state write would still open the worker stream."""
+        now = now_iso()
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE jobs SET state = 'running', started_at = ?, updated_at = ? "
+                "WHERE id = ? AND state = 'queued' AND cancel_requested = 0",
+                (now, now, job_id),
+            )
+        return cursor.rowcount > 0
 
     def append_job_event(self, job_id: str, event_type: str, payload: Any = None, text: str | None = None) -> dict[str, Any]:
         with self._lock, self.connect() as conn:

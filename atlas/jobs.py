@@ -100,9 +100,10 @@ class JobManager:
         job = self.db.get_job(job_id)
         if not job:
             raise ValueError(f"Unknown job_id: {job_id}")
-        if job["state"] in TERMINAL_STATES:
-            return job
-        self.db.mark_cancel_requested(job_id)
+        if not self.db.mark_cancel_requested(job_id):
+            # The job completed between our read and the cancel write — respect its terminal
+            # state instead of regressing it to cancel_requested.
+            return self.db.get_job(job_id) or job
         self.db.append_job_event(job_id, "cancel_requested", {"message": "Best-effort cancel requested"})
         return self.db.get_job(job_id) or job
 
@@ -140,6 +141,24 @@ class JobManager:
         for worker in self.db.list_workers():
             results.append(self.poll_worker(worker["id"]))
         return results
+
+    def reconcile_jobs(self) -> None:
+        """After an Atlas restart no job threads survive, so any job still queued/running in
+        the DB is orphaned — its thread is gone but the row says it is in flight. Fail those
+        jobs so callers see a terminal state and usage is recorded, instead of a job wedged
+        'running' forever. Idempotent: only touches non-terminal jobs with no live thread."""
+        for job in self.db.list_jobs(limit=10000):
+            if job["state"] in TERMINAL_STATES:
+                continue
+            with self._lock:
+                active = self._threads.get(job["id"])
+            if active and active.is_alive():
+                continue
+            error = "Atlas restarted while the job was in flight"
+            self.db.update_job(job["id"], state="failed", error=error, finished_at=now_iso())
+            self.db.append_job_event(job["id"], "state", {"state": "failed", "reason": "atlas_restarted"})
+            self.db.audit("job.failed", "job", job["id"], {"error": error})
+            self._record_job_usage(job["id"])
 
     def _start_thread(self, job_id: str) -> None:
         context = contextvars.copy_context()
@@ -186,7 +205,18 @@ class JobManager:
                 self._threads.pop(job_id, None)
             return
 
-        self.db.update_job(job_id, state="running", started_at=now_iso())
+        # Atomically claim queued -> running, but only if no cancel has been requested. This
+        # closes the TOCTOU window where a cancel landing between a plain check and the state
+        # write would still open the worker stream (a remote side effect on a cancelled job).
+        if not self.db.try_start_job(job_id):
+            if self.db.is_cancel_requested(job_id):
+                self.db.update_job(job_id, state="cancelled", finished_at=now_iso())
+                self.db.append_job_event(job_id, "state", {"state": "cancelled"})
+                self.db.audit("job.cancelled", "job", job_id)
+                self._record_job_usage(job_id)
+            with self._lock:
+                self._threads.pop(job_id, None)
+            return
         self.db.append_job_event(job_id, "state", {"state": "running"})
         client = ThClawsClient(worker["base_url"], worker.get("token"), timeout=self.request_timeout_seconds)
         done_seen = False

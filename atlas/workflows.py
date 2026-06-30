@@ -23,6 +23,17 @@ _EVENT_TRIGGER_FILTERS = {
     "artifact_created": {"source_workflow_definition_id": "workflow_definition_id", "key": "key", "kind": "kind"},
     "worker_status_changed": {"worker_id": "worker_id", "status": "status"},
 }
+# Allowed config keys for the trigger types whose config is a CLOSED object in
+# docs/specs/workflow-trigger.schema.json (additionalProperties:false) — a misspelled filter
+# key (e.g. "kee" instead of "key") would otherwise be silently ignored, turning a narrow
+# filter into a match-all. manual/webhook are intentionally absent: the schema declares their
+# config as an open object, so arbitrary keys are valid and must NOT be rejected.
+_TRIGGER_CONFIG_KEYS = {
+    "schedule": {"interval_minutes", "daily_time"},
+    "workflow_run_completed": {"source_workflow_definition_id", "state"},
+    "artifact_created": {"source_workflow_definition_id", "key", "kind"},
+    "worker_status_changed": {"worker_id", "status"},
+}
 # Backstop against runaway event-driven automation (e.g. A->B->A completion-trigger loops).
 MAX_TRIGGER_CHAIN_DEPTH = 20
 LOGGER = logging.getLogger(__name__)
@@ -211,11 +222,30 @@ class WorkflowRunner:
             raise ValueError(f"Unknown workflow_definition_id: {workflow_definition_id}")
         graph = definition["graph"]
         policy = definition.get("policy") or {}
-        input = input or {}
+        if input is None:
+            input = {}
+        if not isinstance(input, dict):
+            # Normalize only None -> {}; a falsy non-object ([], "", 0, False) must be rejected,
+            # not silently coerced to an empty object.
+            raise ValueError("workflow input must be an object")
         validate_workflow_graph(graph, policy)
-        run = self._create_run(graph, input, workflow_definition_id, definition.get("name") or "Workflow run")
+        run = self._create_run(graph, policy, input, workflow_definition_id, definition.get("name") or "Workflow run")
         self._start_background(run["id"], graph, policy, input)
         return self.db.get_workflow_run(run["id"]) or run
+
+    def _run_graph_policy(self, run: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Resolve the graph+policy a run must execute. Prefer the snapshot captured at run
+        creation, so resume/recovery runs the SAME definition the run started on even after
+        the live workflow_definition is edited or deleted. Fall back to the live definition
+        only for legacy runs created before snapshots existed; raise if neither is available."""
+        graph = run.get("graph_snapshot")
+        if isinstance(graph, dict) and graph.get("nodes") is not None:
+            policy = run.get("policy_snapshot")
+            return graph, policy if isinstance(policy, dict) else {}
+        definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
+        if not definition:
+            raise ValueError("workflow definition is unavailable; run cannot be resumed")
+        return definition["graph"], definition.get("policy") or {}
 
     def pause_run(self, run_id: str) -> dict[str, Any]:
         with self._thread_lock:
@@ -238,9 +268,7 @@ class WorkflowRunner:
             if run["state"] == "recovery_required":
                 if not retry_interrupted:
                     raise ValueError("workflow run requires explicit retry_interrupted authorization")
-                definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
-                if not definition:
-                    raise ValueError("workflow definition is unavailable; run cannot be recovered")
+                graph, policy = self._run_graph_policy(run)
                 counters = run.get("counters") or {}
                 completed = set(counters.get("completed_nodes") or [])
                 recovery = counters.get("recovery") or {}
@@ -256,18 +284,16 @@ class WorkflowRunner:
                 self.db.update_workflow_run(run_id, state="running", current_nodes=ready, counters=counters, error=None, finished_at=None)
                 self.db.append_workflow_event(run_id, "recovery_retry_authorized", {"nodes": ready})
                 self.db.audit("workflow.recovery_retry_authorized", "workflow_run", run_id, {"nodes": ready})
-                self._spawn_thread(run_id, definition["graph"], definition.get("policy") or {}, run.get("input") or {})
+                self._spawn_thread(run_id, graph, policy, run.get("input") or {})
                 return self.db.get_workflow_run(run_id) or run
             if run["state"] != "paused":
                 raise ValueError(f"workflow run {run_id} cannot be resumed from {run['state']}")
-            definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
-            if not definition:
-                raise ValueError("workflow definition is unavailable; run cannot be resumed")
+            graph, policy = self._run_graph_policy(run)
             self.db.update_workflow_run(run_id, state="running", error=None, finished_at=None)
             self.db.append_workflow_event(run_id, "run_resumed")
             active = self._threads.get(run_id)
             if not active or not active.is_alive():
-                self._spawn_thread(run_id, definition["graph"], definition.get("policy") or {}, run.get("input") or {})
+                self._spawn_thread(run_id, graph, policy, run.get("input") or {})
         return self.db.get_workflow_run(run_id) or run
 
     def reconcile_runs(self) -> None:
@@ -278,11 +304,12 @@ class WorkflowRunner:
                 active = self._threads.get(run["id"])
                 if active and active.is_alive():
                     continue
-                definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
-                if not definition:
+                try:
+                    graph, policy = self._run_graph_policy(run)
+                except ValueError:
                     self._mark_recovery_required(run, [], "workflow definition is unavailable")
                     continue
-                node_map = {node["id"]: node for node in definition["graph"]["nodes"]}
+                node_map = {node["id"]: node for node in graph["nodes"]}
                 completed = set((run.get("counters") or {}).get("completed_nodes") or [])
                 runtime_nodes = self.db.list_workflow_nodes(run["id"])
                 interrupted = []
@@ -311,7 +338,7 @@ class WorkflowRunner:
                 if ready:
                     self.db.append_workflow_event(run["id"], "recovery_control_plane_resumed", {"nodes": ready})
                     self.db.audit("workflow.recovery_control_plane_resumed", "workflow_run", run["id"], {"nodes": ready})
-                    self._spawn_thread(run["id"], definition["graph"], definition.get("policy") or {}, run.get("input") or {})
+                    self._spawn_thread(run["id"], graph, policy, run.get("input") or {})
                 else:
                     counters = run.get("counters") or {}
                     self._finish_run(run["id"], "failed" if counters.get("failed_nodes") else "succeeded", counters, run.get("error"))
@@ -337,7 +364,10 @@ class WorkflowRunner:
                 raise ValueError(f"Unknown workflow_run_id: {run_id}")
             if run["state"] in {"succeeded", "failed", "cancelled"}:
                 return run
-            self.db.update_workflow_run(run_id, state="cancelled", current_nodes=[], finished_at=now_iso())
+            if not self.db.finalize_workflow_run(run_id, "cancelled", current_nodes=[], finished_at=now_iso()):
+                # The runner thread finished the run between our read and this write — respect
+                # its terminal state instead of clobbering it.
+                return self.db.get_workflow_run(run_id) or run
             self.db.cancel_pending_approvals(run_id)
             self.db.append_workflow_event(run_id, "run_cancelled")
             self.db.append_workflow_event(run_id, "run_finished", {"state": "cancelled"})
@@ -353,9 +383,7 @@ class WorkflowRunner:
             approval, run = self._pending_approval_context(approval_id)
             if approval.get("choices"):
                 raise ValueError("approval requires a branch choice")
-            definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
-            if not definition:
-                raise ValueError("workflow definition is unavailable; approval cannot resume the run")
+            graph, policy = self._run_graph_policy(run)
             runtime_node = None
             if approval.get("workflow_node_id"):
                 runtime_node = self.db.get_workflow_node(approval["workflow_node_id"])
@@ -370,13 +398,13 @@ class WorkflowRunner:
                 node_key=approval["node_key"],
             )
             if runtime_node:
-                self._continue_human_gate_decision(approval, run, definition, runtime_node, None)
+                self._continue_human_gate_decision(approval, run, graph, policy, runtime_node, None)
             else:
                 counters["requires_human_after_iterations_approved"] = True
                 self.db.update_workflow_run(run["id"], state="running", counters=counters, error=None, finished_at=None)
                 active = self._threads.get(run["id"])
                 if not active or not active.is_alive():
-                    self._spawn_thread(run["id"], definition["graph"], definition.get("policy") or {}, run.get("input") or {})
+                    self._spawn_thread(run["id"], graph, policy, run.get("input") or {})
         return {"approval": approval, "run": self.db.get_workflow_run(run["id"]) or run}
 
     def choose_approval(self, approval_id: str, choice: str) -> dict[str, Any]:
@@ -384,9 +412,7 @@ class WorkflowRunner:
             approval, run = self._pending_approval_context(approval_id)
             if not approval.get("choices"):
                 raise ValueError("approval does not declare branch choices")
-            definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
-            if not definition:
-                raise ValueError("workflow definition is unavailable; approval cannot resume the run")
+            graph, policy = self._run_graph_policy(run)
             runtime_node = self.db.get_workflow_node(approval.get("workflow_node_id") or "")
             if not runtime_node or runtime_node["state"] != "waiting_for_human":
                 raise ValueError("approval workflow node is unavailable")
@@ -394,18 +420,18 @@ class WorkflowRunner:
             self.db.append_workflow_event(
                 run["id"], "approval_chosen", {"approval_id": approval_id, "choice": choice}, node_key=approval["node_key"]
             )
-            self._continue_human_gate_decision(approval, run, definition, runtime_node, choice)
+            self._continue_human_gate_decision(approval, run, graph, policy, runtime_node, choice)
         return {"approval": approval, "run": self.db.get_workflow_run(run["id"]) or run}
 
     def _continue_human_gate_decision(
         self,
         approval: dict[str, Any],
         run: dict[str, Any],
-        definition: dict[str, Any],
+        graph: dict[str, Any],
+        policy: dict[str, Any],
         runtime_node: dict[str, Any],
         choice: str | None,
     ) -> None:
-        graph = definition["graph"]
         node_map = {node["id"]: node for node in graph["nodes"]}
         gate = node_map[approval["node_key"]]
         counters = run.get("counters") or {}
@@ -434,7 +460,7 @@ class WorkflowRunner:
         self.db.update_workflow_run(run["id"], state="running", current_nodes=ready, counters=counters, error=None, finished_at=None)
         active = self._threads.get(run["id"])
         if not active or not active.is_alive():
-            self._spawn_thread(run["id"], graph, definition.get("policy") or {}, run.get("input") or {})
+            self._spawn_thread(run["id"], graph, policy, run.get("input") or {})
 
     def reject_approval(self, approval_id: str) -> dict[str, Any]:
         with self._thread_lock:
@@ -475,14 +501,18 @@ class WorkflowRunner:
         name: str = "Workflow run",
     ) -> dict[str, Any]:
         policy = policy or {}
-        input = input or {}
+        if input is None:
+            input = {}
+        if not isinstance(input, dict):
+            raise ValueError("workflow input must be an object")
         validate_workflow_graph(graph, policy)
-        run = self._create_run(graph, input, workflow_definition_id, name)
+        run = self._create_run(graph, policy, input, workflow_definition_id, name)
         return self._execute_run(run["id"], graph, policy, input)
 
     def _create_run(
         self,
         graph: dict[str, Any],
+        policy: dict[str, Any],
         input: dict[str, Any],
         workflow_definition_id: str | None,
         name: str,
@@ -494,6 +524,10 @@ class WorkflowRunner:
                 "state": "running",
                 "input": input,
                 "current_nodes": [graph["start"]],
+                # Snapshot the graph+policy this run starts on, so resume/recovery executes
+                # the same definition even if the live one is edited or deleted mid-run.
+                "graph_snapshot": graph,
+                "policy_snapshot": policy or {},
                 "counters": {
                     "jobs_started": 0,
                     "budget_units_spent": 0,
@@ -833,14 +867,18 @@ class WorkflowRunner:
             self._threads.pop(run_id, None)
 
     def _finish_run(self, run_id: str, state: str, counters: dict[str, Any], error: str | None = None) -> None:
-        self.db.update_workflow_run(
+        won = self.db.finalize_workflow_run(
             run_id,
-            state=state,
+            state,
             current_nodes=[],
             counters=counters,
             error=error,
             finished_at=now_iso(),
         )
+        if not won:
+            # A concurrent cancel already moved the run to a terminal state; do not overwrite
+            # it (cancelled -> succeeded) or double-emit run_finished / usage.
+            return
         self.db.append_workflow_event(run_id, "run_finished", {"state": state, "error": error})
         self._record_workflow_usage(run_id)
         self._notify_run_completed(run_id)
@@ -1107,6 +1145,10 @@ class WorkflowRunner:
             if job and job["state"] in _JOB_TERMINAL_STATES:
                 return job
             if time.monotonic() >= wait_deadline:
+                # The job is still running remotely; cancel it before bailing so the worker
+                # isn't left executing for a result no run will ever consume (matches the
+                # run-cancel and max_minutes deadline paths above).
+                self._cancel_job(job_id)
                 raise TimeoutError(f"workflow job timed out: {job_id}")
             time.sleep(self.poll_interval_seconds)
 
@@ -1182,17 +1224,30 @@ class WorkflowTriggerService:
             next_fire_at = trigger.get("next_fire_at") or next_fire_at_for_trigger(trigger, now)
             if _parse_utc(next_fire_at) > now:
                 continue
-            self.fire_trigger(
+            result = self.fire_trigger(
                 trigger["id"],
                 payload={"trigger_id": trigger["id"], "scheduled_at": next_fire_at},
                 dedupe_key=f"{trigger['id']}:{next_fire_at}",
             )
+            # If the slot was already claimed — e.g. a crash after the dedupe claim but before
+            # the run started and next_fire_at advanced — fire_trigger ignores it as a
+            # duplicate and leaves next_fire_at pinned to this past slot, wedging the schedule
+            # forever. Step it to the next future slot so the schedule keeps progressing.
+            if result.get("run") is None and (result.get("event") or {}).get("state") == "ignored":
+                advanced = next_fire_at_for_trigger(trigger, now)
+                if advanced and _parse_utc(advanced) > now:
+                    self.db.update_workflow_trigger(trigger["id"], {"next_fire_at": advanced})
 
     def fire_trigger(self, trigger_id: str, payload: dict[str, Any] | None = None, dedupe_key: str | None = None) -> dict[str, Any]:
         trigger = self.db.get_workflow_trigger(trigger_id)
         if not trigger:
             raise ValueError(f"Unknown workflow_trigger_id: {trigger_id}")
-        payload = payload or {}
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            # Normalize only None -> {}; a falsy non-object ([], "", 0, False) must be rejected,
+            # not silently coerced, at this shared service boundary.
+            raise ValueError("workflow trigger payload must be an object")
 
         if not trigger.get("enabled"):
             # A disabled trigger must not start a run even on the direct API fire path.
@@ -1287,8 +1342,17 @@ def validate_workflow_trigger_payload(payload: dict[str, Any]) -> None:
     trigger_type = payload.get("type") or "manual"
     if not isinstance(trigger_type, str) or trigger_type not in _TRIGGER_STATES:
         raise ValueError(f"unsupported workflow trigger type: {trigger_type}")
-    if payload.get("config") is not None and not isinstance(payload.get("config"), dict):
+    config = payload.get("config")
+    if config is not None and not isinstance(config, dict):
         raise ValueError("workflow trigger config must be an object")
+    allowed = _TRIGGER_CONFIG_KEYS.get(trigger_type)
+    if allowed is not None:
+        # Only the closed-config types are checked; manual/webhook keep an open config (see
+        # the schema). A typo'd filter key must fail loudly, not silently widen the trigger to
+        # match every event (mirrors additionalProperties:false in the trigger schema).
+        unknown = set(config or {}) - allowed
+        if unknown:
+            raise ValueError(f"unknown workflow trigger config key(s) for {trigger_type}: {', '.join(sorted(unknown))}")
     if trigger_type == "schedule":
         next_fire_at_for_trigger(payload)
 
