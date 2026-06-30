@@ -53,3 +53,26 @@ If the gate cannot run, report the exact reason and run the closest available ch
 - Report file, line, impact, evidence, and reproduction steps.
 - Distinguish confirmed bugs from risks that require further validation.
 - Audits are read-only: do not modify source code unless the task explicitly asks.
+
+## Workflow: adding code & hunting bugs
+
+Three layers, distinct jobs. The **threat model** (`docs/specs/threat-model.md`) is the *oracle* —
+out-of-scope items and accepted risks are **not bugs**. **codex / claude** are *samplers* — they
+surface evidence; they cannot prove "zero bugs". `scripts/gate.sh` + `scripts/lint.sh` + branch
+protection are the *deterministic backstop* — they block regressions on every PR. Never make a
+sampler do the backstop's job ("audit until 0" never converges).
+
+**Adding code:** branch off `main` → write it within the invariants above → give every non-trivial
+behavior **one hermetic check** in `scripts/gate.sh` and **mutation-test it** (break the code; the
+gate must go red — if it stays green the check is worthless) → `./scripts/gate.sh` + `./scripts/lint.sh`
+green → PR → CI (`gate` + `lint`, required) → merge. Touch `/api/*` ⇒ also update `openapi.yaml` +
+api-reference EN + TH. A new trust boundary or assumption ⇒ update the threat model.
+
+**Hunting bugs:** scope it (one subsystem, a diff, or the trust-boundary matrix) — never "find all
+bugs". Validate each finding against the real execution path before reporting (see Bug Audits). Fix
+as a **class** (shared validator / safe-by-construction), not a point; then add a mutation-tested
+hermetic check; then re-audit your own fix (first passes leave edge residue). For sign-off-level
+claims use an **independent** reviewer — don't self-review. Low findings → `docs/specs/backlog.md`.
+
+**Done (per release):** linters clean + stress/fuzz green + every fix mutation-locked + threat model
+matches code. That is an **accepted baseline**, not a proof of bug-absence.
