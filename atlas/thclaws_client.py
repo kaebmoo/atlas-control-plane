@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -88,6 +89,7 @@ class ThClawsClient:
         session_id: str | None = None,
         max_tokens: int | None = None,
         x_callback: str | None = None,
+        stream_deadline: float | None = None,
     ) -> Iterator[SseEvent]:
         payload: dict[str, Any] = {
             "prompt": prompt,
@@ -106,28 +108,45 @@ class ThClawsClient:
 
         response = self._request("POST", "/agent/run", payload=payload, timeout=None)
         try:
-            yield from iter_sse(response)
+            yield from iter_sse(response, stream_deadline=stream_deadline)
         finally:
             response.close()
 
 
-def iter_sse(response: urllib.response.addinfourl) -> Iterator[SseEvent]:
+def iter_sse(
+    response: urllib.response.addinfourl,
+    max_event_bytes: int = 32 * 1024 * 1024,
+    stream_deadline: float | None = None,
+) -> Iterator[SseEvent]:
     event = "message"
     data_lines: list[str] = []
+    buffered = 0
     for raw in response:
+        # Check the deadline per LINE, not per yielded event: a worker sending only heartbeat
+        # comment lines (`: ping`) yields no events, so a per-event check would never run and the
+        # stream could pin the thread forever. monotonic compare is cheap enough per line.
+        if stream_deadline is not None and time.monotonic() > stream_deadline:
+            raise ThClawsError("worker stream exceeded its deadline without completing")
         line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
         if line == "":
             if data_lines:
                 yield SseEvent(event=event, data="\n".join(data_lines))
             event = "message"
             data_lines = []
+            buffered = 0
             continue
         if line.startswith(":"):
             continue
         if line.startswith("event:"):
             event = line.removeprefix("event:").strip() or "message"
         elif line.startswith("data:"):
-            data_lines.append(line.removeprefix("data:").lstrip())
+            chunk = line.removeprefix("data:").lstrip()
+            buffered += len(chunk)
+            if buffered > max_event_bytes:
+                # A single event that never hits its blank-line terminator would otherwise
+                # accumulate the whole stream in memory before the caller ever sees a frame.
+                raise ThClawsError(f"SSE event exceeded {max_event_bytes} bytes without terminating")
+            data_lines.append(chunk)
     if data_lines:
         yield SseEvent(event=event, data="\n".join(data_lines))
 
@@ -171,8 +190,16 @@ def extract_text(event: SseEvent) -> str | None:
 def extract_session_id(event: SseEvent) -> str | None:
     data = event.json_data()
     if isinstance(data, dict):
-        for key in ("session_id", "sessionId", "id"):
+        # Only explicit session keys. A bare "id" is NOT a session id — most worker events
+        # carry a per-message/tool id, and treating that as the session would (a) repoint the
+        # conversation's session binding to garbage and (b) make the caller skip the frame's text.
+        for key in ("session_id", "sessionId"):
             value = data.get(key)
+            if isinstance(value, str) and value:
+                return value
+        # A worker may send the session id under "id" ONLY on an explicit session event.
+        if event.event == "session":
+            value = data.get("id")
             if isinstance(value, str) and value:
                 return value
     if event.event == "session" and isinstance(data, str) and data:

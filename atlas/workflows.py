@@ -341,7 +341,13 @@ class WorkflowRunner:
                     self._spawn_thread(run["id"], graph, policy, run.get("input") or {})
                 else:
                     counters = run.get("counters") or {}
-                    self._finish_run(run["id"], "failed" if counters.get("failed_nodes") else "succeeded", counters, run.get("error"))
+                    self._finish_run(
+                        run["id"],
+                        "failed" if counters.get("failed_nodes") else "succeeded",
+                        counters,
+                        run.get("error"),
+                        allowed_from=("running", "queued"),
+                    )
 
     def _mark_recovery_required(
         self,
@@ -478,7 +484,8 @@ class WorkflowRunner:
                 if runtime_node:
                     self.db.update_workflow_node(runtime_node["id"], state="failed", error=error, finished_at=now_iso())
                     self.db.append_workflow_event(run["id"], "node_failed", {"error": error}, node_key=approval["node_key"])
-            self._finish_run(run["id"], "failed", run.get("counters") or {}, error)
+            # Reject legitimately finalizes from waiting_for_human (the run is at a human gate).
+            self._finish_run(run["id"], "failed", run.get("counters") or {}, error, allowed_from=("waiting_for_human", "running"))
         return {"approval": approval, "run": self.db.get_workflow_run(run["id"]) or run}
 
     def _pending_approval_context(self, approval_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -574,6 +581,14 @@ class WorkflowRunner:
             with self._thread_lock:
                 if self._threads.get(run_id) is threading.current_thread():
                     self._threads.pop(run_id, None)
+                    # Resume/approve handoff race: if those paths saw this thread still alive and
+                    # skipped spawning, but the run is now 'running' (resumed) as we exit, re-arm a
+                    # runner so the run isn't left 'running' with no runner. A finished run is
+                    # terminal here, so this only fires for that race (and converges: the re-armed
+                    # runner drives the run to a terminal state).
+                    run = self.db.get_workflow_run(run_id)
+                    if run and run["state"] == "running":
+                        self._spawn_thread(run_id, graph, policy, input)
 
     def _execute_run(
         self,
@@ -866,18 +881,27 @@ class WorkflowRunner:
         if self._threads.get(run_id) is threading.current_thread():
             self._threads.pop(run_id, None)
 
-    def _finish_run(self, run_id: str, state: str, counters: dict[str, Any], error: str | None = None) -> None:
+    def _finish_run(
+        self,
+        run_id: str,
+        state: str,
+        counters: dict[str, Any],
+        error: str | None = None,
+        allowed_from: tuple[str, ...] = ("running",),
+    ) -> None:
         won = self.db.finalize_workflow_run(
             run_id,
             state,
+            allowed_from=allowed_from,
             current_nodes=[],
             counters=counters,
             error=error,
             finished_at=now_iso(),
         )
         if not won:
-            # A concurrent cancel already moved the run to a terminal state; do not overwrite
-            # it (cancelled -> succeeded) or double-emit run_finished / usage.
+            # The run is no longer in an allowed source state — a concurrent cancel, pause, or
+            # human gate moved it. Do NOT overwrite that state or double-emit run_finished/usage.
+            # (A pause that lands during the last node leaves the run paused; resume finishes it.)
             return
         self.db.append_workflow_event(run_id, "run_finished", {"state": state, "error": error})
         self._record_workflow_usage(run_id)

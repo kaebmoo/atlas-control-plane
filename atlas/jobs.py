@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import os
 import threading
+import time
 from typing import Any
 
 from .db import Database, now_iso
@@ -27,6 +29,11 @@ class JobManager:
         self.db = db
         self.router = Router(db)
         self.request_timeout_seconds = request_timeout_seconds
+        # Backstops for a slow-dribbling / runaway worker on the (deadline-less) standalone-job
+        # path: an overall wall-clock bound and a total-output cap. Generous defaults; override
+        # via env. Workflow jobs additionally get the policy max_minutes deadline.
+        self.max_stream_seconds = float(os.getenv("ATLAS_MAX_STREAM_SECONDS", "3600"))
+        self.max_output_bytes = int(os.getenv("ATLAS_MAX_JOB_OUTPUT_BYTES", str(16 * 1024 * 1024)))
         self.trigger_service: Any = None
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.RLock()
@@ -154,10 +161,17 @@ class JobManager:
                 active = self._threads.get(job["id"])
             if active and active.is_alive():
                 continue
-            error = "Atlas restarted while the job was in flight"
-            self.db.update_job(job["id"], state="failed", error=error, finished_at=now_iso())
-            self.db.append_job_event(job["id"], "state", {"state": "failed", "reason": "atlas_restarted"})
-            self.db.audit("job.failed", "job", job["id"], {"error": error})
+            if job.get("cancel_requested"):
+                # The user cancelled it before its thread observed the request; honor that as a
+                # terminal 'cancelled', not 'failed' (which would mislabel the outcome + usage).
+                self.db.update_job(job["id"], state="cancelled", finished_at=now_iso())
+                self.db.append_job_event(job["id"], "state", {"state": "cancelled", "reason": "atlas_restarted"})
+                self.db.audit("job.cancelled", "job", job["id"])
+            else:
+                error = "Atlas restarted while the job was in flight"
+                self.db.update_job(job["id"], state="failed", error=error, finished_at=now_iso())
+                self.db.append_job_event(job["id"], "state", {"state": "failed", "reason": "atlas_restarted"})
+                self.db.audit("job.failed", "job", job["id"], {"error": error})
             self._record_job_usage(job["id"])
 
     def _start_thread(self, job_id: str) -> None:
@@ -220,15 +234,22 @@ class JobManager:
         self.db.append_job_event(job_id, "state", {"state": "running"})
         client = ThClawsClient(worker["base_url"], worker.get("token"), timeout=self.request_timeout_seconds)
         done_seen = False
+        stream_deadline = time.monotonic() + self.max_stream_seconds
+        output_bytes = 0
         try:
             for event in client.run_agent_stream(
                 prompt=job["prompt"],
                 workspace_dir=workspace.get("workspace_dir") if workspace else None,
                 model=job.get("model") or None,
                 session_id=job.get("thclaws_session_id") or None,
+                stream_deadline=stream_deadline,
             ):
                 if self.db.is_cancel_requested(job_id):
                     raise _JobCancelled()
+                if time.monotonic() > stream_deadline:
+                    # Overall wall-clock bound: a worker dribbling bytes can't pin this thread
+                    # forever (the per-recv socket timeout doesn't bound total stream duration).
+                    raise ThClawsError(f"worker stream exceeded {self.max_stream_seconds:.0f}s without completing")
 
                 payload = parse_event_payload(event)
                 if event.data == "[DONE]":
@@ -239,7 +260,10 @@ class JobManager:
                 session_id = extract_session_id(event)
                 if session_id:
                     self.db.update_job(job_id, thclaws_session_id=session_id)
-                    if job.get("conversation_id"):
+                    # Don't repoint the conversation's primary binding from a handoff child:
+                    # the handoff worker is a transient post-processor, not the conversation's
+                    # owner. Only the originating job (no parent) writes the session binding.
+                    if job.get("conversation_id") and not job.get("parent_job_id"):
                         self.db.upsert_session_binding(
                             job["conversation_id"],
                             worker["id"],
@@ -247,12 +271,16 @@ class JobManager:
                             session_id,
                         )
                     self.db.append_job_event(job_id, "session", {"session_id": session_id})
-                    continue
+                    # Fall through (no `continue`): a single frame can carry BOTH a session id
+                    # and assistant text — dropping the text here would silently lose output.
 
                 text = extract_text(event)
                 if text:
+                    output_bytes += len(text.encode("utf-8"))
+                    if output_bytes > self.max_output_bytes:
+                        raise ThClawsError(f"worker output exceeded {self.max_output_bytes} bytes")
                     self.db.append_job_text(job_id, text)
-                else:
+                elif not session_id:
                     self.db.append_job_event(job_id, event.event or "message", payload)
 
             if self.db.is_cancel_requested(job_id):

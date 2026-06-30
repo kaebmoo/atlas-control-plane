@@ -577,7 +577,7 @@ class Database:
                     actor,
                     kind,
                     payload.get("status"),
-                    int(payload.get("units", 1)),
+                    max(0, int(payload.get("units", 1) or 0)),  # never let a negative units deflate the billed total
                     payload.get("seconds"),
                     payload.get("started_at"),
                     payload.get("finished_at"),
@@ -948,22 +948,29 @@ class Database:
         with self._lock, self.connect() as conn:
             conn.execute(f"UPDATE workflow_runs SET {assignments} WHERE id = ?", list(fields.values()) + [run_id])
 
-    def finalize_workflow_run(self, run_id: str, state: str, **fields: Any) -> bool:
-        """Atomically move a run to a terminal state, but ONLY if it is not already
-        terminal. Returns True iff this call performed the transition. The WHERE predicate
-        makes the check-and-set a single SQL statement, so a finishing runner thread can
-        never overwrite a concurrent cancel (cancelled -> succeeded) nor double-emit
-        run_finished/usage."""
+    def finalize_workflow_run(self, run_id: str, state: str, allowed_from: tuple[str, ...] | None = None, **fields: Any) -> bool:
+        """Atomically transition a run's state via a single check-and-set UPDATE. Returns True
+        iff THIS call performed the transition.
+
+        - Default (allowed_from=None): permit from any NON-terminal state. cancel_run uses this,
+          so a cancel can override paused / waiting_for_human / recovery_required.
+        - allowed_from=(...): permit ONLY from those exact states. The runner's success/failure
+          finish passes ('running',), so a runner draining to empty can NEVER overwrite a run
+          another path just moved to paused / waiting_for_human / recovery_required (nor a
+          concurrent cancel), and can't double-emit run_finished / usage."""
         for key in ("current_nodes", "counters"):
             if key in fields:
                 fields[key] = encode_json(fields[key])
         fields = {"state": state, **fields, "updated_at": now_iso()}
         assignments = ", ".join(f"{key} = ?" for key in fields)
+        if allowed_from is None:
+            predicate, extra = "state NOT IN ('succeeded', 'failed', 'cancelled')", []
+        else:
+            predicate, extra = f"state IN ({', '.join('?' for _ in allowed_from)})", list(allowed_from)
         with self._lock, self.connect() as conn:
             cursor = conn.execute(
-                f"UPDATE workflow_runs SET {assignments} "
-                "WHERE id = ? AND state NOT IN ('succeeded', 'failed', 'cancelled')",
-                list(fields.values()) + [run_id],
+                f"UPDATE workflow_runs SET {assignments} WHERE id = ? AND {predicate}",
+                list(fields.values()) + [run_id] + extra,
             )
         return cursor.rowcount > 0
 
@@ -1428,7 +1435,10 @@ class Database:
         sql = "SELECT * FROM artifacts"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY created_at DESC LIMIT ?"
+        # rowid tiebreaker: created_at is second-resolution, so two artifacts written to the
+        # same key in the same second would otherwise have undefined order, and last-write-wins
+        # in _load_artifacts could pick the older value. Insertion order (rowid) breaks the tie.
+        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
         params.append(limit)
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
