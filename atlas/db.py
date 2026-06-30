@@ -107,7 +107,7 @@ def encode_json(value: Any) -> str:
 
 
 def decode_json(value: str | None, fallback: Any = None) -> Any:
-    if value in (None, ""):
+    if not value:
         return fallback
     try:
         return json.loads(value)

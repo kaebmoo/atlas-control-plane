@@ -11,6 +11,7 @@ cd "$(dirname "$0")/.."
 
 RUFF="ruff@0.15.20"
 BANDIT="bandit@1.9.4"
+MYPY="mypy@2.1.0"
 
 if ! command -v uvx >/dev/null 2>&1; then
   echo "uvx required (https://docs.astral.sh/uv/) — install uv to run the linters." >&2
@@ -29,5 +30,8 @@ bandit_rc=$?
 set -e
 printf '%s\n' "$bandit_out" | grep -v "nosec encountered" || true
 [ "$bandit_rc" -eq 0 ] || { echo "bandit found unsuppressed issues (see above)" >&2; exit 1; }
+
+echo "=== mypy (type check; --allow-redefinition matches the reused-local style; test scaffolding excluded) ==="
+uvx "$MYPY" --python-version 3.11 --allow-redefinition --exclude 'fleet/check_fleet\.py' atlas fleet
 
 echo "lint OK"

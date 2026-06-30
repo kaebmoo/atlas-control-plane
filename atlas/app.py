@@ -13,7 +13,7 @@ from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
@@ -865,7 +865,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
     def _is_authorized(self) -> bool:
         runtime = self.server.runtime
-        self.auth_identity = {}
+        self.auth_identity: dict[str, Any] = {}
         if runtime.config.enable_loopback_without_token and self.client_address[0] in {"127.0.0.1", "::1"}:
             self.auth_identity = {"id": None, "username": "local", "role": "admin", "status": "active", "token_id": None}
             return True
@@ -1117,11 +1117,13 @@ def _suggest_workflow_triggers(
     )
     triggers = result.get("triggers")
     _validate_workflow_draft_triggers(triggers)
-    return triggers
+    return cast("list[dict[str, Any]]", triggers)
 
 
 def _suggest_workflow_workers(runtime: AtlasRuntime, payload: dict[str, Any]) -> list[dict[str, Any]]:
     graph = payload.get("graph")
+    if not isinstance(graph, dict):
+        raise ValueError("workflow graph must be an object")
     policy = payload.get("policy") or {}
     validate_workflow_graph(graph, policy)
     _validate_workflow_policy(policy)

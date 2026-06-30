@@ -58,7 +58,7 @@ class ThClawsClient:
     def get_text(self, path: str) -> tuple[int, str]:
         with self._request("GET", path) as response:
             body = response.read().decode("utf-8", errors="replace")
-            status = response.getcode()
+            status = response.getcode() or 0
         return status, body
 
     def health(self) -> dict[str, Any]:

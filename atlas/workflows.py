@@ -130,7 +130,7 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
         if node_map[edge["from"]]["type"] == "human_gate" and node_map[edge["from"]].get("choices") and condition.get("type") != "human_selected":
             raise ValueError(f"workflow human_gate edge at index {index} requires human_selected condition")
 
-    incoming = {node_id: set() for node_id in node_ids}
+    incoming: dict[str, set[str]] = {node_id: set() for node_id in node_ids}
     for edge in edges:
         incoming[edge["to"]].add(edge["from"])
     for node in nodes:
@@ -847,7 +847,7 @@ class WorkflowRunner:
                         completed_nodes.append(node_key)
                     if node.get("type") == "join":
                         join_states[node_key]["state"] = "succeeded"
-                    event_payload = {"output_artifacts": output_artifacts}
+                    event_payload: dict[str, Any] = {"output_artifacts": output_artifacts}
                     if job:
                         event_payload["job_id"] = job["id"]
                     if manager_decision:
@@ -1199,7 +1199,7 @@ class WorkflowRunner:
                 action = (counters.get("manager_actions") or {}).pop(node["id"], None)
                 if action and action["instructions"].strip():
                     prompt = f"{action['instructions'].strip()}\n\n{prompt}".strip()
-        payload = {"prompt": prompt}
+        payload: dict[str, Any] = {"prompt": prompt}
         for key in ("worker_id", "workspace_id", "workspace_key", "company", "model", "tags", "role"):
             if node.get(key):
                 payload[key] = node[key]
@@ -1307,6 +1307,8 @@ class WorkflowTriggerService:
             if trigger.get("type") != "schedule":
                 continue
             next_fire_at = trigger.get("next_fire_at") or next_fire_at_for_trigger(trigger, now)
+            if not next_fire_at:
+                continue
             if _parse_utc(next_fire_at) > now:
                 continue
             result = self.fire_trigger(
@@ -1527,7 +1529,7 @@ def _validate_condition(condition: Any, edge_index: int, node_ids: set[str]) -> 
 
 
 def _has_cycle(node_ids: set[str], edges: list[dict[str, Any]]) -> bool:
-    outgoing = {node_id: [] for node_id in node_ids}
+    outgoing: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
     for edge in edges:
         outgoing[edge["from"]].append(edge["to"])
 
@@ -1681,7 +1683,7 @@ def _workflow_deadline(run: dict[str, Any], policy: dict[str, Any]) -> datetime 
     max_minutes = policy.get("max_minutes")
     if not isinstance(max_minutes, (int, float)) or max_minutes <= 0:
         return None
-    started_at = run.get("started_at") or run.get("created_at")
+    started_at = run.get("started_at") or run["created_at"]
     return _parse_utc(started_at) + timedelta(minutes=max_minutes)
 
 
@@ -1820,7 +1822,7 @@ def _evaluate_condition(
 
 
 def _artifact_condition_value(condition: dict[str, Any], artifacts: dict[str, Any]) -> Any:
-    value = artifacts.get(condition.get("artifact"))
+    value = artifacts.get(condition.get("artifact") or "")
     path = condition.get("path")
     if not path:
         return value
