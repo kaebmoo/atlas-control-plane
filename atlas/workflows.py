@@ -170,6 +170,68 @@ def validate_workflow_policy(policy: dict[str, Any] | None) -> None:
         raise ValueError("workflow policy stop_on_first_failure must be boolean")
 
 
+def _string_list(value: Any, name: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ValueError(f"{name} must be a list of ids")
+    return value
+
+
+def _worker_matches_role(worker: dict[str, Any], role: str) -> bool:
+    tags = {str(tag).strip().lower() for tag in worker.get("tags") or [] if str(tag).strip()}
+    return str(worker.get("role") or "").lower() == role or role in tags
+
+
+def validate_workflow_references(db: Any, graph: dict[str, Any], policy: dict[str, Any], allow_unresolved_roles: bool = False) -> None:
+    """Validate that a graph's worker/workspace references are consistent with the instance and
+    the policy. The SINGLE source of truth shared by the workflow API (atlas/app.py) and pack
+    import (atlas/packs.py), so the two can't drift: existence, workspace↔worker ownership,
+    node-vs-policy allow-lists, allow-list members exist, and role resolvability."""
+    workers = {worker["id"]: worker for worker in db.list_workers()}
+    workspaces = {workspace["id"]: workspace for workspace in db.list_workspaces()}
+    allowed_worker_ids = set(_string_list(policy.get("allowed_worker_ids"), "policy.allowed_worker_ids"))
+    allowed_workspace_ids = set(_string_list(policy.get("allowed_workspace_ids"), "policy.allowed_workspace_ids"))
+
+    for worker_id in allowed_worker_ids:
+        if worker_id not in workers:
+            raise ValueError(f"policy allowed_worker_ids references unknown worker: {worker_id}")
+    for workspace_id in allowed_workspace_ids:
+        if workspace_id not in workspaces:
+            raise ValueError(f"policy allowed_workspace_ids references unknown workspace: {workspace_id}")
+
+    for node in graph.get("nodes") or []:
+        node_id = node["id"]
+        worker_id = node.get("worker_id")
+        workspace_id = node.get("workspace_id")
+        role = str(node.get("role") or "").strip().lower()
+
+        if worker_id and worker_id not in workers:
+            raise ValueError(f"workflow node {node_id} references unknown worker_id: {worker_id}")
+        if worker_id and allowed_worker_ids and worker_id not in allowed_worker_ids:
+            raise ValueError(f"workflow node {node_id} worker_id is not allowed by policy")
+
+        if workspace_id:
+            workspace = workspaces.get(workspace_id)
+            if not workspace:
+                raise ValueError(f"workflow node {node_id} references unknown workspace_id: {workspace_id}")
+            if worker_id and workspace["worker_id"] != worker_id:
+                raise ValueError(f"workflow node {node_id} workspace_id does not belong to worker_id")
+            if allowed_workspace_ids and workspace_id not in allowed_workspace_ids:
+                raise ValueError(f"workflow node {node_id} workspace_id is not allowed by policy")
+            if allowed_worker_ids and workspace["worker_id"] not in allowed_worker_ids:
+                raise ValueError(f"workflow node {node_id} workspace worker is not allowed by policy")
+
+        if (
+            role
+            and not worker_id
+            and not workspace_id
+            and not allow_unresolved_roles
+            and not any(_worker_matches_role(worker, role) for worker in workers.values())
+        ):
+            raise ValueError(f"workflow node {node_id} role has no matching worker: {role}")
+
+
 def render_prompt(
     template: str,
     input: dict[str, Any] | None = None,

@@ -11,6 +11,7 @@ from .workflows import (
     next_fire_at_for_trigger,
     validate_workflow_graph,
     validate_workflow_policy,
+    validate_workflow_references,
     validate_workflow_trigger_payload,
 )
 
@@ -104,33 +105,17 @@ def validate_pack(bundle: Any) -> dict[str, Any]:
 
 
 def _validate_pack_references(db: Database, bundle: dict[str, Any]) -> None:
-    """Reject concrete worker/workspace ids that don't exist on this instance (they would
-    dangle and fail later at routing), while allowing role-only nodes so packs stay
-    portable across instances."""
-    worker_ids = {worker["id"] for worker in db.list_workers()}
-    workspaces = {workspace["id"]: workspace for workspace in db.list_workspaces()}
-    workspace_ids = set(workspaces)
+    """Validate each workflow's worker/workspace references via the SAME shared validator the
+    workflow API uses (atlas/workflows.validate_workflow_references) — so pack import and the
+    API can't drift on node-vs-policy consistency, workspace↔worker ownership, or allow-list
+    existence. allow_unresolved_roles=True keeps role-only nodes portable across instances."""
     for index, workflow in enumerate(bundle["workflows"]):
-        graph = workflow.get("graph") or {}
-        for node in graph.get("nodes") or []:
-            worker_id = node.get("worker_id")
-            if worker_id and worker_id not in worker_ids:
-                raise ValueError(f"pack workflow {index} node {node.get('id')} references unknown worker_id: {worker_id}")
-            workspace_id = node.get("workspace_id")
-            if workspace_id and workspace_id not in workspace_ids:
-                raise ValueError(f"pack workflow {index} node {node.get('id')} references unknown workspace_id: {workspace_id}")
-            # A workspace pinned alongside a worker must belong to that worker, or the router
-            # would silently route to the workspace's actual owner and ignore the declared
-            # worker (mirrors atlas/app.py _validate_workflow_references).
-            if worker_id and workspace_id and workspaces[workspace_id]["worker_id"] != worker_id:
-                raise ValueError(f"pack workflow {index} node {node.get('id')} workspace_id does not belong to worker_id")
-        policy = workflow.get("policy") or {}
-        for worker_id in policy.get("allowed_worker_ids") or []:
-            if worker_id not in worker_ids:
-                raise ValueError(f"pack workflow {index} policy allowed_worker_ids references unknown worker: {worker_id}")
-        for workspace_id in policy.get("allowed_workspace_ids") or []:
-            if workspace_id not in workspace_ids:
-                raise ValueError(f"pack workflow {index} policy allowed_workspace_ids references unknown workspace: {workspace_id}")
+        try:
+            validate_workflow_references(
+                db, workflow.get("graph") or {}, workflow.get("policy") or {}, allow_unresolved_roles=True
+            )
+        except ValueError as exc:
+            raise ValueError(f"pack workflow {index}: {exc}") from exc
 
 
 def import_pack(

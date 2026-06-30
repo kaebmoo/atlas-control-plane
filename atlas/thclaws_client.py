@@ -118,35 +118,53 @@ def iter_sse(
     max_event_bytes: int = 32 * 1024 * 1024,
     stream_deadline: float | None = None,
 ) -> Iterator[SseEvent]:
+    """Parse SSE frames from a CHUNKED read (not line iteration). Line iteration blocks in
+    readline() until a newline, so a worker dripping bytes with no newline — or only `: ping`
+    heartbeats — would pin the thread forever, evading a per-line/per-event deadline check.
+    Reading bounded chunks and checking the deadline per chunk bounds both: a drip delivers
+    data (chunk returns, deadline checked), a total stall hits the socket timeout (caught as a
+    deadline tick). The socket timeout comes from the client's request_timeout."""
     event = "message"
     data_lines: list[str] = []
     buffered = 0
-    for raw in response:
-        # Check the deadline per LINE, not per yielded event: a worker sending only heartbeat
-        # comment lines (`: ping`) yields no events, so a per-event check would never run and the
-        # stream could pin the thread forever. monotonic compare is cheap enough per line.
-        if stream_deadline is not None and time.monotonic() > stream_deadline:
+    pending = b""
+    read = getattr(response, "read1", None) or response.read
+
+    def _expired() -> bool:
+        return stream_deadline is not None and time.monotonic() > stream_deadline
+
+    while True:
+        if _expired():
             raise ThClawsError("worker stream exceeded its deadline without completing")
-        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-        if line == "":
-            if data_lines:
-                yield SseEvent(event=event, data="\n".join(data_lines))
-            event = "message"
-            data_lines = []
-            buffered = 0
+        try:
+            chunk = read(65536)
+        except TimeoutError:
+            # Socket read timed out (a quiet stream): just a tick to re-check the deadline.
             continue
-        if line.startswith(":"):
-            continue
-        if line.startswith("event:"):
-            event = line.removeprefix("event:").strip() or "message"
-        elif line.startswith("data:"):
-            chunk = line.removeprefix("data:").lstrip()
-            buffered += len(chunk)
-            if buffered > max_event_bytes:
-                # A single event that never hits its blank-line terminator would otherwise
-                # accumulate the whole stream in memory before the caller ever sees a frame.
-                raise ThClawsError(f"SSE event exceeded {max_event_bytes} bytes without terminating")
-            data_lines.append(chunk)
+        if not chunk:
+            break  # EOF
+        buffered += len(chunk)
+        if buffered > max_event_bytes:
+            # A single event that never hits its blank-line terminator would otherwise
+            # accumulate the whole stream in memory before the caller ever sees a frame.
+            raise ThClawsError(f"SSE event exceeded {max_event_bytes} bytes without terminating")
+        pending += chunk
+        while b"\n" in pending:
+            raw, pending = pending.split(b"\n", 1)
+            line = raw.decode("utf-8", errors="replace").rstrip("\r")
+            if line == "":
+                if data_lines:
+                    yield SseEvent(event=event, data="\n".join(data_lines))
+                event = "message"
+                data_lines = []
+                buffered = len(pending)
+                continue
+            if line.startswith(":"):
+                continue
+            if line.startswith("event:"):
+                event = line.removeprefix("event:").strip() or "message"
+            elif line.startswith("data:"):
+                data_lines.append(line.removeprefix("data:").lstrip())
     if data_lines:
         yield SseEvent(event=event, data="\n".join(data_lines))
 

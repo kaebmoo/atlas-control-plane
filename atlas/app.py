@@ -28,9 +28,12 @@ from .workflows import (
     WORKFLOW_POLICY_LIMITS,
     WorkflowRunner,
     WorkflowTriggerService,
+    _string_list,
+    _worker_matches_role,
     next_fire_at_for_trigger,
     validate_workflow_graph,
     validate_workflow_policy,
+    validate_workflow_references,
     validate_workflow_trigger_payload,
 )
 
@@ -978,7 +981,7 @@ def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any], r
     graph = payload["graph"]
     policy = payload.get("policy") or {}
     validate_workflow_graph(graph, policy)
-    _validate_workflow_references(runtime, graph, policy)
+    validate_workflow_references(runtime.db, graph, policy)
     _validate_workflow_policy(policy)
     _validate_workflow_draft_triggers(payload.get("triggers") or [])
 
@@ -1035,49 +1038,6 @@ def _validate_workflow_metadata(payload: dict[str, Any]) -> None:
             raise ValueError("workflow status must match [A-Za-z0-9_-]+")
 
 
-def _validate_workflow_references(
-    runtime: AtlasRuntime,
-    graph: dict[str, Any],
-    policy: dict[str, Any],
-    allow_unresolved_roles: bool = False,
-) -> None:
-    workers = {worker["id"]: worker for worker in runtime.db.list_workers()}
-    workspaces = {workspace["id"]: workspace for workspace in runtime.db.list_workspaces()}
-    allowed_worker_ids = set(_string_list(policy.get("allowed_worker_ids"), "policy.allowed_worker_ids"))
-    allowed_workspace_ids = set(_string_list(policy.get("allowed_workspace_ids"), "policy.allowed_workspace_ids"))
-
-    for node in graph.get("nodes") or []:
-        node_id = node["id"]
-        worker_id = node.get("worker_id")
-        workspace_id = node.get("workspace_id")
-        role = str(node.get("role") or "").strip().lower()
-
-        if worker_id and worker_id not in workers:
-            raise ValueError(f"workflow node {node_id} references unknown worker_id: {worker_id}")
-        if worker_id and allowed_worker_ids and worker_id not in allowed_worker_ids:
-            raise ValueError(f"workflow node {node_id} worker_id is not allowed by policy")
-
-        if workspace_id:
-            workspace = workspaces.get(workspace_id)
-            if not workspace:
-                raise ValueError(f"workflow node {node_id} references unknown workspace_id: {workspace_id}")
-            if worker_id and workspace["worker_id"] != worker_id:
-                raise ValueError(f"workflow node {node_id} workspace_id does not belong to worker_id")
-            if allowed_workspace_ids and workspace_id not in allowed_workspace_ids:
-                raise ValueError(f"workflow node {node_id} workspace_id is not allowed by policy")
-            if allowed_worker_ids and workspace["worker_id"] not in allowed_worker_ids:
-                raise ValueError(f"workflow node {node_id} workspace worker is not allowed by policy")
-
-        if (
-            role
-            and not worker_id
-            and not workspace_id
-            and not allow_unresolved_roles
-            and not any(_worker_matches_role(worker, role) for worker in workers.values())
-        ):
-            raise ValueError(f"workflow node {node_id} role has no matching worker: {role}")
-
-
 def _validate_workflow_policy(policy: dict[str, Any]) -> None:
     validate_workflow_policy(policy)
 
@@ -1089,19 +1049,6 @@ def _validate_workflow_draft_triggers(triggers: Any) -> None:
         if not isinstance(trigger, dict):
             raise ValueError(f"workflow draft trigger at index {index} must be an object")
         validate_workflow_trigger_payload(trigger)
-
-
-def _string_list(value: Any, name: str) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
-        raise ValueError(f"{name} must be a list of ids")
-    return value
-
-
-def _worker_matches_role(worker: dict[str, Any], role: str) -> bool:
-    tags = {str(tag).strip().lower() for tag in worker.get("tags") or [] if str(tag).strip()}
-    return str(worker.get("role") or "").lower() == role or role in tags
 
 
 def _prepare_workflow_trigger(runtime: AtlasRuntime, payload: dict[str, Any]) -> None:
@@ -1178,7 +1125,7 @@ def _suggest_workflow_workers(runtime: AtlasRuntime, payload: dict[str, Any]) ->
     policy = payload.get("policy") or {}
     validate_workflow_graph(graph, policy)
     _validate_workflow_policy(policy)
-    _validate_workflow_references(runtime, graph, policy, allow_unresolved_roles=True)
+    validate_workflow_references(runtime.db, graph, policy, allow_unresolved_roles=True)
     unresolved = [
         node for node in graph["nodes"]
         if node.get("type") in {"worker", "manager"} and not node.get("worker_id") and not node.get("workspace_id")
