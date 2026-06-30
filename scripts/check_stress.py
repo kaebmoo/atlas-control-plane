@@ -1,6 +1,8 @@
-"""Concurrency stress: hammer the atomic state transitions from many threads and assert the
-invariants that the per-round race bugs kept violating. Deterministic invariants (not timing
-asserts): under any interleaving the state must converge, never tear or wedge."""
+"""Concurrency stress (the CONCURRENCY axis — distinct from input robustness in check_fuzz):
+hammer the atomic state transitions from many threads and assert the invariants the per-round
+race bugs violated (state converges to terminal, never tears or wedges). The ASSERTIONS are
+invariants, not timing checks — but thread scheduling varies, so a green run is strong EVIDENCE,
+not a proof of absence. It complements (does not replace) the per-method unit checks."""
 
 from __future__ import annotations
 

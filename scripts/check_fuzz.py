@@ -1,7 +1,11 @@
-"""Parser/validator fuzz: throw random and malformed inputs at the SSE/CSV parsers and the
-public validators. Parsers must never raise (only return / yield, or a controlled ThClawsError);
-validators must reject bad input with ValueError only — any other exception is a robustness bug
-(at the HTTP boundary it would be a 500 instead of a 400)."""
+"""Parser/validator fuzz (the INPUT-ROBUSTNESS axis at the trust boundary — distinct from the
+concurrency axis in check_stress): throw random and malformed inputs at the SSE/CSV parsers and
+the public validators. Parsers must never raise (only return / yield, or a controlled
+ThClawsError); validators must reject bad input with ValueError only — any other exception is a
+robustness bug (a 500 instead of a 400 at the HTTP boundary).
+
+These are FINITE seeded samples: green is evidence that the common malformed shapes are handled,
+NOT a proof that no input can crash them. Increase iterations / seeds to widen coverage."""
 
 from __future__ import annotations
 
