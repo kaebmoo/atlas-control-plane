@@ -53,7 +53,9 @@ Query token มีไว้รองรับ browser `EventSource` ที่ต
 กับ request ปกติเพราะ token อาจไปอยู่ใน URL log/history
 
 ตั้ง `ATLAS_LOOPBACK_NO_AUTH=true` เฉพาะ development เพื่อให้ request จาก
-`127.0.0.1` และ `::1` ไม่ต้องใช้ token; ค่าปริยายที่ปลอดภัยคือ `false`
+`127.0.0.1` และ `::1` ไม่ต้องใช้ token; request แบบ loopback นี้จะถูกมองเป็น identity
+**admin** ในตัว จึงข้ามการตรวจ role/permission (RBAC) ทั้งหมด — ห้ามเปิดใน deployment ที่ใช้
+ร่วมกันหรือ production; ค่าปริยายที่ปลอดภัยคือ `false`
 ส่วน `ATLAS_API_TOKEN` ยังใช้เป็น legacy admin token ได้
 
 ข้อจำกัดปัจจุบัน:

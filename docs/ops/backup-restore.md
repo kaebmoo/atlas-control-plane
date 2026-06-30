@@ -2,8 +2,9 @@
 
 > TL;DR (ไทย): สำรองฐานข้อมูลด้วย `scripts/backup.sh` ซึ่งใช้ SQLite online
 > `.backup` — ปลอดภัยแม้ Atlas กำลังรันอยู่ (ไม่ต้องหยุดเซิร์ฟเวอร์). คืนค่าโดย
-> หยุด Atlas, วางไฟล์ snapshot ทับ `ATLAS_DB` แล้วสตาร์ทใหม่ (schema จะ migrate
-> เดินหน้าให้อัตโนมัติ). ข้อจำกัด: SQLite รองรับ **ผู้เขียนทีละรายเดียว** — รับได้
+> หยุด Atlas, วางไฟล์ snapshot ทับ `ATLAS_DB`, แตกไฟล์ `atlas-uploads-*.tar.gz`
+> (ไฟล์แนบชนิด `file_ref` อยู่นอก SQLite) คืนลงโฟลเดอร์ uploads แล้วสตาร์ทใหม่ (schema จะ
+> migrate เดินหน้าให้อัตโนมัติ). ข้อจำกัด: SQLite รองรับ **ผู้เขียนทีละรายเดียว** — รับได้
 > ที่สเกล single-tenant; ทำ backup ตามรอบ (เช่น cron รายชั่วโมง/รายวัน).
 
 Atlas stores all state in one SQLite file (`ATLAS_DB`, default
@@ -20,6 +21,13 @@ ATLAS_DB=/opt/atlas/data/atlas.sqlite scripts/backup.sh
 `backup.sh` runs SQLite's online `.backup`, which copies a transactionally
 consistent snapshot — including committed WAL pages — **while Atlas keeps running**.
 You do not need to stop the server.
+
+It also archives the **upload store** (`file_ref` artifact bytes live outside SQLite,
+under `$ATLAS_UPLOAD_DIR`, default `<db-dir>/uploads/`) to
+`atlas-uploads-<UTC timestamp>.tar.gz` next to the `.sqlite` snapshot, taken **after** the
+DB snapshot so every artifact row in the snapshot has its file present on restore. If the
+upload dir does not exist yet, no tarball is written. Both files share the same timestamp —
+restore them as a pair.
 
 Schedule it from cron (hourly example):
 
@@ -42,11 +50,20 @@ Retention is your call — the script never deletes old snapshots. Add a `find .
    ```bash
    cp /srv/atlas-bak/atlas-20260629T120000Z.sqlite /opt/atlas/data/atlas.sqlite
    ```
-4. **Start Atlas** (`systemctl start atlas`). On startup the migration runner brings
+4. **Restore the upload store** from the matching tarball (same timestamp), so
+   `file_ref` artifacts referenced by the DB are present and downloads don't 404.
+   The tarball contains the `uploads/` directory, so extract into the upload dir's parent:
+   ```bash
+   # default upload dir is <db-dir>/uploads — restore it alongside the DB
+   rm -rf /opt/atlas/data/uploads
+   tar -xzf /srv/atlas-bak/atlas-uploads-20260629T120000Z.tar.gz -C /opt/atlas/data
+   ```
+   Skip this step only if the snapshot has no `file_ref` artifacts (no tarball was produced).
+5. **Start Atlas** (`systemctl start atlas`). On startup the migration runner brings
    the restored schema forward to the current version if the snapshot is older;
    restoring a snapshot at the same or newer version is a no-op.
-5. Verify (e.g. dashboard loads, `GET /api/usage` responds), then delete the
-   `.bak` file.
+6. Verify (e.g. dashboard loads, `GET /api/usage` responds, an artifact download
+   succeeds), then delete the `.bak` file.
 
 A snapshot is a normal SQLite file — you can also inspect it directly:
 `sqlite3 atlas-<ts>.sqlite "SELECT MAX(version) FROM schema_version;"`.

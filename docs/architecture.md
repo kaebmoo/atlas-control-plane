@@ -46,7 +46,13 @@ flowchart LR
 1. Explicit `workspace_id`.
 2. Explicit `worker_id`.
 3. Existing conversation session binding.
-4. Ranked worker/workspace candidates by status, workspace key, company, tags, role, and prompt hints.
+4. Ranked worker/workspace candidates by status, workspace key, company, tags, and prompt hints.
+
+`role`, when supplied, is a **hard filter** applied before ranking — not merely a ranking
+signal: a requested role that no candidate advertises (via its `role` or `tags`) eliminates
+every candidate, so the request fails with "no routeable candidates" rather than falling back
+to a lower-ranked worker. Among the workers that pass the role filter, a role match still
+boosts the score.
 
 This keeps manual override available while letting Atlas auto-route when the caller only sends a prompt.
 
@@ -137,8 +143,10 @@ authoritative spec; see also [Concepts §15](concepts-en.md#15-fleet-packs-byok-
   action without ever storing, logging, or returning the key — see
   [BYOK Key Injection](specs/byok-key-injection.md) and the
   [Managed Inference Gateway](specs/managed-inference.md) readiness note.
-- **`/healthz`** is an unauthenticated liveness endpoint (status + version) that Fleet
-  uses to provision and track instances.
+- **`/healthz`** is an unauthenticated liveness endpoint returning `{ok, service, version}`
+  that Fleet uses to provision and track instances. Fleet treats an instance as healthy only
+  when the response is HTTP 200 **and** `ok` is true; a 200 carrying `{"ok": false}` (reachable
+  but degraded) is recorded `offline`, on both the provision wait and the periodic poll.
 
 ## Phase 4 Readiness
 

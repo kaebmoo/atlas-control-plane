@@ -78,8 +78,8 @@
   implementation checklist
 - [Sovereign Platform Plan (GA Gaps)](plans/sovereign-platform-plan.md) — สิ่งที่ยังขาด
   เพื่อไป GA: auth/RBAC, multi-tenant แบบ silo, metering/billing, fleet provisioning, hardening
-- [Usage Metering & Billing Plan](plans/usage-metering-billing-plan.md) — BYOK,
-  billable unit, CDR export, metering schema, B-milestones
+- Usage Metering & Billing Plan (`plans/usage-metering-billing-plan.md`, internal — not
+  committed) — BYOK, billable unit, CDR export, metering schema, B-milestones
 - [GA Completion Plan (run-to-completion)](plans/ga-completion-plan.md) — ลำดับเดินจนจบ
   ทุกงานที่เหลือ (M3→M9 + B3–B7), definition-of-done ต่อ milestone, scope tiers และ commit policy
 
@@ -111,8 +111,8 @@ docs/
 │   ├── workflow-engine-plan.md
 │   ├── workflow-engine-coding-plan.md
 │   ├── sovereign-platform-plan.md
-│   ├── usage-metering-billing-plan.md
-│   ├── nt-aiaas-business-plan.md
+│   ├── usage-metering-billing-plan.md   (internal, not committed)
+│   ├── nt-aiaas-business-plan.md        (internal, not committed)
 │   └── ga-completion-plan.md
 ├── prompts/
 │   ├── workflow-engine-spin-prompts.md

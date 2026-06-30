@@ -60,7 +60,9 @@ Atlas เก็บใน SQLite
 1. ระบุ `workspace_id` ตรง ๆ
 2. ระบุ `worker_id` ตรง ๆ
 3. ใช้ session binding ของ conversation เดิม
-4. route อัตโนมัติจากสถานะ online, workspace key, company, tags, role และคำใบ้ใน prompt
+4. route อัตโนมัติจากสถานะ online, workspace key, company, tags และคำใบ้ใน prompt (ถ้าระบุ
+   `role` มาด้วย จะเป็น hard filter ที่กรองก่อน: ถ้าไม่มี candidate ตัวไหนประกาศ role นั้น
+   request จะล้มเหลว แทนที่จะ fallback ไป worker อันดับรองลงมา)
 
 ดู flowchart ได้ใน [คู่มือเว็บ §4](guides/web-user-guide-th.md#4-command-ส่งงานเดี่ยวและ-handoff)
 

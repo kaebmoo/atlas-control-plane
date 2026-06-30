@@ -119,8 +119,10 @@ ATLAS_SECRET_KEY=… python3 -m atlas.packs verify pack.signed.json
   pack is rejected (`pack signature is invalid`). A signed pack also fails if the server
   has no `ATLAS_SECRET_KEY` to verify against.
 - An **unsigned** bundle is accepted (the shipped `gov_complaint` pack is unsigned),
-  unless the caller sets `require_signature` (then `pack is unsigned but a signature is
-  required`).
+  unless the instance sets `ATLAS_REQUIRE_SIGNED_PACKS=true` — then every import must be
+  signed and an unsigned bundle is rejected (`pack is unsigned but a signature is required`).
+  This is a server-side deployment policy, not a per-request field: a caller cannot opt out
+  of it. The secure-by-omission default is `false` (unsigned accepted).
 
 `GET /api/packs` reports a `signed` boolean per pack (whether a signature is present).
 

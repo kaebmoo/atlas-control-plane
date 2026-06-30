@@ -54,8 +54,11 @@ Authorization header. Do not use it for ordinary requests because URLs may be
 recorded in logs and history.
 
 Set `ATLAS_LOOPBACK_NO_AUTH=true` explicitly for local development to allow
-requests seen as `127.0.0.1` or `::1` without a token. The secure default is
-`false`. A configured `ATLAS_API_TOKEN` remains accepted as a legacy admin token.
+requests seen as `127.0.0.1` or `::1` without a token. Such a loopback request is
+treated as the built-in **admin** identity, so it bypasses every role/permission
+(RBAC) check — keep it off in any shared or production deployment. The secure
+default is `false`. A configured `ATLAS_API_TOKEN` remains accepted as a legacy
+admin token.
 
 Current limitations:
 

@@ -60,7 +60,11 @@ it. Two targets:
 
 `health` polls each instance's unauthenticated `GET /healthz` (additive endpoint:
 `{ok, service, version}`, leaks nothing) and records `status` + `version` +
-`last_health_at`. A non-200/unreachable instance is marked `offline`.
+`last_health_at`. An instance is `online` only when it returns HTTP 200 **and** the body's
+`ok` flag is true; a non-200, unreachable, or 200-carrying-`{"ok": false}` (reachable but
+degraded) instance is marked `offline`. Provisioning applies the same rule — it waits for a
+200-with-`ok:true` before registering an instance, so a degraded instance never registers
+`online` only to flip `offline` on the next poll.
 
 ## Usage pull
 
@@ -71,7 +75,8 @@ per instance.
 ## CDR export
 
 `cdr` pulls usage from every instance, aggregates per tenant per period, and writes one
-`cdr-<tenant>.csv` per tenant under `--out-dir`. Monthly vs annual is just the
+`cdr-<tenant>-<from>_<to>.csv` per tenant under `--out-dir` (the period is encoded in the
+filename so different periods never overwrite each other). Monthly vs annual is just the
 `--from`/`--to` range; re-exporting a period is byte-identical (deterministic). This is
 **export only** — no rating, no invoices (NT bills from the CDR). The record schema is
 proposed and pending NT confirmation — see

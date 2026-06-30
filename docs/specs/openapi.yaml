@@ -1475,7 +1475,7 @@ components:
         node_key: {type: [string, 'null']}
         worker_id: {type: [string, 'null']}
         actor: {type: [string, 'null']}
-        kind: {type: string, enum: [job, workflow_run, token, worker_active]}
+        kind: {type: string, enum: [job, workflow_run, token, worker_active, inference_tokens, gpu_seconds], description: "job/workflow_run are emitted by Atlas core today; inference_tokens/gpu_seconds are the managed-inference gateway meters (see managed-inference.md); token/worker_active are reserved."}
         status: {type: [string, 'null']}
         units: {type: integer}
         seconds: {type: [number, 'null']}

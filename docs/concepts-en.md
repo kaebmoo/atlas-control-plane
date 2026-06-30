@@ -61,7 +61,9 @@ first rule that resolves wins.
 1. Explicit `workspace_id`
 2. Explicit `worker_id`
 3. Existing conversation's session binding
-4. Auto-route by online state, workspace key, company, tags, role, and prompt hints
+4. Auto-route by online state, workspace key, company, tags, and prompt hints (a requested
+   `role` is a hard filter applied first: if no candidate worker advertises it, the request
+   fails instead of falling back to a lower-ranked worker)
 
 A flowchart of this is in the
 [web guide §4](guides/web-user-guide-en.md#4-command-jobs-and-handoffs).

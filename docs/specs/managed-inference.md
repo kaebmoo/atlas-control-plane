@@ -34,11 +34,25 @@ so it flows into the same usage→CDR pipeline as **extra CDR rows** (new `event
 | `gpu_seconds` | — | GPU wall seconds | self-hosted GPU time |
 
 These reuse the `usage_events` shape already in Atlas (`kind`, `units`, `seconds`,
-`model`, `tokens_prompt`, `tokens_output`, `metadata`). Because
-[fleet/cdr.py](../../fleet/README.md) aggregates per `event_type`, the gateway's events
-appear as additional CDR rows automatically — **no CDR or Atlas-core change required**.
-NT rates and bills these rows; Atlas/Fleet only export them (see
-[cdr-schema.md](cdr-schema.md)).
+`model`, `tokens_prompt`, `tokens_output`, `metadata`). `inference_tokens` and `gpu_seconds`
+are the **canonical** `kind` values — they are listed in the `UsageEvent` schema's `kind`
+enum in [openapi.yaml](openapi.yaml), so a consumer validating `/api/usage` against the spec
+accepts gateway rows. Because [fleet/cdr.py](../../fleet/README.md) aggregates per
+`event_type`, the gateway's events appear as additional CDR rows automatically — **no CDR or
+Atlas-core change required**. NT rates and bills these rows; Atlas/Fleet only export them
+(see [cdr-schema.md](cdr-schema.md)).
+
+> **CDR column note.** The CDR aggregator sums each group's `units` into a column named
+> `budget_units` regardless of `event_type`. For an `inference_tokens` group that column
+> therefore carries the **token total** (the meter's `units`), and for `gpu_seconds` the time
+> lives in the `seconds` column (`units` is empty). NT's rating step should read the value by
+> `event_type`, not by the column name. The CDR schema is PROPOSED and may rename this column
+> before NT sign-off — see [cdr-schema.md](cdr-schema.md).
+
+**Per-request limits** (e.g. `max_tokens`) are applied at the **gateway/worker layer**, not
+Atlas core. Atlas forwards the `model` (and prompt/session) to the worker; it does not
+currently thread a per-node `max_tokens` from a workflow definition. Wiring a workflow-node
+token cap through to the gateway is part of the B7 gateway work, not shipped in core today.
 
 ## Why readiness-only now
 

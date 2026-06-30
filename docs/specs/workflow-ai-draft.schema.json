@@ -12,7 +12,7 @@
     "graph": {"$ref": "workflow-definition.schema.json#/$defs/graph"},
     "policy": {"$ref": "workflow-definition.schema.json#/$defs/policy"},
     "triggers": {"$ref": "workflow-trigger.schema.json"},
-    "explanation": {"type": "string"},
+    "explanation": {"type": "string", "minLength": 1},
     "warnings": {
       "type": "array",
       "items": {"type": "string"}

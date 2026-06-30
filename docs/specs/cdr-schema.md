@@ -62,8 +62,12 @@ python3 -m fleet cdr --from 2026-06-01 --to 2026-06-30 --out-dir ./cdr   # month
 python3 -m fleet cdr --from 2026-01-01 --to 2026-12-31 --out-dir ./cdr   # annual
 ```
 
-Writes one `cdr-<tenant>.csv` per tenant under `--out-dir`. Monthly vs annual is purely
-the `--from`/`--to` range. See [fleet/README.md](../../fleet/README.md).
+Writes one `cdr-<tenant>-<from>_<to>.csv` per tenant under `--out-dir` — the export period
+is encoded in the filename (e.g. `cdr-acme-2026-06-01_2026-06-30.csv`), so exporting a
+different period into the same directory never overwrites an earlier billing artifact.
+Unbounded `--from`/`--to` fall back to `begin`/`end` in the tag. If two tenant names sanitize
+to the same string, a short `-<sha8>` suffix is appended to keep them distinct. Monthly vs
+annual is purely the `--from`/`--to` range. See [fleet/README.md](../../fleet/README.md).
 
 ## Explicitly out of scope (NT owns these)
 
