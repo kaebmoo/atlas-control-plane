@@ -1,10 +1,17 @@
 name: ci
 
-# Two independent required jobs:
+# Two independent jobs:
 #   gate — the hermetic, offline, stdlib-only completion gate (scripts/gate.sh)
 #   lint — fail-closed static analysis (scripts/lint.sh: ruff + bandit, pinned via uvx)
 # They are deliberately separate: the gate proves runtime behavior with no network/deps; lint
 # catches bug/security CLASSES and is allowed to use ephemeral dev tools.
+#
+# NOTE: this workflow runs them, but does NOT make them *required*. "Required" is a branch-
+# protection setting, not something a YAML can self-declare. Enforce it once per repo:
+#   gh api -X PUT repos/{owner}/{repo}/branches/main/protection \
+#     -f 'required_status_checks[strict]=true' \
+#     -f 'required_status_checks[contexts][]=gate' -f 'required_status_checks[contexts][]=lint'
+# then verify a PR that fails either job is actually blocked from merge.
 
 on:
   push:
