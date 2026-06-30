@@ -2,7 +2,7 @@ name: ci
 
 # Two independent jobs:
 #   gate — the hermetic, offline, stdlib-only completion gate (scripts/gate.sh)
-#   lint — fail-closed static analysis (scripts/lint.sh: ruff + bandit, pinned via uvx)
+#   lint — fail-closed static analysis (scripts/lint.sh: ruff + bandit + mypy, pinned via uvx)
 # They are deliberately separate: the gate proves runtime behavior with no network/deps; lint
 # catches bug/security CLASSES and is allowed to use ephemeral dev tools.
 #

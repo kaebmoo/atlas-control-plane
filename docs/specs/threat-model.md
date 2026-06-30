@@ -124,8 +124,8 @@ LLM cold passes SAMPLE; they can't prove absence, so "two clean passes" is not t
 ## How it's enforced today
 
 `scripts/gate.sh` — hermetic, offline, stdlib, 17 checks incl. concurrency **stress** + parser
-**fuzz** (both EVIDENCE, not proofs of absence). `scripts/lint.sh` — fail-closed ruff + bandit
-(pinned). Both run in CI ([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)) as jobs
+**fuzz** (both EVIDENCE, not proofs of absence). `scripts/lint.sh` — fail-closed ruff + bandit +
+mypy (pinned). Both run in CI ([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)) as jobs
 `gate` and `lint`. **"Required" is a branch-protection setting, not a YAML self-declaration** — a
 sign-off prerequisite is that `main` branch protection lists both as required status checks and a
 failing PR is actually blocked (command in the CI file). Every fix carries a hermetic check, and
