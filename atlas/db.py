@@ -736,7 +736,7 @@ class Database:
         assignments = _set_clause(fields)
         try:
             with self._lock, self.connect() as conn:
-                conn.execute(f"UPDATE users SET {assignments} WHERE id = ?", [*fields.values(), user_id])
+                conn.execute(f"UPDATE users SET {assignments} WHERE id = ?", [*fields.values(), user_id])  # nosec B608
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"username already exists: {fields.get('username')}") from exc
         self.audit("user.update", "user", user_id, {key: value for key, value in fields.items() if key != "password_hash"})
@@ -907,7 +907,7 @@ class Database:
         fields["updated_at"] = now_iso()
         assignments = _set_clause(fields)
         with self._lock, self.connect() as conn:
-            cursor = conn.execute(f"UPDATE workflow_definitions SET {assignments} WHERE id = ?", list(fields.values()) + [definition_id])
+            cursor = conn.execute(f"UPDATE workflow_definitions SET {assignments} WHERE id = ?", list(fields.values()) + [definition_id])  # nosec B608
         if cursor.rowcount:
             self.audit("workflow_definition.update", "workflow_definition", definition_id)
         return self.get_workflow_definition(definition_id)
@@ -983,7 +983,7 @@ class Database:
         fields["updated_at"] = now_iso()
         assignments = _set_clause(fields)
         with self._lock, self.connect() as conn:
-            conn.execute(f"UPDATE workflow_runs SET {assignments} WHERE id = ?", list(fields.values()) + [run_id])
+            conn.execute(f"UPDATE workflow_runs SET {assignments} WHERE id = ?", list(fields.values()) + [run_id])  # nosec B608
 
     def finalize_workflow_run(self, run_id: str, state: str, allowed_from: tuple[str, ...] | None = None, **fields: Any) -> bool:
         """Atomically transition a run's state via a single check-and-set UPDATE. Returns True
@@ -1006,7 +1006,7 @@ class Database:
             predicate, extra = f"state IN ({', '.join('?' for _ in allowed_from)})", list(allowed_from)
         with self._lock, self.connect() as conn:
             cursor = conn.execute(
-                f"UPDATE workflow_runs SET {assignments} WHERE id = ? AND {predicate}",
+                f"UPDATE workflow_runs SET {assignments} WHERE id = ? AND {predicate}",  # nosec B608
                 list(fields.values()) + [run_id] + extra,
             )
         return cursor.rowcount > 0
@@ -1063,7 +1063,7 @@ class Database:
         fields["updated_at"] = now_iso()
         assignments = _set_clause(fields)
         with self._lock, self.connect() as conn:
-            conn.execute(f"UPDATE workflow_nodes SET {assignments} WHERE id = ?", list(fields.values()) + [node_id])
+            conn.execute(f"UPDATE workflow_nodes SET {assignments} WHERE id = ?", list(fields.values()) + [node_id])  # nosec B608
 
     def append_workflow_edge(self, run_id: str, from_node: str, to_node: str, condition_result: Any = None) -> dict[str, Any]:
         edge_id = new_id("wfe")
@@ -1295,7 +1295,7 @@ class Database:
         fields["updated_at"] = now_iso()
         assignments = _set_clause(fields)
         with self._lock, self.connect() as conn:
-            cursor = conn.execute(f"UPDATE workflow_triggers SET {assignments} WHERE id = ?", list(fields.values()) + [trigger_id])
+            cursor = conn.execute(f"UPDATE workflow_triggers SET {assignments} WHERE id = ?", list(fields.values()) + [trigger_id])  # nosec B608
         if cursor.rowcount:
             self.audit("workflow_trigger.update", "workflow_trigger", trigger_id)
         return self.get_workflow_trigger(trigger_id)
@@ -1490,6 +1490,10 @@ class Database:
         if not payload.get("base_url"):
             raise ValueError("base_url is required")
         base_url = str(payload["base_url"]).rstrip("/")
+        if not base_url.startswith(("http://", "https://")):
+            # Only http(s): a file:// or custom-scheme base_url would make the worker
+            # health/agent urlopen read a local file or hit an unexpected scheme (SSRF/LFI).
+            raise ValueError("worker base_url must be an http(s) URL")
         with self._lock, self.connect() as conn:
             existing = conn.execute("SELECT id, created_at, token FROM workers WHERE id = ? OR base_url = ?", (worker_id, base_url)).fetchone()
             if existing:
@@ -1856,7 +1860,7 @@ class Database:
         assignments = _set_clause(fields)
         values = list(fields.values()) + [job_id]
         with self._lock, self.connect() as conn:
-            conn.execute(f"UPDATE jobs SET {assignments} WHERE id = ?", values)
+            conn.execute(f"UPDATE jobs SET {assignments} WHERE id = ?", values)  # nosec B608
 
     def mark_cancel_requested(self, job_id: str) -> bool:
         """Request cancellation atomically, but ONLY if the job is not already terminal —

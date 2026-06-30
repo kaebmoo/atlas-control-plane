@@ -70,6 +70,10 @@ class Registry:
 
     def register(self, instance: dict[str, Any]) -> dict[str, Any]:
         instance_id = instance.get("id") or new_id("inst")
+        if not str(instance.get("base_url") or "").startswith(("http://", "https://")):
+            # Only http(s): a file:// / custom-scheme base_url would make health/usage urlopen
+            # read a local file or hit an unexpected scheme.
+            raise ValueError("instance base_url must be an http(s) URL")
         with self._connect() as conn:
             conn.execute(
                 """
@@ -201,7 +205,7 @@ def _await_healthy(base_url: str, proc: subprocess.Popen, timeout: float = 15.0)
         if proc.poll() is not None:
             raise RuntimeError(f"atlas instance exited early (code {proc.returncode})")
         try:
-            with urllib.request.urlopen(base_url + "/healthz", timeout=1) as resp:
+            with urllib.request.urlopen(base_url + "/healthz", timeout=1) as resp:  # nosec B310
                 body = json.loads(resp.read()) if resp.status == 200 else {}
             # Mirror check_health: a 200 carrying {"ok": false} is not yet healthy. Keep
             # polling instead of registering the instance online here only for the next
@@ -303,7 +307,7 @@ def provision_local(
 def check_health(registry: Registry, instance: dict[str, Any]) -> dict[str, Any]:
     status, version = "offline", None
     try:
-        with urllib.request.urlopen(instance["base_url"] + "/healthz", timeout=3) as resp:
+        with urllib.request.urlopen(instance["base_url"] + "/healthz", timeout=3) as resp:  # nosec B310
             http_status = resp.status
             body = json.loads(resp.read()) if http_status == 200 else {}
         # Honor the instance's own ok flag: a 200 carrying {"ok": false} is unhealthy, not
@@ -342,7 +346,7 @@ def pull_usage(
         token = registry.token_for(instance.get("admin_token_ref"))
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=10) as resp:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=10) as resp:  # nosec B310
                 payload = json.loads(resp.read())
             result[instance["id"]] = payload.get("usage", [])
         except (urllib.error.URLError, ConnectionError, OSError) as exc:

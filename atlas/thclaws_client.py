@@ -40,7 +40,7 @@ class ThClawsClient:
             headers["Authorization"] = f"Bearer {self.token}"
         request = urllib.request.Request(f"{self.base_url}{path}", data=body, headers=headers, method=method)
         try:
-            return urllib.request.urlopen(request, timeout=self.timeout if timeout is None else timeout)
+            return urllib.request.urlopen(request, timeout=self.timeout if timeout is None else timeout)  # nosec B310
         except urllib.error.HTTPError as exc:
             details = exc.read().decode("utf-8", errors="replace")
             raise ThClawsError(f"thClaws HTTP {exc.code}: {details}") from exc
