@@ -396,15 +396,17 @@ def check_artifact_ordering(db: Database) -> None:
 
 
 def check_iter_sse_deadline() -> None:
-    """iter_sse enforces the deadline per LINE, so a heartbeat-only stream (`: ping`, no events)
-    can't pin the thread past the deadline."""
+    """iter_sse enforces the deadline on a heartbeat-only stream (`: ping`, no events / no
+    newline-terminated frames) that would otherwise pin the thread."""
+    import io
+
     try:
-        list(iter_sse(iter([b": ping\n"] * 100), stream_deadline=time.monotonic() - 1))
+        list(iter_sse(io.BytesIO(b": ping\n" * 100), stream_deadline=time.monotonic() - 1))
     except ThClawsError as exc:
         assert "deadline" in str(exc), exc
     else:
         raise AssertionError("heartbeat-only stream past the deadline must raise")
-    assert list(iter_sse(iter([b": ping\n", b": ping\n"]))) == [], "heartbeats with no deadline are just skipped"
+    assert list(iter_sse(io.BytesIO(b": ping\n: ping\n"))) == [], "heartbeats with no deadline are just skipped"
 
 
 def check_resume_rearm(db: Database) -> None:
@@ -445,6 +447,23 @@ def check_pack_workspace_ownership(db: Database) -> None:
         raise AssertionError("pack with mismatched worker/workspace must be rejected")
     ws1 = db.upsert_workspace({"worker_id": w1["id"], "workspace_key": "k1", "workspace_dir": "/tmp/y"})
     _validate_pack_references(db, {"workflows": [{"graph": {"nodes": [{"id": "n", "worker_id": w1["id"], "workspace_id": ws1["id"]}]}}]})
+
+    # node-vs-policy: a node using worker w2's workspace while policy allows only w1 is rejected
+    # (the shared validator catches it; pack import previously missed this).
+    node_vs_policy = {"workflows": [{"graph": {"nodes": [{"id": "n", "workspace_id": ws2["id"]}]}, "policy": {"allowed_worker_ids": [w1["id"]]}}]}
+    try:
+        _validate_pack_references(db, node_vs_policy)
+    except ValueError as exc:
+        assert "not allowed by policy" in str(exc), exc
+    else:
+        raise AssertionError("pack node-vs-policy mismatch must be rejected")
+    # a policy allow-list referencing a non-existent worker is rejected too.
+    try:
+        _validate_pack_references(db, {"workflows": [{"graph": {"nodes": []}, "policy": {"allowed_worker_ids": ["wrk_nope"]}}]})
+    except ValueError as exc:
+        assert "unknown worker" in str(exc), exc
+    else:
+        raise AssertionError("pack policy allow-list existence must be checked")
 
 
 def check_limit_clamp() -> None:

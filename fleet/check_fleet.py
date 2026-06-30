@@ -183,6 +183,22 @@ def main() -> None:
             raise AssertionError("provision must propagate a register() failure")
         assert reg_rb._load_secrets() == {}, "failed provision must roll back the stored secret"
 
+        # A register() that COMMITS the row and THEN raises must leave NO orphan row (the
+        # pre-generated id lets rollback deregister it) and no orphan secret.
+        def _commit_then_raise(payload: dict) -> dict:
+            original_register(payload)
+            raise RuntimeError("post-commit boom")
+
+        reg_rb.register = _commit_then_raise  # type: ignore[method-assign]
+        try:
+            provision_local(reg_rb, "tenant-pc", data_dir=Path(tmp) / "inst-pc")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("provision must propagate a post-commit register failure")
+        assert reg_rb.list() == [], "post-commit failure must roll back the registry row (no orphan instance)"
+        assert reg_rb._load_secrets() == {}, "post-commit failure must roll back the secret"
+
         reg_rb.register = original_register  # type: ignore[method-assign]
         instance_rb, proc_rb = provision_local(reg_rb, "tenant-rb", data_dir=data_dir)
         try:
@@ -191,6 +207,19 @@ def main() -> None:
         finally:
             proc_rb.terminate()
             proc_rb.wait(timeout=5)
+
+        # Idempotent seeding must REFUSE to reuse a non-admin / disabled seeded user (it would
+        # mint a Fleet token that then 401/403s on /api/usage).
+        na_dir = Path(tmp) / "inst-na"
+        na_db = Database(na_dir / INSTANCE_DB_NAME)
+        with na_db.as_actor("test"):
+            na_db.create_user("admin-tenant-na", "pw", role="viewer")
+        try:
+            provision_local(Registry(Path(tmp) / "fleet-na" / "f.sqlite"), "tenant-na", data_dir=na_dir)
+        except ValueError as exc:
+            assert "not an active admin" in str(exc), exc
+        else:
+            raise AssertionError("provision must refuse to reuse a non-admin seeded user")
 
     print("fleet check ok")
 

@@ -39,11 +39,13 @@ def check_sse_parsers_never_crash() -> None:
         assert extract_text(event) is None or isinstance(extract_text(event), str)
         assert extract_session_id(event) is None or isinstance(extract_session_id(event), str)
         assert isinstance(parse_event_payload(event), dict)
-    # iter_sse over random raw byte lines: only ThClawsError is allowed to escape.
+    # iter_sse over a random raw byte stream: only ThClawsError is allowed to escape.
+    import io
+
     for _ in range(500):
-        lines = [random.choice([b":ping\n", b"data: x\n", b"event: t\n", b"\n", b"data:\xff\xfe\n", b"garbage"]) for _ in range(random.randint(0, 20))]
+        blob = b"".join(random.choice([b":ping\n", b"data: x\n", b"event: t\n", b"\n", b"data:\xff\xfe\n", b"garbage"]) for _ in range(random.randint(0, 20)))
         try:
-            list(iter_sse(iter(lines)))
+            list(iter_sse(io.BytesIO(blob)))
         except ThClawsError:
             pass
 

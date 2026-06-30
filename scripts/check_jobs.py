@@ -218,6 +218,61 @@ def check_combined_frame_text(db: Database) -> None:
         mock.server_close()
 
 
+class DripHandler(BaseHTTPRequestHandler):
+    """Mock worker that drips bytes WITHOUT a newline forever — readline() never returns, so
+    only the stream watchdog (not a per-line check) can cut it."""
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def do_GET(self) -> None:
+        body = json.dumps({"ok": True}).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        try:
+            for _ in range(200):
+                self.wfile.write(b"data: partial")  # no newline -> never a complete SSE line
+                self.wfile.flush()
+                time.sleep(0.1)
+        except Exception:
+            pass  # connection closed by the watchdog
+
+
+def check_stream_deadline_bytedrip(db: Database) -> None:
+    """A worker dripping bytes without a newline must be cut by the stream deadline (watchdog),
+    not pin the thread until the 30s socket timeout."""
+    mock = ThreadingHTTPServer(("127.0.0.1", 0), DripHandler)
+    threading.Thread(target=mock.serve_forever, daemon=True).start()
+    try:
+        host, port = mock.server_address
+        worker = db.upsert_worker({"base_url": f"http://{host}:{port}", "name": "drip"})
+        manager = JobManager(db, request_timeout_seconds=5)
+        manager.max_stream_seconds = 0.3
+        job = manager.submit({"prompt": "x", "worker_id": worker["id"]})
+        start = time.monotonic()
+        while time.monotonic() < start + 8:
+            current = db.get_job(job["id"])
+            if current and current["state"] in {"succeeded", "failed", "cancelled"}:
+                break
+            time.sleep(0.02)
+        elapsed = time.monotonic() - start
+        final = db.get_job(job["id"])
+        assert final["state"] == "failed", f"byte-drip must fail, got {final['state']}"
+        assert elapsed < 4, f"deadline must cut the drip promptly (not the 30s socket timeout); took {elapsed:.2f}s"
+        _await_threads_drained(manager)
+    finally:
+        mock.shutdown()
+        mock.server_close()
+
+
 def check_reconcile_cancelled(db: Database) -> None:
     """A job cancelled but not yet observed by its thread before a restart must reconcile to
     'cancelled', not 'failed'."""
@@ -232,6 +287,7 @@ def check_reconcile_cancelled(db: Database) -> None:
 def main() -> None:
     with TemporaryDirectory() as tmp:
         check_combined_frame_text(Database(Path(tmp) / "combined.sqlite"))
+        check_stream_deadline_bytedrip(Database(Path(tmp) / "drip.sqlite"))
         check_reconcile_cancelled(Database(Path(tmp) / "reconcancel.sqlite"))
         check_submit_routing_failure_no_orphan(Database(Path(tmp) / "orphan.sqlite"))
         check_poll_worker_health(Database(Path(tmp) / "health.sqlite"))
