@@ -134,11 +134,19 @@ def check_routes() -> list[str]:
         "api-reference-th.md": _doc_route_sigs((DOCS / "specs" / "api-reference-th.md").read_text(encoding="utf-8")),
     }
     problems = []
+    # Forward: every app route is documented in all three docs.
     for sig in sorted(app_sigs):
         path = "/" + "/".join(sig)
         for label, doc_sigs in docs.items():
             if sig not in doc_sigs:
                 problems.append(f"route {path} (atlas/app.py) is missing from {label}")
+    # Reverse: every /api path in the OpenAPI spec must still exist in app.py (no phantom
+    # endpoint documented after the route was removed). Reverse is checked against OpenAPI only
+    # — the prose references legitimately mention example paths, so reverse-checking them would
+    # be noisy. (EN/TH coverage here is route-level parity, not full prose-content parity.)
+    for sig in sorted(s for s in docs["openapi.yaml"] if s and s[0] == "api"):
+        if sig not in app_sigs:
+            problems.append(f"route /{'/'.join(sig)} is in openapi.yaml but has no route in atlas/app.py (phantom)")
     return problems
 
 

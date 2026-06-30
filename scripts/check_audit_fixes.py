@@ -1,6 +1,8 @@
 """Hermetic checks for the audit-round fixes that are testable in-process (no network):
 atomic terminal transitions, run graph/policy snapshots, trigger config validation, the
-schedule-advance recovery, and concurrent atomic secret writes. Each uses its own temp DB.
+schedule-advance recovery, concurrent atomic secret writes, plus the round-6 cold-review
+fixes (SSE session-id parsing, finalize source-state guard, CSV/env-file injection,
+negative-units clamp, artifact ordering). Each uses its own temp DB.
 """
 
 from __future__ import annotations
@@ -9,6 +11,7 @@ import json
 import os
 import sys
 import threading
+import time
 import types
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,8 +21,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from atlas.app import _LIMIT_CAP, _parse_limit, _validate_artifact_payload, cli_config
+from atlas.byok import _write_env_file
 from atlas.db import Database, atomic_write_0600, now_iso
 from atlas.jobs import JobManager
+from atlas.packs import _validate_pack_references
+from atlas.thclaws_client import SseEvent, ThClawsError, extract_session_id, extract_text, iter_sse
+from atlas.usage import usage_csv
 from atlas.workflows import (
     WorkflowRunner,
     WorkflowTriggerService,
@@ -96,6 +103,14 @@ def check_try_start_job(db: Database) -> None:
     db.mark_cancel_requested(cancelled["id"])
     assert db.try_start_job(cancelled["id"]) is False, "a cancelled queued job must not start"
     assert db.get_job(cancelled["id"])["state"] != "running"
+    # Pin the `cancel_requested = 0` clause SPECIFICALLY: a job that is still 'queued' AND
+    # cancel_requested=1 at once (write the column directly, NOT via mark_cancel_requested which
+    # moves state off 'queued'). Without that clause, try_start_job would start it.
+    raced = db.create_job({"worker_id": worker["id"], "prompt": "hi", "state": "queued"})
+    db.update_job(raced["id"], cancel_requested=1)
+    assert db.get_job(raced["id"])["state"] == "queued"
+    assert db.try_start_job(raced["id"]) is False, "queued + cancel_requested must not start (the cancel clause)"
+    assert db.get_job(raced["id"])["state"] == "queued"
 
 
 def check_cancel_terminal_guard(db: Database) -> None:
@@ -246,6 +261,167 @@ def check_cli_config_preserves_fields() -> None:
             os.environ["ATLAS_REQUIRE_SIGNED_PACKS"] = prev
 
 
+def check_extract_session_id() -> None:
+    """A bare "id" must NOT be read as a session id (it would corrupt the conversation binding
+    and make the caller drop the frame's text); explicit session keys still work, and a frame
+    can carry BOTH a session id and text."""
+    # bare id on a normal event -> NOT a session; its text is still extractable.
+    ev = SseEvent(event="message", data=json.dumps({"id": "msg-1", "text": "hello"}))
+    assert extract_session_id(ev) is None, "bare 'id' must not be treated as a session id"
+    assert extract_text(ev) == "hello"
+    # explicit session id is honored, and combined session+text yields both.
+    ev2 = SseEvent(event="message", data=json.dumps({"session_id": "s-1", "text": "world"}))
+    assert extract_session_id(ev2) == "s-1"
+    assert extract_text(ev2) == "world", "text in a session-carrying frame must not be lost"
+    # id IS accepted only on an explicit session event.
+    assert extract_session_id(SseEvent(event="session", data=json.dumps({"id": "s-2"}))) == "s-2"
+
+
+def check_stop_requested(db: Database) -> None:
+    """_stop_requested (the runner's pause/cancel halt) must report stop for paused / cancelled /
+    waiting_for_human and NOT for running — directly, so a no-op'd predicate fails here."""
+    runner = WorkflowRunner(db, JobManager(db))
+    for state, expected in (("running", False), ("paused", True), ("waiting_for_human", True), ("cancelled", True)):
+        run = db.create_workflow_run({"name": state, "state": state})
+        assert runner._stop_requested(run["id"], [], {}) is expected, f"_stop_requested({state}) must be {expected}"
+
+
+def check_finish_run_respects_state(db: Database) -> None:
+    """The runner's _finish_run must NOT finalize (or emit run_finished) when the run was moved
+    to paused/waiting_for_human — and MUST finalize a running run. Locks the won-guard the gate
+    previously left green when removed."""
+    runner = WorkflowRunner(db, JobManager(db))
+    paused = db.create_workflow_run({"name": "p", "state": "paused"})
+    runner._finish_run(paused["id"], "succeeded", {})
+    assert db.get_workflow_run(paused["id"])["state"] == "paused", "runner must not overwrite a paused run"
+    assert not any(e["event_type"] == "run_finished" for e in db.list_workflow_events(paused["id"])), "no run_finished on a lost finalize"
+    running = db.create_workflow_run({"name": "r", "state": "running"})
+    runner._finish_run(running["id"], "succeeded", {})
+    assert db.get_workflow_run(running["id"])["state"] == "succeeded"
+    assert any(e["event_type"] == "run_finished" for e in db.list_workflow_events(running["id"])), "running run must emit run_finished"
+
+
+def check_finalize_allowed_from(db: Database) -> None:
+    """The runner's finish must only transition from its allowed source state(s); it must NOT
+    clobber a run that another path moved to paused/waiting_for_human."""
+    paused = db.create_workflow_run({"name": "p", "state": "paused"})
+    # allowed_from=('running',) -> a paused run is NOT finalized by the runner path.
+    assert db.finalize_workflow_run(paused["id"], "succeeded", allowed_from=("running",)) is False
+    assert db.get_workflow_run(paused["id"])["state"] == "paused", "paused run must not be overwritten"
+    # default (no allowed_from) -> cancel can still override a paused run.
+    assert db.finalize_workflow_run(paused["id"], "cancelled") is True
+    assert db.get_workflow_run(paused["id"])["state"] == "cancelled"
+    # reject's source (waiting_for_human) is permitted when listed.
+    waiting = db.create_workflow_run({"name": "w", "state": "waiting_for_human"})
+    assert db.finalize_workflow_run(waiting["id"], "failed", allowed_from=("waiting_for_human", "running")) is True
+
+
+def check_csv_injection() -> None:
+    """usage_csv must neutralize spreadsheet formula injection in free-text fields."""
+    rows = usage_csv([{ "kind": "job", "actor": "=HYPERLINK(\"http://evil\")", "model": "+1+1", "status": "ok" }])
+    line = [r for r in rows.splitlines() if "job" in r][-1]
+    assert "'=HYPERLINK" in line, "leading = must be escaped"
+    assert "'+1+1" in line, "leading + must be escaped"
+    # a benign value is untouched.
+    benign = usage_csv([{ "kind": "job", "actor": "alice", "status": "ok" }])
+    assert ",alice," in benign or benign.strip().endswith("alice") or "alice" in benign
+    assert "'alice" not in benign
+
+
+def check_byok_newline(tmp: Path) -> None:
+    """_write_env_file must reject a newline in the key (env-file line injection) and a bad env var name."""
+    path = tmp / "worker.env"
+    for bad_key in ("sk-real\nINJECTED=1", "sk\rINJECTED=1"):
+        try:
+            _write_env_file(path, "OPENAI_API_KEY", bad_key)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("newline in key must be rejected")
+    for bad_var in ("FOO=BAR", "FOO\nBAR"):
+        try:
+            _write_env_file(path, bad_var, "value")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("bad env var name must be rejected")
+    # a clean write still works.
+    _write_env_file(path, "OPENAI_API_KEY", "sk-clean")
+    assert path.read_text().strip() == "OPENAI_API_KEY=sk-clean"
+
+
+def check_negative_units_clamped(db: Database) -> None:
+    """emit_usage_event must clamp a negative units to 0 so it can't deflate the billed total."""
+    db.emit_usage_event({"idempotency_key": "neg-1", "kind": "workflow_run", "units": -1000, "status": "succeeded"})
+    row = next(e for e in db.list_usage_events() if e["idempotency_key"] == "neg-1")
+    assert row["units"] == 0, f"negative units must clamp to 0, got {row['units']}"
+
+
+def check_artifact_ordering(db: Database) -> None:
+    """Same-second artifacts on the same key must resolve last-write-wins by insertion order
+    (rowid tiebreaker), not undefined."""
+    run = db.create_workflow_run({"name": "a", "state": "running"})
+    db.create_artifact({"run_id": run["id"], "key": "k", "content": "first"})
+    db.create_artifact({"run_id": run["id"], "key": "k", "content": "second"})
+    # Force identical created_at on both rows so only the rowid tiebreaker can order them.
+    with db.connect() as conn:
+        conn.execute("UPDATE artifacts SET created_at = ? WHERE run_id = ?", (now_iso(), run["id"]))
+    listed = db.list_artifacts(run_id=run["id"], limit=10)
+    assert listed[0]["content"] == "second", f"rowid tiebreaker must put newest first, got {listed[0]['content']}"
+
+
+def check_iter_sse_deadline() -> None:
+    """iter_sse enforces the deadline per LINE, so a heartbeat-only stream (`: ping`, no events)
+    can't pin the thread past the deadline."""
+    try:
+        list(iter_sse(iter([b": ping\n"] * 100), stream_deadline=time.monotonic() - 1))
+    except ThClawsError as exc:
+        assert "deadline" in str(exc), exc
+    else:
+        raise AssertionError("heartbeat-only stream past the deadline must raise")
+    assert list(iter_sse(iter([b": ping\n", b": ping\n"]))) == [], "heartbeats with no deadline are just skipped"
+
+
+def check_resume_rearm(db: Database) -> None:
+    """If a runner thread exits while the run is 'running' (a resume/approve handoff race),
+    _run_background must re-arm a runner so the run isn't stranded 'running' with no runner."""
+    runner = WorkflowRunner(db, JobManager(db))
+    run = db.create_workflow_run({"name": "r", "state": "running", "graph_snapshot": GRAPH, "policy_snapshot": {}})
+    calls = {"n": 0}
+
+    def fake_execute(run_id: str, graph: dict, policy: dict, input: dict) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return  # first thread exits leaving the run 'running' (simulates the race)
+        db.finalize_workflow_run(run_id, "succeeded", allowed_from=("running",))  # re-armed thread converges
+
+    runner._execute_run = fake_execute  # type: ignore[assignment]
+    runner._threads[run["id"]] = threading.current_thread()  # so the finally's pop-condition matches
+    runner._run_background(run["id"], GRAPH, {}, {})
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and db.get_workflow_run(run["id"])["state"] == "running":
+        time.sleep(0.01)
+    assert db.get_workflow_run(run["id"])["state"] == "succeeded", "resume race must re-arm a runner, not strand 'running'"
+    assert calls["n"] >= 2, "the re-armed runner must actually run"
+
+
+def check_pack_workspace_ownership(db: Database) -> None:
+    """Pack import must reject a node that pins a worker AND a workspace owned by a different
+    worker (else the router silently runs on the workspace's owner, ignoring the declared worker)."""
+    w1 = db.upsert_worker({"base_url": "http://127.0.0.1:1", "name": "w1"})
+    w2 = db.upsert_worker({"base_url": "http://127.0.0.1:2", "name": "w2"})
+    ws2 = db.upsert_workspace({"worker_id": w2["id"], "workspace_key": "k2", "workspace_dir": "/tmp/x"})
+    mismatch = {"workflows": [{"graph": {"nodes": [{"id": "n", "worker_id": w1["id"], "workspace_id": ws2["id"]}]}}]}
+    try:
+        _validate_pack_references(db, mismatch)
+    except ValueError as exc:
+        assert "does not belong" in str(exc), exc
+    else:
+        raise AssertionError("pack with mismatched worker/workspace must be rejected")
+    ws1 = db.upsert_workspace({"worker_id": w1["id"], "workspace_key": "k1", "workspace_dir": "/tmp/y"})
+    _validate_pack_references(db, {"workflows": [{"graph": {"nodes": [{"id": "n", "worker_id": w1["id"], "workspace_id": ws1["id"]}]}}]})
+
+
 def check_limit_clamp() -> None:
     """?limit must be clamped to [1, cap]: a raw negative/zero would disable SQLite's LIMIT."""
     assert _parse_limit({"limit": ["-1"]}) == 1
@@ -270,6 +446,17 @@ def main() -> None:
         check_cancel_terminal_guard(Database(Path(tmp) / "cancelguard.sqlite"))
         check_workflow_input_type(Database(Path(tmp) / "inputtype.sqlite"))
         check_cli_config_preserves_fields()
+        check_extract_session_id()
+        check_stop_requested(Database(Path(tmp) / "stopreq.sqlite"))
+        check_finish_run_respects_state(Database(Path(tmp) / "finishstate.sqlite"))
+        check_finalize_allowed_from(Database(Path(tmp) / "finalfrom.sqlite"))
+        check_csv_injection()
+        check_byok_newline(Path(tmp))
+        check_negative_units_clamped(Database(Path(tmp) / "units.sqlite"))
+        check_artifact_ordering(Database(Path(tmp) / "artord.sqlite"))
+        check_iter_sse_deadline()
+        check_resume_rearm(Database(Path(tmp) / "rearm.sqlite"))
+        check_pack_workspace_ownership(Database(Path(tmp) / "packws.sqlite"))
     print("audit fixes check ok")
 
 

@@ -22,6 +22,15 @@ WORKER_OK = {"value": True}
 DISPATCH_COUNT = {"value": 0}
 
 
+def _await_threads_drained(manager: JobManager, timeout: float = 3.0) -> None:
+    """Wait for all job threads to finish their `finally` (usage write + self-removal) before a
+    test's TemporaryDirectory is cleaned up — otherwise a daemon thread connects to a deleted
+    DB and prints a spurious traceback into a later check."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and manager._threads:
+        time.sleep(0.01)
+
+
 class MockThClawsHandler(BaseHTTPRequestHandler):
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -102,6 +111,7 @@ def check_truncated_stream_fails(db: Database) -> None:
         final = db.get_job(job["id"])
         assert final["state"] == "failed", f"truncated stream must fail, got {final['state']}"
         assert "DONE" in (final.get("error") or ""), final.get("error")
+        _await_threads_drained(manager)
     finally:
         mock.shutdown()
         mock.server_close()
@@ -159,8 +169,70 @@ def check_upsert_requires_fields(db: Database) -> None:
             raise AssertionError("upsert_workspace must reject missing required fields with ValueError")
 
 
+class CombinedFrameHandler(BaseHTTPRequestHandler):
+    """Mock worker that emits ONE frame carrying both an `id` and `text`, then [DONE]."""
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def do_GET(self) -> None:
+        payload = {"ok": True} if self.path == "/healthz" else {"name": "mock"}
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        body = b'data: {"id":"msg-1","text":"hello world"}\n\ndata: [DONE]\n\n'
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def check_combined_frame_text(db: Database) -> None:
+    """A frame carrying BOTH an `id` and `text` must NOT have its text dropped (the `id` is not a
+    session id, and there is no early `continue` skipping extract_text)."""
+    mock = ThreadingHTTPServer(("127.0.0.1", 0), CombinedFrameHandler)
+    threading.Thread(target=mock.serve_forever, daemon=True).start()
+    try:
+        host, port = mock.server_address
+        worker = db.upsert_worker({"base_url": f"http://{host}:{port}", "name": "combined"})
+        manager = JobManager(db, request_timeout_seconds=5)
+        job = manager.submit({"prompt": "x", "worker_id": worker["id"]})
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            current = db.get_job(job["id"])
+            if current and current["state"] in {"succeeded", "failed", "cancelled"}:
+                break
+            time.sleep(0.02)
+        final = db.get_job(job["id"])
+        assert final["state"] == "succeeded", f"expected succeeded, got {final['state']}"
+        assert (final.get("assistant_text") or "") == "hello world", f"combined-frame text dropped: {final.get('assistant_text')!r}"
+        _await_threads_drained(manager)
+    finally:
+        mock.shutdown()
+        mock.server_close()
+
+
+def check_reconcile_cancelled(db: Database) -> None:
+    """A job cancelled but not yet observed by its thread before a restart must reconcile to
+    'cancelled', not 'failed'."""
+    worker = db.upsert_worker({"base_url": "http://127.0.0.1:9", "name": "x"})
+    job = db.create_job({"worker_id": worker["id"], "prompt": "hi", "state": "queued"})
+    db.update_job(job["id"], state="running", cancel_requested=1, started_at="2026-01-01T00:00:00Z")
+    JobManager(db).reconcile_jobs()
+    final = db.get_job(job["id"])
+    assert final["state"] == "cancelled", f"cancelled-but-unobserved job must reconcile to cancelled, got {final['state']}"
+
+
 def main() -> None:
     with TemporaryDirectory() as tmp:
+        check_combined_frame_text(Database(Path(tmp) / "combined.sqlite"))
+        check_reconcile_cancelled(Database(Path(tmp) / "reconcancel.sqlite"))
         check_submit_routing_failure_no_orphan(Database(Path(tmp) / "orphan.sqlite"))
         check_poll_worker_health(Database(Path(tmp) / "health.sqlite"))
         check_truncated_stream_fails(Database(Path(tmp) / "stream.sqlite"))

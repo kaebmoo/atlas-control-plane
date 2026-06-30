@@ -69,6 +69,11 @@ def main() -> None:
     # Deterministic: re-export is byte-identical.
     assert cdr_csv(cdr["tenant-a"]) == csv_text
 
+    # CSV formula injection: a tenant/field starting with =/+/-/@ must be neutralized.
+    injected = cdr_csv([{"tenant": "=1+1", "event_type": "+cmd", "count": 1}])
+    assert "'=1+1" in injected, "leading = in a CDR field must be escaped"
+    assert "'+cmd" in injected, "leading + in a CDR field must be escaped"
+
     with TemporaryDirectory() as tmp:
         first = write_cdr(Path(tmp) / "out1", cdr)
         second = write_cdr(Path(tmp) / "out2", cdr)

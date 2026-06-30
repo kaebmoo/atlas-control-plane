@@ -28,6 +28,12 @@ class _DummyProc:
     def terminate(self) -> None:
         return None
 
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+    def kill(self) -> None:
+        return None
+
 
 def main() -> None:
     with TemporaryDirectory() as tmp:
@@ -158,6 +164,33 @@ def main() -> None:
         verify = Registry(reg_path)
         for i in range(8):
             assert verify.token_for(f"ref-{i}") == f"tok-{i}", f"lost token ref-{i}"
+
+        # A provision that fails at register() (after store_token) must roll back the secret —
+        # no orphan ref — and a retry on the same data_dir must succeed (idempotent seeding).
+        reg_rb = Registry(Path(tmp) / "fleet-rb" / "fleet.sqlite")
+        data_dir = Path(tmp) / "inst-rb"
+        original_register = reg_rb.register
+
+        def _boom(*_args: object, **_kwargs: object) -> dict:
+            raise RuntimeError("register boom")
+
+        reg_rb.register = _boom  # type: ignore[method-assign]
+        try:
+            provision_local(reg_rb, "tenant-rb", data_dir=data_dir)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("provision must propagate a register() failure")
+        assert reg_rb._load_secrets() == {}, "failed provision must roll back the stored secret"
+
+        reg_rb.register = original_register  # type: ignore[method-assign]
+        instance_rb, proc_rb = provision_local(reg_rb, "tenant-rb", data_dir=data_dir)
+        try:
+            assert instance_rb["status"] == "online", "idempotent retry on the same data_dir must succeed"
+            assert len(reg_rb._load_secrets()) == 1, "a successful retry stores exactly one secret"
+        finally:
+            proc_rb.terminate()
+            proc_rb.wait(timeout=5)
 
     print("fleet check ok")
 

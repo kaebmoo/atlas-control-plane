@@ -184,6 +184,14 @@ def main() -> None:
             status, legacy_me = request(base_url, "GET", "/api/me", token="legacy-bootstrap-secret")
             assert status == 200 and legacy_me["user"]["role"] == "admin"
             assert any(row["action"] == "user.create" and row["actor"] == "admin" for row in runtime.db.list_audit(100))
+
+            # ?token= query auth is restricted to the SSE event streams (EventSource can't set a
+            # header); it must be REJECTED on any normal endpoint so tokens don't leak into URLs.
+            conv = runtime.db.create_conversation({"title": "t"})
+            term_job = runtime.db.create_job({"conversation_id": conv["id"], "worker_id": worker["id"], "prompt": "x"})
+            runtime.db.update_job(term_job["id"], state="succeeded")
+            assert _raw_status(f"{base_url}/api/me?token={admin_token}") == 401, "query token must be rejected on /api/me"
+            assert _raw_status(f"{base_url}/api/jobs/{term_job['id']}/events?after=0&token={admin_token}") == 200, "query token must work for SSE events"
         finally:
             server.shutdown()
             server.server_close()
@@ -261,6 +269,16 @@ def seed_users_with_cli(db_path: Path) -> tuple[str, str]:
 
 def value_after(output: str, prefix: str) -> str:
     return next(line.removeprefix(prefix) for line in output.splitlines() if line.startswith(prefix))
+
+
+def _raw_status(url: str) -> int:
+    """GET a URL (token in the query string) and return the HTTP status, tolerating an SSE body."""
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            response.read(1)
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
 
 
 def request(
