@@ -97,6 +97,14 @@ class Registry:
             row = conn.execute("SELECT * FROM instances WHERE id = ?", (instance_id,)).fetchone()
         return dict(row) if row else None
 
+    def deregister(self, instance_id: str) -> None:
+        """Remove an instance row (idempotent). Used to roll back a provision attempt whose
+        registry row was committed before a later step failed, so no orphan 'online' row with a
+        dead process / missing token is left behind."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM instances WHERE id = ?", (instance_id,))
+            conn.commit()
+
     def list(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM instances ORDER BY created_at, id").fetchall()
@@ -232,9 +240,18 @@ def provision_local(
     with db.as_actor("atlas-fleet"):
         # Idempotent seeding: a retry reusing the same data_dir must not fail with
         # "username already exists" — reuse the existing admin if a prior attempt seeded it.
-        user = db.get_user_by_username(f"admin-{tenant}") or db.create_user(
-            f"admin-{tenant}", secrets.token_urlsafe(16), role="admin"
-        )
+        # But ONLY if it's still an active admin: reusing a downgraded/disabled user would mint
+        # a Fleet token that then 401/403s on /api/usage. Fail clearly instead.
+        existing = db.get_user_by_username(f"admin-{tenant}")
+        if existing is not None:
+            if existing.get("role") != "admin" or existing.get("status") != "active":
+                raise ValueError(
+                    f"existing user admin-{tenant} is {existing.get('role')}/{existing.get('status')}, "
+                    "not an active admin; refusing to reuse for fleet bootstrap"
+                )
+            user = existing
+        else:
+            user = db.create_user(f"admin-{tenant}", secrets.token_urlsafe(16), role="admin")
         _, raw_token = db.create_api_token(user["id"], "fleet-bootstrap")
 
     env = {**os.environ, "ATLAS_DB": str(instance_db), "ATLAS_HOME": str(data_dir)}
@@ -248,6 +265,9 @@ def provision_local(
     )
     base_url = f"http://{host}:{port}"
     token_ref: str | None = None
+    # Pre-generate the instance id so rollback can delete the row even if register() committed
+    # it and then a later step (or register itself, post-commit) raised.
+    instance_id = new_id("inst")
     try:
         version = _await_healthy(base_url, proc)
         # Persist the admin token into the secrets sidecar only after the instance is healthy,
@@ -258,6 +278,7 @@ def provision_local(
         registry.store_token(token_ref, raw_token)
         instance = registry.register(
             {
+                "id": instance_id,
                 "tenant": tenant,
                 "base_url": base_url,
                 "region": region,
@@ -269,7 +290,10 @@ def provision_local(
         )
     except BaseException:
         _terminate(proc)
-        # Roll back a stored-but-unregistered secret so a failed provision leaves no orphan.
+        # Atomic rollback: drop any committed registry row AND the stored secret, so a failed
+        # provision (including a post-commit error) leaves neither an orphan 'online' instance
+        # nor an orphan token. Both deletes are idempotent.
+        registry.deregister(instance_id)
         if token_ref is not None:
             registry.delete_token(token_ref)
         raise
