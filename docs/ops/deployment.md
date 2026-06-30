@@ -99,7 +99,10 @@ Leave it off (`false`) to stay completely silent, as in dev.
 | `ATLAS_PORT` | `8787` | Upstream port for the proxy. |
 | `ATLAS_DB` | `./data/atlas.sqlite` | SQLite path; WAL mode is enabled automatically. |
 | `ATLAS_MAX_UPLOAD_BYTES` | `10485760` | Upload cap; mirror at the proxy. |
-| `ATLAS_REQUEST_TIMEOUT` | `30` | Worker request timeout (seconds). |
+| `ATLAS_REQUEST_TIMEOUT` | `30` | Worker request timeout (seconds, per recv). |
+| `ATLAS_MAX_STREAM_SECONDS` | `3600` | Overall wall-clock bound on a single worker stream; a slow/dripping worker is cut at this deadline. |
+| `ATLAS_MAX_JOB_OUTPUT_BYTES` | `16777216` | Cap on a single job's accumulated assistant output. |
+| `ATLAS_REQUIRE_SIGNED_PACKS` | `false` | When `true`, `POST /api/packs/import` rejects unsigned packs. |
 
 ## 5. Schema migrations on deploy
 
