@@ -11,8 +11,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import os
 import re
+import uuid
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 from .fleet import Registry, pull_usage
@@ -77,6 +80,14 @@ def aggregate_cdr(
     return result
 
 
+def _csv_safe(value: Any) -> Any:
+    """Neutralize spreadsheet formula injection (e.g. a tenant named `=1+1`): a cell starting
+    with = + - @ or a control char is prefixed with a single quote so it imports as text."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r", "\n"):
+        return "'" + value
+    return value
+
+
 def cdr_csv(rows: list[dict[str, Any]]) -> str:
     """Serialize CDR rows to a deterministic CSV (stable field order, no generated-at
     timestamp), prefixed with the proposed-schema marker."""
@@ -85,7 +96,7 @@ def cdr_csv(rows: list[dict[str, Any]]) -> str:
     writer = csv.DictWriter(output, fieldnames=CDR_FIELDS, extrasaction="ignore", lineterminator="\n")
     writer.writeheader()
     for row in rows:
-        writer.writerow({field: row.get(field, "") for field in CDR_FIELDS})
+        writer.writerow({field: _csv_safe(row.get(field, "")) for field in CDR_FIELDS})
     return output.getvalue()
 
 
@@ -111,8 +122,6 @@ def write_cdr(
     filename, so exporting a different period into the same directory never overwrites an
     earlier billing artifact. Deterministic: same input -> same filenames and same bytes.
     Returns {tenant: path}."""
-    from pathlib import Path
-
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     period = _period_tag(period_start, period_end)
@@ -126,9 +135,28 @@ def write_cdr(
         if name in collisions:
             name = f"{name}-{hashlib.sha256(tenant.encode('utf-8')).hexdigest()[:8]}"
         path = out_dir / f"cdr-{name}-{period}.csv"
-        path.write_text(cdr_csv(cdr_by_tenant[tenant]), encoding="utf-8")
+        _atomic_write_text(path, cdr_csv(cdr_by_tenant[tenant]))
         written[tenant] = path
     return written
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text via a temp file + os.replace so a crash (or a re-export of an existing
+    period) can never truncate a previously-good billing CSV in place. Not 0600 — CDRs are
+    meant to be read by NT's ingest, unlike the secret sidecar."""
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def pull_and_aggregate(

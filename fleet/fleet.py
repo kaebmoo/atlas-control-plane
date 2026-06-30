@@ -151,6 +151,14 @@ class Registry:
             # to a world-readable file.
             atomic_write_0600(self.secrets_path, json.dumps(data).encode("utf-8"))
 
+    def delete_token(self, ref: str) -> None:
+        """Remove a token ref from the sidecar (used to roll back a failed provision so it
+        doesn't orphan a secret for an instance that was never registered)."""
+        with self._secrets_lock, self._secrets_file_lock():
+            data = self._load_secrets()
+            if data.pop(ref, None) is not None:
+                atomic_write_0600(self.secrets_path, json.dumps(data).encode("utf-8"))
+
     def token_for(self, ref: str | None) -> str | None:
         if not ref:
             return None
@@ -161,6 +169,22 @@ def _free_port() -> int:
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    """Terminate and REAP a child: SIGTERM, then escalate to SIGKILL if it ignores it, and
+    always wait() so it can't linger as a zombie/defunct in a long-lived fleet manager."""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _await_healthy(base_url: str, proc: subprocess.Popen, timeout: float = 15.0) -> str:
@@ -179,7 +203,7 @@ def _await_healthy(base_url: str, proc: subprocess.Popen, timeout: float = 15.0)
         except (urllib.error.URLError, ConnectionError, OSError, json.JSONDecodeError):
             pass
         time.sleep(0.1)
-    proc.terminate()
+    _terminate(proc)
     raise RuntimeError(f"atlas instance did not become healthy: {base_url}")
 
 
@@ -206,7 +230,11 @@ def provision_local(
     # also runs the migrations the instance will use.
     db = Database(instance_db)
     with db.as_actor("atlas-fleet"):
-        user = db.create_user(f"admin-{tenant}", secrets.token_urlsafe(16), role="admin")
+        # Idempotent seeding: a retry reusing the same data_dir must not fail with
+        # "username already exists" — reuse the existing admin if a prior attempt seeded it.
+        user = db.get_user_by_username(f"admin-{tenant}") or db.create_user(
+            f"admin-{tenant}", secrets.token_urlsafe(16), role="admin"
+        )
         _, raw_token = db.create_api_token(user["id"], "fleet-bootstrap")
 
     env = {**os.environ, "ATLAS_DB": str(instance_db), "ATLAS_HOME": str(data_dir)}
@@ -219,28 +247,32 @@ def provision_local(
         start_new_session=True,
     )
     base_url = f"http://{host}:{port}"
+    token_ref: str | None = None
     try:
         version = _await_healthy(base_url, proc)
-    except Exception:
-        proc.terminate()
+        # Persist the admin token into the secrets sidecar only after the instance is healthy,
+        # so a failed startup never orphans a secret entry for an instance that was never
+        # registered. store_token/register are INSIDE the try so that if either fails the
+        # subprocess is terminated, not left running unregistered (a leaked port + token).
+        token_ref = new_id("atok")
+        registry.store_token(token_ref, raw_token)
+        instance = registry.register(
+            {
+                "tenant": tenant,
+                "base_url": base_url,
+                "region": region,
+                "version": version,
+                "admin_token_ref": token_ref,
+                "status": "online",
+                "last_health_at": now_iso(),
+            }
+        )
+    except BaseException:
+        _terminate(proc)
+        # Roll back a stored-but-unregistered secret so a failed provision leaves no orphan.
+        if token_ref is not None:
+            registry.delete_token(token_ref)
         raise
-
-    # Persist the admin token into the secrets sidecar only after the instance is healthy,
-    # so a failed startup never orphans a secret entry for an instance that was never
-    # registered.
-    token_ref = new_id("atok")
-    registry.store_token(token_ref, raw_token)
-    instance = registry.register(
-        {
-            "tenant": tenant,
-            "base_url": base_url,
-            "region": region,
-            "version": version,
-            "admin_token_ref": token_ref,
-            "status": "online",
-            "last_health_at": now_iso(),
-        }
-    )
     return instance, proc
 
 
