@@ -9,6 +9,7 @@ has no knowledge of Fleet and no tenant logic — the silo invariant stays intac
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import secrets
@@ -17,10 +18,11 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -57,6 +59,7 @@ class Registry:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.secrets_path = self.path.parent / "fleet-secrets.json"
+        self._secrets_lock = threading.Lock()
         with self._connect() as conn:
             conn.executescript(_REGISTRY_SCHEMA)
 
@@ -119,14 +122,34 @@ class Registry:
             return {}
         return json.loads(self.secrets_path.read_text(encoding="utf-8"))
 
+    @contextmanager
+    def _secrets_file_lock(self):
+        """Exclusive flock on a sidecar lockfile, held across the read-modify-write. flock is
+        per-open-file-description, so a fresh fd per call serializes BOTH other threads (the
+        in-process self._secrets_lock alone only covers one Registry object) AND other
+        processes (two `python -m fleet` provisions racing the same sidecar)."""
+        lock_path = self.secrets_path.with_name(self.secrets_path.name + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
     def store_token(self, ref: str, token: str) -> None:
-        data = self._load_secrets()
-        data[ref] = token
-        # Atomic 0600 write: a short write or disk error must never truncate the existing
-        # sidecar (which holds every other instance's admin token) the way an in-place
-        # O_TRUNC would. The temp file is 0600 from creation, so tokens are never written
-        # to a world-readable file.
-        atomic_write_0600(self.secrets_path, json.dumps(data).encode("utf-8"))
+        # Serialize the read-modify-write so concurrent store_token calls can't each load the
+        # sidecar, add their own ref, and have the last writer clobber the others' tokens. The
+        # file lock makes load+merge+write a single critical section across threads/processes.
+        with self._secrets_lock, self._secrets_file_lock():
+            data = self._load_secrets()
+            data[ref] = token
+            # Atomic 0600 write: a short write or disk error must never truncate the existing
+            # sidecar (which holds every other instance's admin token) the way an in-place
+            # O_TRUNC would. The temp file is 0600 from creation, so tokens are never written
+            # to a world-readable file.
+            atomic_write_0600(self.secrets_path, json.dumps(data).encode("utf-8"))
 
     def token_for(self, ref: str | None) -> str | None:
         if not ref:
@@ -147,10 +170,15 @@ def _await_healthy(base_url: str, proc: subprocess.Popen, timeout: float = 15.0)
             raise RuntimeError(f"atlas instance exited early (code {proc.returncode})")
         try:
             with urllib.request.urlopen(base_url + "/healthz", timeout=1) as resp:
-                if resp.status == 200:
-                    return json.loads(resp.read()).get("version", "")
-        except (urllib.error.URLError, ConnectionError, OSError):
-            time.sleep(0.1)
+                body = json.loads(resp.read()) if resp.status == 200 else {}
+            # Mirror check_health: a 200 carrying {"ok": false} is not yet healthy. Keep
+            # polling instead of registering the instance online here only for the next
+            # health poll to flip it offline.
+            if isinstance(body, dict) and body.get("ok"):
+                return body.get("version", "")
+        except (urllib.error.URLError, ConnectionError, OSError, json.JSONDecodeError):
+            pass
+        time.sleep(0.1)
     proc.terminate()
     raise RuntimeError(f"atlas instance did not become healthy: {base_url}")
 
