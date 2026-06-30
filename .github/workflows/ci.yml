@@ -7,10 +7,12 @@ name: ci
 # catches bug/security CLASSES and is allowed to use ephemeral dev tools.
 #
 # NOTE: this workflow runs them, but does NOT make them *required*. "Required" is a branch-
-# protection setting, not something a YAML can self-declare. Enforce it once per repo:
-#   gh api -X PUT repos/{owner}/{repo}/branches/main/protection \
-#     -f 'required_status_checks[strict]=true' \
-#     -f 'required_status_checks[contexts][]=gate' -f 'required_status_checks[contexts][]=lint'
+# protection setting, not something a YAML can self-declare. The protection endpoint needs the
+# other keys explicitly, so send full JSON. Enforce it once per repo:
+#   gh api -X PUT repos/{owner}/{repo}/branches/main/protection --input - <<'JSON'
+#   {"required_status_checks":{"strict":true,"contexts":["gate","lint"]},
+#    "enforce_admins":true,"required_pull_request_reviews":null,"restrictions":null}
+#   JSON
 # then verify a PR that fails either job is actually blocked from merge.
 
 on:
