@@ -61,6 +61,17 @@ def main() -> None:
                 },
             )
             assert "policy max_jobs" in bad_policy["error"]
+            # name is OPTIONAL on create (OpenAPI WorkflowCreateInput requires only graph):
+            # a name-less create must succeed with the documented "Untitled workflow" default,
+            # not be rejected — that is the additive contract.
+            unnamed = request(
+                base_url,
+                "POST",
+                "/api/workflows",
+                {"graph": {"start": "only", "nodes": [{"id": "only", "type": "worker"}], "edges": []}, "policy": {"max_jobs": 1}},
+            )["workflow"]
+            assert unnamed["name"] == "Untitled workflow", unnamed
+            request(base_url, "DELETE", f"/api/workflows/{unnamed['id']}")  # keep the list clean for ordering-sensitive checks below
 
             workflow = request(
                 base_url,
@@ -91,6 +102,9 @@ def main() -> None:
             assert request(base_url, "PUT", f"/api/workflows/{workflow_id}", {"version": 3})["workflow"]["version"] == 3
             assert "starts at only" in request(base_url, "POST", f"/api/workflows/{workflow_id}/explain")["explanation"]
             assert request(base_url, "POST", f"/api/workflows/{workflow_id}/repair")["draft"]["explanation"] == "Workflow already validates."
+
+            bad_input = request_error(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id, "input": [1, 2]})
+            assert "input must be an object" in bad_input["error"], bad_input
 
             run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id, "input": {"topic": "x"}})["run"]
             run = wait_for_api_run(base_url, run["id"], "failed")
@@ -413,6 +427,12 @@ def check_milestones_9_and_10(base_url: str) -> None:
     # rather than a token-less <a href> (401 under auth).
     assert "replace(/[^A-Za-z0-9-]/g" in javascript, "statusClass must whitelist-sanitize the status token"
     assert "downloadArtifact" in javascript and 'href="/api/artifacts/' not in javascript, "artifact download must use authenticated fetch"
+    # Job stream must use an authenticated fetch (Bearer header), never a token in the URL, and
+    # must surface a disconnect when the body EOFs without the server's close event.
+    assert "token=${encodeURIComponent" not in javascript, "job stream must not put the API token in the URL"
+    # Lock the EOF-without-close detection specifically (the bare error string also lives in the
+    # catch path, so assert the sawClose guard that distinguishes a clean close from a drop).
+    assert "sawClose" in javascript and "if (!sawClose)" in javascript, "job stream must detect EOF without a close event"
 
 
 def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) -> None:
@@ -475,6 +495,18 @@ def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) ->
         assert "unsupported type" in request_error(
             base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "outside DSL"}
         )["error"]
+
+        # Draft validation must be schema-equivalent: falsy/wrong-typed fields that `or {}`/`or []`
+        # would otherwise coerce must be rejected, and warning items must be strings.
+        for bad, fragment in (
+            (dict(valid_draft, policy=[]), "policy must be an object"),
+            (dict(valid_draft, triggers=None), "triggers must be a list"),
+            (dict(valid_draft, warnings=[1]), "warnings must be a list of strings"),
+        ):
+            response["text"] = json.dumps(bad)
+            assert fragment in request_error(
+                base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "bad draft"}
+            )["error"], fragment
 
         response["text"] = json.dumps({"explanation": "Builder explanation."})
         assert request(base_url, "POST", f"/api/workflows/{workflow_id}/explain")["explanation"] == "Builder explanation."

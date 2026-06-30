@@ -17,6 +17,9 @@ from atlas.jobs import JobManager
 
 # Flipped by the health check to simulate a healthy vs reachable-but-unhealthy worker.
 WORKER_OK = {"value": True}
+# Counts /agent/run dispatches so a test can assert a cancelled-while-queued job never hit
+# the worker.
+DISPATCH_COUNT = {"value": 0}
 
 
 class MockThClawsHandler(BaseHTTPRequestHandler):
@@ -35,6 +38,7 @@ class MockThClawsHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         # /agent/run: emit some output but NO terminal [DONE] frame (worker disconnect).
+        DISPATCH_COUNT["value"] += 1
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
         body = b"event: text\ndata: partial output\n\n"
         self.send_response(HTTPStatus.OK)
@@ -103,11 +107,66 @@ def check_truncated_stream_fails(db: Database) -> None:
         mock.server_close()
 
 
+def check_cancel_before_dispatch(db: Database) -> None:
+    """A job cancelled while still queued must finish 'cancelled' WITHOUT ever opening the
+    worker stream — cancellation is checked before the job goes 'running'."""
+    mock = ThreadingHTTPServer(("127.0.0.1", 0), MockThClawsHandler)
+    threading.Thread(target=mock.serve_forever, daemon=True).start()
+    try:
+        host, port = mock.server_address
+        worker = db.upsert_worker({"base_url": f"http://{host}:{port}", "name": "cancel-mock"})
+        manager = JobManager(db, request_timeout_seconds=5)
+        job = db.create_job({"worker_id": worker["id"], "prompt": "hi", "state": "queued"})
+        db.mark_cancel_requested(job["id"])
+        DISPATCH_COUNT["value"] = 0
+        manager._run(job["id"])  # run synchronously, as the worker thread would
+        final = db.get_job(job["id"])
+        assert final["state"] == "cancelled", f"expected cancelled, got {final['state']}"
+        assert DISPATCH_COUNT["value"] == 0, "cancelled-while-queued job must not dispatch to the worker"
+    finally:
+        mock.shutdown()
+        mock.server_close()
+
+
+def check_reconcile_jobs(db: Database) -> None:
+    """After a restart, a job left 'running' in the DB (its thread gone) must be reconciled to
+    a terminal 'failed' state, not wedged 'running' forever."""
+    worker = db.upsert_worker({"base_url": "http://127.0.0.1:9", "name": "stale"})
+    job = db.create_job({"worker_id": worker["id"], "prompt": "hi", "state": "queued"})
+    db.update_job(job["id"], state="running", started_at="2026-01-01T00:00:00Z")
+    JobManager(db).reconcile_jobs()
+    final = db.get_job(job["id"])
+    assert final["state"] == "failed", f"orphaned running job must reconcile to failed, got {final['state']}"
+    assert final.get("finished_at"), "reconciled job must have finished_at set"
+
+
+def check_upsert_requires_fields(db: Database) -> None:
+    """Missing required upsert fields must raise ValueError (-> HTTP 400), not KeyError (500)."""
+    for payload in ({}, {"name": "x"}):
+        try:
+            db.upsert_worker(payload)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("upsert_worker must reject a missing base_url with ValueError")
+    worker = db.upsert_worker({"base_url": "http://127.0.0.1:10", "name": "w"})
+    for payload in ({"worker_id": worker["id"]}, {"worker_id": worker["id"], "workspace_key": "k"}):
+        try:
+            db.upsert_workspace(payload)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("upsert_workspace must reject missing required fields with ValueError")
+
+
 def main() -> None:
     with TemporaryDirectory() as tmp:
         check_submit_routing_failure_no_orphan(Database(Path(tmp) / "orphan.sqlite"))
         check_poll_worker_health(Database(Path(tmp) / "health.sqlite"))
         check_truncated_stream_fails(Database(Path(tmp) / "stream.sqlite"))
+        check_cancel_before_dispatch(Database(Path(tmp) / "cancel.sqlite"))
+        check_reconcile_jobs(Database(Path(tmp) / "reconcile.sqlite"))
+        check_upsert_requires_fields(Database(Path(tmp) / "upsert.sqlite"))
     print("jobs check ok")
 
 

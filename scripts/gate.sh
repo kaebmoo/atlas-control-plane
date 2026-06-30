@@ -13,7 +13,8 @@ python3 -m py_compile \
   scripts/check_workflows.py scripts/check_workflow_api.py scripts/check_usage.py \
   scripts/check_auth.py scripts/check_migrations.py scripts/check_packs.py \
   scripts/check_cdr.py scripts/check_byok_helper.py scripts/check_silo.py \
-  scripts/check_jobs.py scripts/check_backup.py
+  scripts/check_jobs.py scripts/check_backup.py scripts/check_audit_fixes.py \
+  scripts/check_docs.py
 
 node --check atlas/static/app.js
 
@@ -30,5 +31,7 @@ python3 scripts/check_cdr.py          # M5 + B3
 python3 scripts/check_byok_helper.py  # B5
 python3 scripts/check_silo.py         # M9 silo invariant
 python3 scripts/check_backup.py       # backup includes the upload store
+python3 scripts/check_audit_fixes.py  # terminal-state races, run snapshot, trigger/limit guards
+python3 scripts/check_docs.py         # docs-drift: README links + route coverage
 
 echo "=== completion gate GREEN ==="

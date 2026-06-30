@@ -14,7 +14,19 @@ sys.path.insert(0, str(ROOT))
 
 from atlas import __version__
 from atlas.db import Database
-from fleet.fleet import INSTANCE_DB_NAME, Registry, check_health, poll_all, provision_local, pull_usage
+from fleet.fleet import INSTANCE_DB_NAME, Registry, _await_healthy, check_health, poll_all, provision_local, pull_usage
+
+
+class _DummyProc:
+    """Stand-in for a live atlas subprocess: poll() None means 'still running'."""
+
+    returncode = 0
+
+    def poll(self) -> None:
+        return None
+
+    def terminate(self) -> None:
+        return None
 
 
 def main() -> None:
@@ -91,9 +103,61 @@ def main() -> None:
             host, port = mock.server_address
             record = registry.register({"tenant": "t-unhealthy", "base_url": f"http://{host}:{port}"})
             assert check_health(registry, record)["status"] == "offline", "ok:false must be offline"
+            # _await_healthy must ALSO honor the ok flag (not just check_health): a 200 carrying
+            # {"ok": false} is not yet healthy, so provisioning keeps waiting and times out.
+            try:
+                _await_healthy(f"http://{host}:{port}", _DummyProc(), timeout=0.5)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("_await_healthy must not accept a 200 with ok:false")
         finally:
             mock.shutdown()
             mock.server_close()
+
+        # a healthy instance (200 with {"ok": true}) reports its version through _await_healthy
+        class _HealthyHandler(BaseHTTPRequestHandler):
+            def log_message(self, *_args: object) -> None:
+                return
+
+            def do_GET(self) -> None:
+                body = json.dumps({"ok": True, "version": "9.9"}).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        healthy_mock = ThreadingHTTPServer(("127.0.0.1", 0), _HealthyHandler)
+        threading.Thread(target=healthy_mock.serve_forever, daemon=True).start()
+        try:
+            host, port = healthy_mock.server_address
+            assert _await_healthy(f"http://{host}:{port}", _DummyProc(), timeout=2) == "9.9"
+        finally:
+            healthy_mock.shutdown()
+            healthy_mock.server_close()
+
+        # concurrent token writes must not lose entries even across SEPARATE Registry objects
+        # (stand-ins for separate processes) at the same path — the per-object lock can't span
+        # them, so the cross-process flock is what serializes the read-modify-write.
+        reg_path = Path(tmp) / "fleet3" / "fleet3.sqlite"
+        Registry(reg_path)  # initialize the sidecar dir once
+        errors: list[Exception] = []
+
+        def store(i: int) -> None:
+            try:
+                Registry(reg_path).store_token(f"ref-{i}", f"tok-{i}")  # fresh object per thread
+            except Exception as exc:  # noqa: BLE001 - recorded, asserted below
+                errors.append(exc)
+
+        workers = [threading.Thread(target=store, args=(i,)) for i in range(8)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        assert not errors, f"concurrent store_token raised: {errors[:2]}"
+        verify = Registry(reg_path)
+        for i in range(8):
+            assert verify.token_for(f"ref-{i}") == f"tok-{i}", f"lost token ref-{i}"
 
     print("fleet check ok")
 
