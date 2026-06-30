@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import time
+from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -50,6 +51,18 @@ ROLE_PERMISSIONS = {
     "viewer": frozenset({"read"}),
     "auditor": frozenset({"read", "audit.read"}),
 }
+_LIMIT_CAP = 10000
+
+
+def _parse_limit(query: dict[str, list[str]], default: int = 100) -> int:
+    """Clamp the ?limit query param to [1, _LIMIT_CAP]. OpenAPI declares minimum 1; a raw
+    negative/zero value reaches SQLite's LIMIT and disables the bound (limit=-1 returns the
+    whole table), so clamp instead of passing it through. A non-integer falls back to default."""
+    try:
+        value = int(query.get("limit", [str(default)])[0])
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(value, _LIMIT_CAP))
 
 
 class AtlasRuntime:
@@ -62,6 +75,9 @@ class AtlasRuntime:
         self.router = Router(self.db)
         self.workflows = WorkflowRunner(self.db, self.jobs)
         self.triggers = WorkflowTriggerService(self.db, self.workflows)
+        # Reconcile jobs first so orphaned worker jobs are terminal before runs recover,
+        # then reconcile workflow runs (which re-arm interrupted nodes).
+        self.jobs.reconcile_jobs()
         self.workflows.reconcile_runs()
 
 
@@ -371,7 +387,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
         if parts == ["api", "jobs"]:
             if method == "GET":
-                limit = int(query.get("limit", ["100"])[0])
+                limit = _parse_limit(query)
                 self._json({"jobs": runtime.db.list_jobs(limit)})
                 return
             if method == "POST":
@@ -398,11 +414,15 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
         if parts == ["api", "workflows"]:
             if method == "GET":
-                limit = int(query.get("limit", ["100"])[0])
+                limit = _parse_limit(query)
                 self._json({"workflows": runtime.db.list_workflow_definitions(limit)})
                 return
             if method == "POST":
                 payload = self._read_json()
+                # name is OPTIONAL here per OpenAPI WorkflowCreateInput (required: [graph];
+                # name defaults to "Untitled workflow"). Do NOT require it — that would break
+                # the published additive contract. The AI-draft path still requires name via
+                # _validate_workflow_draft, matching the stricter ai-draft schema.
                 _validate_workflow_payload(runtime, payload)
                 workflow = runtime.db.create_workflow_definition(payload)
                 self._json({"workflow": workflow}, HTTPStatus.CREATED)
@@ -417,7 +437,12 @@ class AtlasHandler(BaseHTTPRequestHandler):
             return
 
         if parts == ["api", "packs", "import"] and method == "POST":
-            result = import_pack(runtime.db, self._read_json(), secret_key=runtime.config.secret_key)
+            result = import_pack(
+                runtime.db,
+                self._read_json(),
+                secret_key=runtime.config.secret_key,
+                require_signature=runtime.config.require_signed_packs,
+            )
             self._json(result, HTTPStatus.CREATED)
             return
 
@@ -490,7 +515,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
         if parts == ["api", "workflow-runs"]:
             if method == "GET":
-                limit = int(query.get("limit", ["100"])[0])
+                limit = _parse_limit(query)
                 workflow_definition_id = query.get("workflow_definition_id", [""])[0] or None
                 self._json({"runs": runtime.db.list_workflow_runs(limit, workflow_definition_id)})
                 return
@@ -499,7 +524,15 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 workflow_definition_id = payload.get("workflow_definition_id")
                 if not workflow_definition_id:
                     raise ValueError("workflow_definition_id is required")
-                run = runtime.workflows.start_workflow(workflow_definition_id, payload.get("input") or {})
+                run_input = payload.get("input")
+                if run_input is None:
+                    run_input = {}
+                if not isinstance(run_input, dict):
+                    # OpenAPI types input as an object; reject up front (400) instead of
+                    # creating a run that fails asynchronously once the engine touches it.
+                    # Normalize only missing/None — a falsy non-object ([], "", 0) is rejected.
+                    raise ValueError("input must be an object")
+                run = runtime.workflows.start_workflow(workflow_definition_id, run_input)
                 self._json({"run": run}, HTTPStatus.ACCEPTED)
                 return
 
@@ -551,7 +584,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "workflow-runs"] and parts[3] == "events" and method == "GET":
             if not runtime.db.get_workflow_run(parts[2]):
                 raise FileNotFoundError()
-            limit = int(query.get("limit", ["500"])[0])
+            limit = _parse_limit(query, 500)
             self._json({"events": runtime.db.list_workflow_events(parts[2], limit)})
             return
 
@@ -572,7 +605,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 return
 
         if parts == ["api", "approvals"] and method == "GET":
-            limit = int(query.get("limit", ["100"])[0])
+            limit = _parse_limit(query)
             state = query.get("state", [""])[0] or None
             run_id = query.get("run_id", [""])[0] or None
             self._json({"approvals": runtime.db.list_approvals(limit, state, run_id)})
@@ -594,7 +627,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
         if parts == ["api", "workflow-triggers"]:
             if method == "GET":
-                limit = int(query.get("limit", ["100"])[0])
+                limit = _parse_limit(query)
                 workflow_definition_id = query.get("workflow_definition_id", [""])[0] or None
                 self._json({"triggers": runtime.db.list_workflow_triggers(limit, workflow_definition_id)})
                 return
@@ -609,15 +642,17 @@ class AtlasHandler(BaseHTTPRequestHandler):
             trigger = runtime.db.get_workflow_trigger(parts[2])
             if trigger and trigger["type"] in {"workflow_run_completed", "artifact_created", "worker_status_changed"}:
                 raise ValueError(f"{trigger['type']} triggers are fired by Atlas events")
-            payload = self._read_json()
-            result = runtime.triggers.fire_trigger(parts[2], payload.get("payload") or {}, payload.get("dedupe_key"))
+            body = self._read_json()
+            # Pass the payload through unchanged (missing/null -> None); fire_trigger normalizes
+            # None to {} and rejects any non-object value, so [] / "" / 0 don't slip in as {}.
+            result = runtime.triggers.fire_trigger(parts[2], body.get("payload"), body.get("dedupe_key"))
             self._json(result, HTTPStatus.ACCEPTED)
             return
 
         if len(parts) == 4 and parts[:2] == ["api", "workflow-triggers"] and parts[3] == "events" and method == "GET":
             if not runtime.db.get_workflow_trigger(parts[2]):
                 raise FileNotFoundError()
-            limit = int(query.get("limit", ["100"])[0])
+            limit = _parse_limit(query)
             self._json({"events": runtime.db.list_workflow_trigger_events(parts[2], limit)})
             return
 
@@ -648,7 +683,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 return
 
         if parts == ["api", "audit"] and method == "GET":
-            limit = int(query.get("limit", ["100"])[0])
+            limit = _parse_limit(query)
             self._json({"audit": runtime.db.list_audit(limit)})
             return
 
@@ -913,13 +948,24 @@ def _validate_artifact_payload(runtime: AtlasRuntime, payload: dict[str, Any]) -
         raise ValueError(f"Unknown workflow_run_id: {run_id}")
     if not isinstance(payload.get("kind", "text"), str) or payload.get("kind", "text") not in ARTIFACT_KINDS:
         raise ValueError(f"unsupported artifact kind: {payload.get('kind')}")
-    if payload.get("job_id") and not runtime.db.get_job(payload["job_id"]):
-        raise ValueError(f"Unknown job_id: {payload['job_id']}")
+    if payload.get("job_id"):
+        if not runtime.db.get_job(payload["job_id"]):
+            raise ValueError(f"Unknown job_id: {payload['job_id']}")
+        # An artifact belongs to its run: a supplied job_id must be a job of THIS run. This
+        # rejects both a cross-run job and a standalone job with no workflow context (which
+        # would otherwise slip through and attach to an arbitrary run).
+        context = runtime.db.workflow_context_for_job(payload["job_id"])
+        if context.get("run_id") != run_id:
+            raise ValueError("job_id does not belong to the workflow run")
     if payload.get("metadata") is not None and not isinstance(payload.get("metadata"), dict):
         raise ValueError("artifact metadata must be an object")
 
 
-def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any]) -> None:
+def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any], require_name: bool = False) -> None:
+    if require_name and (not isinstance(payload.get("name"), str) or not payload["name"].strip()):
+        # The schema requires name (minLength 1). Without this the server silently persists
+        # a missing name as "Untitled workflow", disagreeing with any schema-conformant client.
+        raise ValueError("workflow name is required")
     if "graph" not in payload:
         raise ValueError("workflow graph is required")
     graph = payload["graph"]
@@ -928,6 +974,40 @@ def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any]) -
     _validate_workflow_references(runtime, graph, policy)
     _validate_workflow_policy(policy)
     _validate_workflow_draft_triggers(payload.get("triggers") or [])
+
+
+_WORKFLOW_DRAFT_FIELDS = {"name", "description", "graph", "policy", "triggers", "explanation", "warnings"}
+
+
+def _validate_workflow_draft(runtime: AtlasRuntime, draft: dict[str, Any]) -> None:
+    """Validate an AI-produced draft against docs/specs/workflow-ai-draft.schema.json before
+    it is returned: required fields present and non-empty, no unknown fields, and
+    graph/policy/triggers valid. triggers/warnings are defaulted by the caller before this
+    runs (matching the importer normalization), so the full field set is always present."""
+    if not isinstance(draft, dict):
+        raise ValueError("workflow draft must be an object")
+    missing = sorted(_WORKFLOW_DRAFT_FIELDS - set(draft))
+    if missing:
+        raise ValueError(f"workflow draft missing required field(s): {', '.join(missing)}")
+    unknown = sorted(set(draft) - _WORKFLOW_DRAFT_FIELDS)
+    if unknown:
+        raise ValueError(f"workflow draft has unknown field(s): {', '.join(unknown)}")
+    for field in ("name", "explanation"):
+        if not isinstance(draft.get(field), str) or not draft[field].strip():
+            raise ValueError(f"workflow draft {field} must be a non-empty string")
+    if not isinstance(draft.get("description"), str):
+        raise ValueError("workflow draft description must be a string")
+    # Raw type checks against the schema BEFORE _validate_workflow_payload, whose `or {}`/`or []`
+    # coercion would otherwise let null/[]/wrong-typed fields through (e.g. policy=[], triggers=null).
+    if not isinstance(draft.get("graph"), dict):
+        raise ValueError("workflow draft graph must be an object")
+    if not isinstance(draft.get("policy"), dict):
+        raise ValueError("workflow draft policy must be an object")
+    if not isinstance(draft.get("triggers"), list):
+        raise ValueError("workflow draft triggers must be a list")
+    if not isinstance(draft.get("warnings"), list) or not all(isinstance(item, str) for item in draft["warnings"]):
+        raise ValueError("workflow draft warnings must be a list of strings")
+    _validate_workflow_payload(runtime, draft, require_name=True)
 
 
 def _validate_workflow_metadata(payload: dict[str, Any]) -> None:
@@ -1033,9 +1113,9 @@ def _build_workflow_draft(runtime: AtlasRuntime, payload: dict[str, Any]) -> dic
     if not plain_prompt:
         raise ValueError("plain_language_prompt is required")
     draft = _run_workflow_builder(runtime, _builder_prompt(runtime, plain_prompt))
-    _validate_workflow_payload(runtime, draft)
     draft.setdefault("triggers", [])
     draft.setdefault("warnings", [])
+    _validate_workflow_draft(runtime, draft)
     return draft
 
 
@@ -1061,7 +1141,9 @@ def _repair_workflow(runtime: AtlasRuntime, workflow: dict[str, Any], payload: d
             f"{json.dumps({'graph': graph, 'policy': policy, 'triggers': triggers}, ensure_ascii=True)}",
         )
         draft = _run_workflow_builder(runtime, prompt)
-        _validate_workflow_payload(runtime, draft)
+        draft.setdefault("triggers", [])
+        draft.setdefault("warnings", [])
+        _validate_workflow_draft(runtime, draft)
         return draft
 
 
@@ -1295,7 +1377,11 @@ def _local_workflow_explanation(workflow: dict[str, Any]) -> str:
     )
 
 
-def main(argv: list[str] | None = None) -> None:
+def cli_config(argv: list[str] | None = None) -> Config:
+    """Build the runtime Config from env + CLI overrides. Kept separate from main() so the
+    override path is testable without starting the server. The reconstruction copies EVERY
+    Config field from the env-derived base — dropping one (e.g. require_signed_packs) would
+    silently disable it for the canonical run.sh / run-prod.sh launch paths."""
     parser = argparse.ArgumentParser(description="Atlas control plane")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
@@ -1306,16 +1392,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.host or args.port or args.db:
         db_path = Path(args.db).resolve() if args.db else config.db_path
         upload_dir = db_path.parent / "uploads" if args.db and "ATLAS_UPLOAD_DIR" not in os.environ else config.upload_dir
-        config = Config(
-            host=args.host or config.host,
-            port=args.port or config.port,
-            db_path=db_path,
-            api_token=config.api_token,
-            request_timeout_seconds=config.request_timeout_seconds,
-            enable_loopback_without_token=config.enable_loopback_without_token,
-            secret_key=config.secret_key,
-            upload_dir=upload_dir,
-            max_upload_bytes=config.max_upload_bytes,
-            request_log=config.request_log,
-        )
-    run_server(config)
+        # Copy from the base so new Config fields survive overrides by default.
+        config = replace(config, host=args.host or config.host, port=args.port or config.port, db_path=db_path, upload_dir=upload_dir)
+    return config
+
+
+def main(argv: list[str] | None = None) -> None:
+    run_server(cli_config(argv))
