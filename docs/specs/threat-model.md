@@ -5,12 +5,13 @@ decidable: a defect is real only relative to a stated model. Several otherwise-f
 **accepted residual risks** under the model below; each lists rationale, an owner, and the
 trigger that re-opens it.
 
-> Status: **DRAFT — pending final sign-off.** Assumptions checked against the code (author
-> self-check **+ independent review** — see *Targeted review log*); accepted-risk owners assigned as
-> roles ([ADR 0001](../adr/0001-multi-tenancy-silo-vs-pooled.md) backs the silo model). On the
-> owner's sign-off — with named owners confirmed and CI required-checks enforced (branch protection)
-> — this becomes the **accepted release baseline**: an agreed posture, **not** a proof that no bugs
-> exist (cold/LLM audits sample; they cannot prove absence).
+> Status: **DRAFT — one gate from baseline.** Assumptions checked against the code (author
+> self-check **+ independent review** — see *Targeted review log*); **named owner confirmed: Pornthep
+> Nivatyakul** (2026-06-30) for all accepted risks ([ADR 0001](../adr/0001-multi-tenancy-silo-vs-pooled.md)
+> backs the silo model). The one remaining gate to the **accepted release baseline** is CI
+> required-checks **enforced via branch protection** (`gate`+`lint` required on `main`, a failing PR
+> actually blocked). Baseline = an agreed posture, **not** a proof that no bugs exist (cold/LLM
+> audits sample; they cannot prove absence).
 
 ## Deployment model
 
@@ -36,31 +37,30 @@ trigger that re-opens it.
 **Production pack-signing decision:** code default is `ATLAS_REQUIRE_SIGNED_PACKS=false` (unsigned
 accepted, for backward-compat with the unsigned shipped `gov_complaint` pack). **Production
 deployments SHALL set it `true`.** Running production with `false` is an **accepted risk** owned by
-**SRE/Security** — rationale: packs are semi-trusted and unsigned import is an operator foot-gun;
-re-open trigger: any externally-sourced pack. Reflected in `ops/deployment.md` §4.
+**Pornthep Nivatyakul** — rationale: packs are semi-trusted and unsigned import is an operator
+foot-gun; re-open trigger: any externally-sourced pack. Reflected in `ops/deployment.md` §4.
 
 ## Accepted residual risks under this model
 
 Not fixed because the model makes them unreachable / out-of-threat. Each: rationale → trigger that
-turns it into real work → **Owner**. Owners are **roles/teams**; the accountable **named person is
-confirmed at sign-off** (owners are real accountability, not auto-assigned names).
+turns it into real work. **Owner of all five accepted risks: Pornthep Nivatyakul** (named sign-off,
+2026-06-30 — real accountability, not an auto-assigned name).
 
 1. **`claim_trigger_dedupe` is in-process atomic only** (RLock, no UNIQUE constraint). Fine
    under one-process-per-DB. → *Trigger:* multi-process/shared-volume deployment → add a
-   `UNIQUE(trigger_id, dedupe_key)` claims table + `INSERT OR IGNORE`. → *Owner:* **Platform Engineering**.
+   `UNIQUE(trigger_id, dedupe_key)` claims table + `INSERT OR IGNORE`.
 2. **Migration runner uses `executescript`** (implicit COMMIT). Fine because all shipped steps
    are `CREATE … IF NOT EXISTS` / guarded `ALTER`. → *Trigger:* any future raw-SQL step → run
-   steps as discrete statements in one transaction. → *Owner:* **Platform/Data Engineering**.
+   steps as discrete statements in one transaction.
 3. **Removing `ATLAS_SECRET_KEY` after worker tokens are encrypted** 400s `GET /api/workers` +
    routing. Operational foot-gun, not an attacker path. → *Trigger:* key-rotation requirement →
-   key list / decrypt-tolerant listing. → *Owner:* **SRE/Security**.
+   key list / decrypt-tolerant listing.
 4. **BYOK env-file write has no cross-process lock** → assumes SERIAL operator invocation (atomic
    temp+replace prevents truncation, but two concurrent writers can lose an update). Fleet secret
    writes already hold a cross-process `flock`. → *Trigger:* concurrent automation invoking BYOK →
-   add an OS file lock around the env read-modify-write. → *Owner:* **Platform Operations**.
+   add an OS file lock around the env read-modify-write.
 5. **`max_minutes` counts paused / human-wait wall time** (intended total-wall budget). →
-   *Trigger:* if it must be active-compute only → subtract paused intervals. → *Owner:* **Product
-   Owner + Platform Engineering**.
+   *Trigger:* if it must be active-compute only → subtract paused intervals.
 
 ## Targeted review log (DoD #6)
 
