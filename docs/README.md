@@ -64,6 +64,8 @@
   (`atlas.byok`); Atlas core stores no model key
 - [Managed Inference Gateway (readiness)](specs/managed-inference.md) — multi-provider
   gateway-worker + token/GPU-hour metering design (worker/gateway layer, not core)
+- [Threat Model & Deployment Assumptions](specs/threat-model.md) — trust boundaries, accepted
+  residual risks (owner + re-open trigger), and the definition-of-done stop criterion
 - [Workflow Definition JSON Schema](specs/workflow-definition.schema.json)
 - [Workflow Trigger JSON Schema](specs/workflow-trigger.schema.json)
 - [AI Workflow Draft JSON Schema](specs/workflow-ai-draft.schema.json)
