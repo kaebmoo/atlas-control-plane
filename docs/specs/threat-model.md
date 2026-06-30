@@ -1,17 +1,19 @@
-# Atlas Threat Model & Deployment Assumptions (DRAFT — pending sign-off)
+# Atlas Threat Model & Deployment Assumptions (Accepted release baseline — 2026-06-30)
 
 Records the **deployment and trust assumptions** Atlas core is built on, so "is X a bug?" is
 decidable: a defect is real only relative to a stated model. Several otherwise-flagged items are
 **accepted residual risks** under the model below; each lists rationale, an owner, and the
 trigger that re-opens it.
 
-> Status: **DRAFT — one gate from baseline.** Assumptions checked against the code (author
-> self-check **+ independent review** — see *Targeted review log*); **named owner confirmed: Pornthep
-> Nivatyakul** (2026-06-30) for all accepted risks ([ADR 0001](../adr/0001-multi-tenancy-silo-vs-pooled.md)
-> backs the silo model). The one remaining gate to the **accepted release baseline** is CI
-> required-checks **enforced via branch protection** (`gate`+`lint` required on `main`, a failing PR
-> actually blocked). Baseline = an agreed posture, **not** a proof that no bugs exist (cold/LLM
-> audits sample; they cannot prove absence).
+> Status: **Accepted release baseline — 2026-06-30.** Assumptions checked against the code (author
+> self-check **+ independent review** — see *Targeted review log*); **named owner: Pornthep Nivatyakul**
+> for all accepted risks ([ADR 0001](../adr/0001-multi-tenancy-silo-vs-pooled.md) backs the silo
+> model). CI required-checks are **enforced**: `main` branch protection requires `gate` + `lint`
+> (strict, enforce_admins), **verified** by a throwaway PR whose failing `lint` was blocked from
+> merge. Baseline = an agreed posture, **not** a proof that no bugs exist (cold/LLM audits sample;
+> they cannot prove absence). *Not yet enforced — future hardening if "no direct push to `main`" is
+> required: PR-review approval + push restrictions; required status checks alone do not block a
+> direct push.*
 
 ## Deployment model
 
