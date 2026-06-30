@@ -1,0 +1,40 @@
+name: ci
+
+# Two independent required jobs:
+#   gate — the hermetic, offline, stdlib-only completion gate (scripts/gate.sh)
+#   lint — fail-closed static analysis (scripts/lint.sh: ruff + bandit, pinned via uvx)
+# They are deliberately separate: the gate proves runtime behavior with no network/deps; lint
+# catches bug/security CLASSES and is allowed to use ephemeral dev tools.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run completion gate
+        run: ./scripts/gate.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - name: Static analysis (fail-closed)
+        run: ./scripts/lint.sh

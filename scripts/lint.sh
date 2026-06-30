@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
-# Dev-only static analysis. NOT part of scripts/gate.sh (which is hermetic + offline +
-# stdlib-only). Run on demand / in CI to catch bug & security CLASSES deterministically,
-# complementing the runtime hermetic checks. Tools are fetched ephemerally via uvx — nothing
-# is added to the runtime dependency set (Atlas core stays stdlib-only).
+# Static analysis — FAIL-CLOSED. A new bug/security-class finding makes this exit non-zero.
+# Runs as a required CI job (see .github/workflows/ci.yml), SEPARATE from the hermetic offline
+# gate (scripts/gate.sh). Tools are fetched ephemerally via uvx and PINNED, so runtime stays
+# stdlib-only and results are reproducible. Suppressions are per-line `# nosec <code>` with a
+# reason in the source — there is NO global skip and NO `|| true`, so nothing is silently hidden.
 #
 # Usage: scripts/lint.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+RUFF="ruff@0.15.20"
+BANDIT="bandit@1.9.4"
+
 if ! command -v uvx >/dev/null 2>&1; then
-  echo "uvx not found — install uv (https://docs.astral.sh/uv/) to run the linters." >&2
+  echo "uvx required (https://docs.astral.sh/uv/) — install uv to run the linters." >&2
   exit 127
 fi
 
 echo "=== ruff (pyflakes + bugbear: real bugs, dead code, unsafe patterns) ==="
-# E402 is expected in scripts/ (sys.path shim before imports); focus on bug-class rules.
-uvx ruff check atlas fleet --select F,B,E722
+uvx "$RUFF" check atlas fleet --select F,B,E722
 
-echo "=== bandit (security: injection, weak crypto, etc.) ==="
-# B608 (f-string SQL) is guarded by atlas.db._set_clause (column names are [a-z_]-checked,
-# values are parameterized); B105 fires on string CONSTANTS, not real passwords.
-uvx bandit -q -r atlas fleet --severity-level medium --confidence-level medium \
-  --skip B608,B105 || true
+echo "=== bandit (security, medium+ severity; reviewed B608/B310 carry per-line # nosec) ==="
+# Capture so we can drop bandit's cosmetic "nosec encountered, but no failed test" chatter
+# (one per suppressed line) WITHOUT touching the real exit code — still fail-closed on findings.
+set +e
+bandit_out="$(uvx "$BANDIT" -q -r atlas fleet --severity-level medium 2>&1)"
+bandit_rc=$?
+set -e
+printf '%s\n' "$bandit_out" | grep -v "nosec encountered" || true
+[ "$bandit_rc" -eq 0 ] || { echo "bandit found unsuppressed issues (see above)" >&2; exit 1; }
 
-echo "=== static analysis OK (review any bandit output above) ==="
+echo "lint OK"
