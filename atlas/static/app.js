@@ -889,37 +889,74 @@ async function submitJob() {
   showView("jobs");
 }
 
+const STREAM_EVENT_NAMES = ["route", "session", "state", "error", "done", "cancel_requested", "handoff_configured", "handoff_started", "handoff_skipped", "handoff_error", "message", "close"];
+
 function openJobStream(jobId) {
   state.selectedJobId = jobId;
   state.streamText = "";
   state.events = [];
   if (state.eventSource) state.eventSource.close();
-  const token = localStorage.getItem("atlasApiToken");
-  const url = token ? `/api/jobs/${jobId}/events?after=0&token=${encodeURIComponent(token)}` : `/api/jobs/${jobId}/events?after=0`;
-  const source = new EventSource(url);
-  state.eventSource = source;
+  // Authenticated SSE over fetch. EventSource cannot set an Authorization header, which forced
+  // the API token into the URL (?token=...) where the reverse-proxy access log captures it. A
+  // streamed fetch sends the Bearer header instead, keeping the token out of URLs and logs.
+  const controller = new AbortController();
+  state.eventSource = { close: () => controller.abort() };
   updateStreamHeader();
   $("#streamOutput").textContent = "";
   $("#eventList").innerHTML = "";
-
-  source.addEventListener("text", (event) => {
-    const payload = JSON.parse(event.data);
-    state.streamText += payload.text || "";
-    $("#streamOutput").textContent = state.streamText;
-    $("#streamOutput").scrollTop = $("#streamOutput").scrollHeight;
-  });
-  for (const name of ["route", "session", "state", "error", "done", "cancel_requested", "handoff_configured", "handoff_started", "handoff_skipped", "handoff_error", "message", "close"]) {
-    source.addEventListener(name, (event) => appendEvent(name, JSON.parse(event.data)));
-  }
-  source.addEventListener("close", () => {
-    source.close();
-    loadAll().catch((error) => toast(error.message));
-  });
-  source.onerror = () => {
-    appendEvent("stream", { error: "event stream disconnected" });
-    source.close();
-  };
   renderJobs();
+
+  let sawClose = false;
+  const dispatch = (name, data) => {
+    if (name === "text") {
+      const payload = JSON.parse(data);
+      state.streamText += payload.text || "";
+      $("#streamOutput").textContent = state.streamText;
+      $("#streamOutput").scrollTop = $("#streamOutput").scrollHeight;
+    } else if (name === "close") {
+      sawClose = true;
+      appendEvent("close", JSON.parse(data));
+      loadAll().catch((error) => toast(error.message));
+    } else if (STREAM_EVENT_NAMES.includes(name)) {
+      appendEvent(name, JSON.parse(data));
+    }
+  };
+
+  (async () => {
+    const headers = new Headers({ Accept: "text/event-stream" });
+    const token = localStorage.getItem("atlasApiToken");
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    try {
+      const response = await fetch(`/api/jobs/${jobId}/events?after=0`, { headers, signal: controller.signal });
+      if (!response.ok || !response.body) throw new Error(`stream failed (${response.status})`);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          let name = "message";
+          const dataLines = [];
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("event:")) name = line.slice(6).trim();
+            else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+          }
+          if (dataLines.length) dispatch(name, dataLines.join("\n"));
+        }
+      }
+      // The server always sends a `close` event before ending the stream. Reaching EOF
+      // without it means the connection dropped mid-stream — surface it instead of leaving
+      // partial output looking complete.
+      if (!sawClose) appendEvent("stream", { error: "event stream disconnected" });
+    } catch (error) {
+      if (error.name !== "AbortError") appendEvent("stream", { error: error.message || "event stream disconnected" });
+    }
+  })();
 }
 
 function appendEvent(type, payload) {
