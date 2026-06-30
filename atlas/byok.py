@@ -43,6 +43,10 @@ def _write_env_file(path: Path, env_var: str, value: str) -> None:
     0600 temp file and atomically replaced, so a short write or disk error can never leave
     the existing env file truncated/empty (it stays intact until the replace succeeds), and
     the secret is never written to a world-readable file."""
+    if "\n" in value or "\r" in value:
+        raise ValueError("key value must not contain a newline (would inject extra env lines)")
+    if "\n" in env_var or "\r" in env_var or "=" in env_var:
+        raise ValueError("env var name must not contain '=', newline, or carriage return")
     path = Path(path)
     lines: list[str] = []
     if path.exists():

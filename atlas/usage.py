@@ -88,6 +88,16 @@ def elapsed_seconds(started_at: str | None, finished_at: str | None) -> float | 
         return None
 
 
+def _csv_safe(value: Any) -> Any:
+    """Neutralize CSV/spreadsheet formula injection: a cell whose text starts with = + - @
+    (or a leading control char a spreadsheet may strip back to one) is executed as a formula
+    by Excel/Sheets. Prefix such values with a single quote so they import as literal text.
+    Non-strings pass through unchanged."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r", "\n"):
+        return "'" + value
+    return value
+
+
 def usage_csv(events: list[dict[str, Any]]) -> str:
     output = io.StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=USAGE_CSV_FIELDS, extrasaction="ignore", lineterminator="\n")
@@ -95,7 +105,7 @@ def usage_csv(events: list[dict[str, Any]]) -> str:
     for event in events:
         row = dict(event)
         row["metadata"] = json.dumps(row.get("metadata") or {}, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-        writer.writerow({field: "" if row.get(field) is None else row.get(field) for field in USAGE_CSV_FIELDS})
+        writer.writerow({field: "" if row.get(field) is None else _csv_safe(row.get(field)) for field in USAGE_CSV_FIELDS})
     return output.getvalue()
 
 
