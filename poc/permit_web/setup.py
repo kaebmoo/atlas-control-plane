@@ -72,22 +72,25 @@ def rec_id(resp):
 
 
 def ensure_worker() -> str:
-    for w in as_list(api("GET", "/api/workers")):
-        if w.get("name") == WORKER_NAME:
-            wid = w["id"]
-            api("POST", f"/api/workers/{wid}/poll")  # refresh status
-            print(f"reusing worker {WORKER_NAME} ({wid})")
-            return wid
-    created = api("POST", "/api/workers", {
+    # Atlas upserts a worker BY base_url, so re-POSTing repoints/creates the worker at
+    # WORKER_URL. Switching MOCK_WORKER_URL (mock <-> real thClaws) and re-running setup
+    # therefore updates the target, and the workflow below is rebuilt to point at it.
+    worker = api("POST", "/api/workers", {
         "name": WORKER_NAME,
         "base_url": WORKER_URL,
         "token": WORKER_TOKEN,
         "role": "permit",
         "tags": "poc,permit",
     })
-    wid = rec_id(created)
-    api("POST", f"/api/workers/{wid}/poll")
-    print(f"registered worker {WORKER_NAME} ({wid}) -> {WORKER_URL}")
+    wid = rec_id(worker)
+    poll = api("POST", f"/api/workers/{wid}/poll")
+    status = "unknown"
+    if isinstance(poll, dict):
+        status = poll.get("status") or (poll.get("worker") or {}).get("status") or worker.get("status") or "unknown"
+    print(f"worker {WORKER_NAME} ({wid}) -> {WORKER_URL}  [status: {status}]")
+    if status not in ("online", "healthy"):
+        print(f"  ! not online yet — ensure the worker is running at {WORKER_URL} with the "
+              f"right token (and, for real thClaws, a model key), then re-run setup.py")
     return wid
 
 

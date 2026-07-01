@@ -68,16 +68,47 @@ ATLAS_TOKEN="$ATLAS_TOKEN" python3 poc/permit_web/app.py
 
 ## Swap in a real thClaws worker (instead of the mock)
 
-Point setup at a running `thclaws --serve` instead of the mock, then re-run it:
+The only difference from the mock is that a real worker actually calls a model, so it
+needs a **model key (BYOK)** — Atlas never holds it; thClaws does.
+
+**1. Start thClaws as a server, with its provider key in the environment:**
 
 ```bash
-MOCK_WORKER_URL='http://127.0.0.1:4317' MOCK_WORKER_TOKEN='<thclaws-token>' \
-  python3 poc/permit_web/setup.py
+cd <thClaws repo>
+# BYOK: give thClaws the key for whatever model it uses (example: Anthropic)
+ANTHROPIC_API_KEY='sk-…' THCLAWS_API_TOKEN='dev-token-1' \
+  thclaws --serve --bind 127.0.0.1 --port 4317
+# (or, if not installed: cargo run --features gui --bin thclaws -- \
+#     --serve --bind 127.0.0.1 --port 4317)
+
+# sanity check:
+curl http://127.0.0.1:4317/healthz
 ```
 
-The node prompts start with a harmless `STEP=intake|summary|notice` marker (the mock
-keys off it; a real model just treats it as a label) followed by the real instruction,
-so the same workflow works unchanged against a real worker.
+**2. Point the PoC at it and re-run setup** (`setup.py` upserts the worker by URL, so this
+repoints the workflow to thClaws automatically — the mock worker can stay registered):
+
+```bash
+MOCK_WORKER_URL='http://127.0.0.1:4317' MOCK_WORKER_TOKEN='dev-token-1' \
+  python3 poc/permit_web/setup.py
+# expect: worker permit-mock (wrk_…) -> http://127.0.0.1:4317  [status: online]
+```
+
+If it prints `[status: online]`, restart `app.py` (or just submit again) and the same
+form now runs against the real model.
+
+**Notes for the real worker:**
+
+- The node prompts begin with a harmless `STEP=intake|summary|notice` label followed by
+  the real instruction; a real model simply answers the instruction (the label is ignored).
+  You will get genuine Thai text instead of the mock's canned blocks.
+- No workspace is required for these text tasks — thClaws runs in its `--serve` directory.
+  If a task needs project files, add a workspace in Atlas and set `workspace_id` on the node.
+- Alternative to putting the key in thClaws's shell env: use Atlas's write-only injector
+  `python3 -m atlas.byok …` (see [BYOK Key Injection](../../docs/specs/byok-key-injection.md)) —
+  it writes the key into the worker's env/config and audits it, without Atlas ever storing it.
+- If the worker shows offline: check the token matches `THCLAWS_API_TOKEN`, the port is right,
+  and Atlas can reach the host; then re-run `setup.py` to re-poll.
 
 ## Configuration (env)
 
