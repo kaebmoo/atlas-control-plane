@@ -103,6 +103,7 @@ Leave it off (`false`) to stay completely silent, as in dev.
 | `ATLAS_MAX_STREAM_SECONDS` | `3600` | Overall wall-clock bound on a single worker stream; a slow/dripping worker is cut at this deadline. |
 | `ATLAS_MAX_JOB_OUTPUT_BYTES` | `16777216` | Cap on a single job's accumulated assistant output. |
 | `ATLAS_REQUIRE_SIGNED_PACKS` | `false` | **Set `true` in production (SHALL).** When `true`, `POST /api/packs/import` rejects unsigned packs. Running prod with `false` is an accepted risk owned by Pornthep Nivatyakul (see `specs/threat-model.md`). |
+| `ATLAS_BACKUP_KEY` | — | Optional. When set, `scripts/backup.sh` writes AES-256-CBC `.enc` backups and removes the plaintext copies (see [backup-restore.md](backup-restore.md)). |
 
 ## 5. Schema migrations on deploy
 
@@ -110,3 +111,21 @@ The database self-migrates on startup. `Database.init()` runs an ordered, idempo
 migration runner (a `schema_version` table records applied steps), so deploying a
 newer Atlas over an existing DB upgrades the schema forward automatically and
 re-running is a no-op. Back up first — see [backup-restore.md](backup-restore.md).
+
+## 6. Data retention
+
+Atlas never deletes data on its own. Retention is operator-driven:
+
+- **Artifacts** (including `file_ref` bytes on disk): purge artifacts of
+  *terminal* runs older than N days with
+  `python3 -m atlas.admin purge-artifacts --older-than-days N` (add `--dry-run`
+  to preview). Artifacts of live runs are never touched, and every purge is
+  audited as `artifact.purge`. Schedule from cron alongside the backup job.
+- **Backups**: prune with `find ... -mtime +N -delete` in the backup cron
+  (see [backup-restore.md](backup-restore.md)).
+- **Audit log / usage ledger**: append-only by design; export with
+  `GET /api/audit?format=csv` / `GET /api/usage?format=csv` before any manual
+  archive decision.
+- Artifacts may carry a `classification` tag
+  (`public`/`internal`/`confidential`/`secret`, validated on create) so purge
+  and hand-off policy can key off data classification.

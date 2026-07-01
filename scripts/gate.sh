@@ -15,7 +15,8 @@ python3 -m py_compile \
   scripts/check_cdr.py scripts/check_byok_helper.py scripts/check_silo.py \
   scripts/check_jobs.py scripts/check_backup.py scripts/check_audit_fixes.py \
   scripts/check_docs.py scripts/check_stress.py scripts/check_fuzz.py \
-  scripts/check_ui_ux.py scripts/check_input_adapter.py scripts/check_outbound.py
+  scripts/check_ui_ux.py scripts/check_input_adapter.py scripts/check_outbound.py \
+  scripts/check_observability.py scripts/check_lib.py
 
 node --check atlas/static/app.js
 
@@ -39,5 +40,6 @@ python3 scripts/check_stress.py       # concurrency: atomic transitions converge
 python3 scripts/check_fuzz.py         # parsers never crash; validators raise only ValueError
 python3 scripts/check_input_adapter.py  # IA-1: envelope + provenance audit
 python3 scripts/check_outbound.py       # OB-1: signed outbound delivery + deliveries API
+python3 scripts/check_observability.py  # cross-cutting: metrics, audit export, classification + purge
 
 echo "=== completion gate GREEN ==="

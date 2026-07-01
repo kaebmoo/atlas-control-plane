@@ -20,6 +20,9 @@ from .auth import generate_api_token, hash_api_token, hash_password, verify_pass
 
 
 ARTIFACT_KINDS = frozenset({"text", "json", "markdown", "file_ref", "summary", "decision"})
+# DGA-aligned data-classification tags. Stored in artifact metadata (no schema change);
+# validated at the single create path so every creator gets the same rule.
+ARTIFACT_CLASSIFICATIONS = frozenset({"public", "internal", "confidential", "secret"})
 ROLES = frozenset({"admin", "operator", "viewer", "auditor"})
 USER_STATUSES = frozenset({"active", "disabled"})
 _WORKER_TOKEN_MARKER = "atlasenc:v1:"
@@ -604,13 +607,59 @@ class Database:
                 (action, actor, resource_type, resource_id, encode_json(details or {}), now_iso()),
             )
 
-    def list_audit(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_audit(
+        self,
+        limit: int = 100,
+        from_at: str | None = None,
+        to_at: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where = []
+        params: list[Any] = []
+        if from_at:
+            where.append("created_at >= ?")
+            params.append(from_at)
+        if to_at:
+            where.append("created_at <= ?")
+            params.append(to_at)
+        sql = "SELECT * FROM audit_log"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
         with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [row_to_dict(row) or {} for row in rows]
+
+    def metrics_snapshot(self) -> dict[str, Any]:
+        """Operational counters for `GET /api/metrics` and Fleet scraping. Aggregates only —
+        exposes nothing a `read`-role caller could not already list item-by-item."""
+
+        def by_column(conn: sqlite3.Connection, table: str, column: str) -> dict[str, int]:
+            # table/column are hardcoded literals in the callers below, never user input.
+            rows = conn.execute(
+                f"SELECT {column} AS k, COUNT(*) AS n FROM {table} GROUP BY {column}"  # nosec B608
+            ).fetchall()
+            return {str(row["k"]): row["n"] for row in rows}
+
+        def count(conn: sqlite3.Connection, sql: str) -> int:
+            return int(conn.execute(sql).fetchone()[0])
+
+        with self.connect() as conn:
+            usage = conn.execute(
+                "SELECT COUNT(*) AS events, COALESCE(SUM(units), 0) AS units FROM usage_events"
+            ).fetchone()
+            return {
+                "workers": by_column(conn, "workers", "status"),
+                "jobs": by_column(conn, "jobs", "state"),
+                "workflow_runs": by_column(conn, "workflow_runs", "state"),
+                "workflow_definitions": count(conn, "SELECT COUNT(*) FROM workflow_definitions"),
+                "triggers_enabled": count(conn, "SELECT COUNT(*) FROM workflow_triggers WHERE enabled = 1"),
+                "approvals_pending": count(conn, "SELECT COUNT(*) FROM approvals WHERE state = 'pending'"),
+                "artifacts": count(conn, "SELECT COUNT(*) FROM artifacts"),
+                "usage_events": int(usage["events"]),
+                "usage_units": int(usage["units"]),
+                "schema_version": count(conn, "SELECT COALESCE(MAX(version), 0) FROM schema_version"),
+            }
 
     def emit_usage_event(self, payload: dict[str, Any]) -> dict[str, Any]:
         idempotency_key = str(payload.get("idempotency_key") or "").strip()
@@ -1453,6 +1502,15 @@ class Database:
                 raise ValueError("json artifact content must be valid JSON") from exc
         elif not isinstance(content, str):
             content = encode_json(content)
+        metadata = dict(payload.get("metadata") or {})
+        classification = payload.get("classification", metadata.get("classification"))
+        if classification is not None:
+            if not isinstance(classification, str) or classification not in ARTIFACT_CLASSIFICATIONS:
+                raise ValueError(
+                    f"unsupported artifact classification: {classification!r}; "
+                    f"use one of {sorted(ARTIFACT_CLASSIFICATIONS)}"
+                )
+            metadata["classification"] = classification
         with self._lock, self.connect() as conn:
             conn.execute(
                 """
@@ -1466,7 +1524,7 @@ class Database:
                     key,
                     kind,
                     content,
-                    encode_json(payload.get("metadata") or {}),
+                    encode_json(metadata),
                     now,
                     now,
                 ),
@@ -1508,6 +1566,62 @@ class Database:
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [row_to_dict(row) or {} for row in rows]
+
+    def purge_artifacts(
+        self,
+        older_than: str,
+        upload_dir: Path | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Retention purge: delete artifacts created before `older_than` whose run is in a
+        terminal state (or has been deleted). Artifacts of live runs are never touched —
+        a paused/waiting run may still template `{artifact.<key>}` into a prompt.
+        For file_ref artifacts the on-disk bytes under `upload_dir` are removed too, with
+        the same parent-containment check as the download path. Deleting bytes AFTER the
+        row commit means a crash can orphan a file (reclaimed by the next purge pass) but
+        can never leave a row pointing at nothing."""
+        terminal = ("succeeded", "failed", "cancelled")
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.id, a.kind, a.content FROM artifacts a
+                LEFT JOIN workflow_runs r ON r.id = a.run_id
+                WHERE a.created_at < ?
+                  AND (r.id IS NULL OR r.state IN (?, ?, ?))
+                """,
+                (older_than, *terminal),
+            ).fetchall()
+        candidates = [row_to_dict(row) or {} for row in rows]
+        result: dict[str, Any] = {
+            "older_than": older_than,
+            "dry_run": dry_run,
+            "purged": len(candidates),
+            "files_deleted": 0,
+            "ids": [artifact["id"] for artifact in candidates],
+        }
+        if dry_run or not candidates:
+            return result
+        with self._lock, self.connect() as conn:
+            conn.executemany(
+                "DELETE FROM artifacts WHERE id = ?",
+                [(artifact["id"],) for artifact in candidates],
+            )
+        if upload_dir is not None:
+            root = upload_dir.resolve()
+            for artifact in candidates:
+                if artifact.get("kind") != "file_ref":
+                    continue
+                target = (root / str(artifact.get("content") or "")).resolve()
+                if target.parent == root and target.is_file():
+                    target.unlink(missing_ok=True)
+                    result["files_deleted"] += 1
+        self.audit(
+            "artifact.purge",
+            "artifact",
+            "retention",
+            {"older_than": older_than, "purged": result["purged"], "files_deleted": result["files_deleted"]},
+        )
+        return result
 
     def _insert_delivery(self, conn: sqlite3.Connection, payload: dict[str, Any]) -> tuple[str, bool]:
         """INSERT OR IGNORE a delivery row and report whether THIS call created it. `OR IGNORE`

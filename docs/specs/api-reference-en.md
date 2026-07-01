@@ -210,8 +210,9 @@ require `read`.
 | DELETE | `/api/workflow-triggers/{trigger_id}` | Delete trigger/events |
 | POST | `/api/workflow-triggers/{trigger_id}/fire` | Fire manual/schedule/webhook (`202`) |
 | GET | `/api/workflow-triggers/{trigger_id}/events` | Trigger event history |
-| GET | `/api/audit?limit=100` | Audit log |
+| GET | `/api/audit?limit=100&from=&to=&format=json\|csv` | Audit log / CSV export |
 | GET | `/api/usage?from=&to=&format=json\|csv` | Raw usage ledger (admin/auditor only) |
+| GET | `/api/metrics` | Aggregate operational counters (any authenticated role) |
 
 ### Deliveries
 
@@ -476,6 +477,10 @@ JSON artifact content is decoded back to an object/list in API responses. Do not
 create an inline `file_ref` when download is required; use the file-upload
 endpoint.
 
+An optional `classification` field (`public`, `internal`, `confidential`,
+`secret`) tags the artifact for data-classification policy; it is validated on
+create and stored as `metadata.classification`. Any other value is a `400`.
+
 ### File upload
 
 The body is direct binary, not multipart or base64:
@@ -574,8 +579,33 @@ curl -sS "$BASE_URL/api/audit?limit=100"
 
 Each entry contains `action`, `actor`, `resource_type`, `resource_id`, `details`,
 and `created_at`. Authenticated requests use the username; explicit loopback
-development and background work may use `local`. The API currently has no audit
-filters/cursor or audit deletion endpoint.
+development and background work may use `local`. There is no audit deletion
+endpoint (append-only by design).
+
+For compliance hand-off, `from`/`to` (inclusive ISO 8601 date or timestamp) bound
+the entries and `format=csv` exports them as CSV — same conventions as
+`/api/usage`, same `audit.read` RBAC:
+
+```bash
+curl -sS -H 'Authorization: Bearer <token>' \
+  "$BASE_URL/api/audit?from=2026-06-01&to=2026-06-30&format=csv"
+```
+
+`GET /api/metrics` returns aggregate operational counters for dashboards and
+Fleet scraping — counts by state for workers/jobs/workflow runs, definition/
+trigger/approval/artifact/usage totals, `schema_version`, `version`, and `time`.
+Aggregates only, so it needs just the `read` permission:
+
+```bash
+curl -sS -H 'Authorization: Bearer <token>' "$BASE_URL/api/metrics"
+```
+
+Retention: artifacts of **terminal** runs can be purged from the CLI
+(`python3 -m atlas.admin purge-artifacts --older-than-days N [--dry-run]`);
+file_ref bytes are deleted with the rows and the purge itself is audited as
+`artifact.purge`. Artifacts may carry an optional `classification` tag
+(`public`/`internal`/`confidential`/`secret`) stored in their metadata — see the
+Artifacts section.
 
 ## 13. Usage Metering and Export
 

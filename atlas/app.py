@@ -24,7 +24,7 @@ from .jobs import JobManager, TERMINAL_STATES
 from .outbound import OutboundService, OutboundSettings
 from .packs import export_pack, import_pack, list_available_packs
 from .router import Router
-from .usage import normalize_usage_range, summarize_usage, usage_csv
+from .usage import audit_csv, normalize_usage_range, summarize_usage, usage_csv
 from .workflow_templates import workflow_templates
 from .workflows import (
     WORKFLOW_POLICY_LIMITS,
@@ -317,6 +317,12 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     "workers": len(runtime.db.list_workers()),
                 }
             )
+            return
+
+        if method == "GET" and parts == ["api", "metrics"]:
+            # Aggregate counters only (states, totals, schema_version) — nothing a
+            # `read`-role caller could not already list item-by-item, so plain read RBAC.
+            self._json({"metrics": {**runtime.db.metrics_snapshot(), "version": __version__, "time": now_iso()}})
             return
 
         if method == "GET" and parts == ["api", "usage"]:
@@ -715,8 +721,19 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
         if parts == ["api", "audit"] and method == "GET":
             limit = _parse_limit(query)
-            self._json({"audit": runtime.db.list_audit(limit)})
-            return
+            from_at, to_at = normalize_usage_range(
+                query.get("from", [""])[0] or None,
+                query.get("to", [""])[0] or None,
+            )
+            entries = runtime.db.list_audit(limit, from_at, to_at)
+            output_format = query.get("format", ["json"])[0].lower()
+            if output_format == "json":
+                self._json({"audit": entries})
+                return
+            if output_format == "csv":
+                self._csv(audit_csv(entries))
+                return
+            raise ValueError("audit format must be json or csv")
 
         if parts == ["api", "deliveries"] and method == "GET":
             limit = _parse_limit(query)

@@ -109,6 +109,22 @@ def usage_csv(events: list[dict[str, Any]]) -> str:
     return output.getvalue()
 
 
+AUDIT_CSV_FIELDS = ["id", "created_at", "actor", "action", "resource_type", "resource_id", "details"]
+
+
+def audit_csv(entries: list[dict[str, Any]]) -> str:
+    """CSV export of audit entries (per-tenant audit export for compliance hand-off).
+    Same formula-injection hygiene as usage_csv."""
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=AUDIT_CSV_FIELDS, extrasaction="ignore", lineterminator="\n")
+    writer.writeheader()
+    for entry in entries:
+        row = dict(entry)
+        row["details"] = json.dumps(row.get("details") or {}, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        writer.writerow({field: "" if row.get(field) is None else _csv_safe(row.get(field)) for field in AUDIT_CSV_FIELDS})
+    return output.getvalue()
+
+
 def create_signed_usage_export(
     db: Database,
     secret_key: str,

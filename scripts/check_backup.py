@@ -39,6 +39,25 @@ def main() -> None:
             names = tar.getnames()
         assert any(name.endswith("uploads/evidence.bin") for name in names), names
 
+        if shutil.which("openssl"):
+            enc_dest = Path(tmp) / "backups-enc"
+            env_enc = {**env, "ATLAS_BACKUP_KEY": "backup-test-key"}
+            subprocess.run(
+                ["bash", str(ROOT / "scripts" / "backup.sh"), str(enc_dest)],
+                check=True, env=env_enc, capture_output=True,
+            )
+            encrypted = list(enc_dest.glob("atlas-*.sqlite.enc"))
+            assert encrypted, "ATLAS_BACKUP_KEY must produce an encrypted snapshot"
+            assert not list(enc_dest.glob("atlas-*.sqlite")), "plaintext snapshot must be removed"
+            assert not encrypted[0].read_bytes().startswith(b"SQLite format 3"), "ciphertext must not be a raw sqlite file"
+            restored = Path(tmp) / "restored.sqlite"
+            subprocess.run(
+                ["openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2", "-iter", "200000",
+                 "-pass", "env:ATLAS_BACKUP_KEY", "-in", str(encrypted[0]), "-out", str(restored)],
+                check=True, env=env_enc, capture_output=True,
+            )
+            assert restored.read_bytes().startswith(b"SQLite format 3"), "decrypt must restore a valid sqlite file"
+
     print("backup check ok")
 
 
