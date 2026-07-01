@@ -3,6 +3,8 @@
 # Usage: scripts/backup.sh [dest-dir]
 #   DB source:  $ATLAS_DB        (default: ./data/atlas.sqlite)
 #   dest dir:   $1 or ./backups
+#   encryption: set $ATLAS_BACKUP_KEY to write .enc (AES-256-CBC via openssl) and
+#               remove the plaintext copies. Decrypt: see docs/ops/backup-restore.md.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,4 +32,15 @@ if [[ -d "$UPLOAD_DIR" ]]; then
   UPLOAD_DEST="$DEST_DIR/atlas-uploads-$STAMP.tar.gz"
   tar -czf "$UPLOAD_DEST" -C "$(dirname "$UPLOAD_DIR")" "$(basename "$UPLOAD_DIR")"
   echo "uploads written: $UPLOAD_DEST"
+fi
+
+# Encrypt at rest when a key is provided (pass via env:, never argv — argv leaks in `ps`).
+# Plaintext is removed only after openssl succeeds; -pbkdf2 avoids openssl's weak legacy KDF.
+if [[ -n "${ATLAS_BACKUP_KEY:-}" ]]; then
+  for plain in "$DEST" ${UPLOAD_DEST:+"$UPLOAD_DEST"}; do
+    openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -pass env:ATLAS_BACKUP_KEY \
+      -in "$plain" -out "$plain.enc"
+    rm "$plain"
+    echo "encrypted: $plain.enc"
+  done
 fi

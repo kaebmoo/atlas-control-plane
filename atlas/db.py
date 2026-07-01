@@ -635,8 +635,9 @@ class Database:
         exposes nothing a `read`-role caller could not already list item-by-item."""
 
         def by_column(conn: sqlite3.Connection, table: str, column: str) -> dict[str, int]:
+            # table/column are hardcoded literals in the callers below, never user input.
             rows = conn.execute(
-                f"SELECT {column} AS k, COUNT(*) AS n FROM {table} GROUP BY {column}"  # nosec B608 - table/column are hardcoded by the callers below
+                f"SELECT {column} AS k, COUNT(*) AS n FROM {table} GROUP BY {column}"  # nosec B608
             ).fetchall()
             return {str(row["k"]): row["n"] for row in rows}
 

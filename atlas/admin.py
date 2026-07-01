@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+from datetime import UTC, datetime, timedelta
 
 from .config import Config
 from .db import Database, ROLES
@@ -35,6 +36,14 @@ def main(argv: list[str] | None = None) -> None:
     revoke_token.add_argument("token_id")
 
     subparsers.add_parser("list-users", help="list users")
+
+    purge = subparsers.add_parser(
+        "purge-artifacts",
+        help="retention purge: delete artifacts of terminal runs older than N days (incl. file bytes)",
+    )
+    purge.add_argument("--older-than-days", type=int, required=True)
+    purge.add_argument("--dry-run", action="store_true", help="report what would be purged without deleting")
+
     args = parser.parse_args(argv)
 
     config = Config.from_env()
@@ -67,6 +76,20 @@ def main(argv: list[str] | None = None) -> None:
             if not db.revoke_api_token(args.token_id):
                 raise SystemExit(f"Unknown or already revoked token: {args.token_id}")
         print(f"Revoked {args.token_id}")
+        return
+    if args.command == "purge-artifacts":
+        if args.older_than_days < 1:
+            raise SystemExit("--older-than-days must be >= 1")
+        cutoff = (
+            (datetime.now(UTC) - timedelta(days=args.older_than_days))
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        upload_dir = (config.upload_dir or config.db_path.parent / "uploads").resolve()
+        with db.as_actor("atlas-admin-cli"):
+            result = db.purge_artifacts(cutoff, upload_dir=upload_dir, dry_run=args.dry_run)
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return
     print(json.dumps({"users": db.list_users()}, ensure_ascii=True, indent=2))
 

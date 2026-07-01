@@ -140,49 +140,54 @@ completion gate.
   detection, and failure isolation.
 
 ### M3 — Deployment hardening (per instance)  ← GA blocker
-- [ ] Production run mode: systemd unit + `scripts/run-prod.sh`; reverse proxy
+- [x] Production run mode: systemd unit + `scripts/run-prod.sh`; reverse proxy
       (TLS, gzip, request size limits) documented; `ATLAS_LOOPBACK_NO_AUTH=false`.
-- [ ] SQLite: enable WAL mode; scheduled `.backup` + restore runbook; document
+- [x] SQLite: enable WAL mode; scheduled `.backup` + restore runbook; document
       the single-writer caveat (fine at single-tenant scale).
-- [ ] **Versioned migrations**: add a `schema_version` table + ordered migration
+- [x] **Versioned migrations**: add a `schema_version` table + ordered migration
       runner (current `CREATE TABLE IF NOT EXISTS` cannot evolve columns across
       a fleet). Required before fleet upgrades.
-- [ ] Config: secrets via env/secret store, not flags; configurable bind;
+- [x] Config: secrets via env/secret store, not flags; configurable bind;
       structured request logging.
 - Check: `scripts/check_migrations.py` — migrate an old DB snapshot forward
   cleanly and idempotently.
 
 ### M4 — Atlas Fleet (new component)  ← Phase 2, minimal slice in Phase 1
-- [ ] `instances` registry: `id, tenant, base_url, region, version,
+- [x] `instances` registry: `id, tenant, base_url, region, version,
       admin_token_ref, status, last_health_at, created_at`.
-- [ ] Provisioning via IaC (Terraform/cloud-init/Ansible) — **do not** build a
+- [x] Provisioning via IaC (Terraform/cloud-init/Ansible) — **do not** build a
       bespoke orchestrator. Provide `atlas-fleet provision --tenant X` that:
       creates VM/container → deploys Atlas → runs migrations → seeds admin token
-      → registers the instance.
-- [ ] Health polling using the existing `/healthz`; version + drift reporting.
-- [ ] Upgrade orchestration: deploy new version + run M3 migrations per instance.
-- [ ] Usage pull from each instance `/api/usage` (or offline file ingest).
+      → registers the instance. (Minimal slice: `python3 -m fleet provision` does
+      local provisioning with rollback; VM-level IaC remains per-deployment.)
+- [x] Health polling using the existing `/healthz`; version + drift reporting.
+- [x] Upgrade orchestration: deploy new version + run M3 migrations per instance.
+      (Migrations self-run on instance start; Fleet reports version drift.)
+- [x] Usage pull from each instance `/api/usage` (or offline file ingest).
 - Decision: Fleet can be its own small repo/service; it shares nothing with a
   tenant DB. Start with a CLI + registry; add a dashboard later.
 - Check: provision → register → health-green → usage-pulled, against a local
   throwaway Atlas instance.
 
 ### M5 — Central usage aggregation & CDR export  ← Phase 2
-- [ ] Aggregate `usage_events` per tenant per period in the Fleet.
-- [ ] Emit a **CDR-style CSV** (one row per billable event, e.g. per
+- [x] Aggregate `usage_events` per tenant per period in the Fleet.
+- [x] Emit a **CDR-style CSV** (one row per billable event, e.g. per
       workflow-run) and hand it to **NT's billing system** — same pattern as telco
       CDR. NT rates per plan tier and issues invoices, **not Atlas/Fleet**.
-- [ ] **No rating engine, no `tenant_invoices`, no ERP integration on our side.**
+      (Schema is `atlas.cdr.v1-proposed`, pending NT billing confirmation —
+      see docs/specs/cdr-schema.md.)
+- [x] **No rating engine, no `tenant_invoices`, no ERP integration on our side.**
       Plan tiers are supplied to NT billing as config, not implemented here.
 - See [usage-metering-billing-plan.md](usage-metering-billing-plan.md) Decision 3.
 - Check: synthetic usage → one CDR file per tenant with correct per-period totals.
 
 ### M6 — Solution packs (Government first)  ← Phase 1 use case
-- [ ] Pack format: a JSON bundle `{ name, version, workflows[], triggers[],
-      roles[], sample_input, docs }`.
-- [ ] `GET /api/packs`, `POST /api/packs/import`, `GET /api/packs/{id}/export`.
-- [ ] First pack: **Citizen complaint intake → triage → response draft → human
-      gate → publish** (the plan's Phase-1 government use case).
+- [x] Pack format: a JSON bundle `{ name, version, workflows[], triggers[],
+      roles[], sample_input, docs }` (see docs/specs/pack-format.md; HMAC
+      signing with `ATLAS_REQUIRE_SIGNED_PACKS` covers the M8-signing slice).
+- [x] `GET /api/packs`, `POST /api/packs/import`, `GET /api/packs/{id}/export`.
+- [x] First pack: **Citizen complaint intake → triage → response draft → human
+      gate → publish** (atlas/packs/gov_complaint.json).
 - Check: import pack → workflow definition + trigger created and validate-clean.
 
 ### M7 — Managed inference / model neutrality  ← later / optional tier
@@ -204,10 +209,15 @@ completion gate.
   decision. Listed so the decision is not silently reversed.
 
 ### Cross-cutting — Observability & compliance (woven into M1–M5)
-- [ ] Structured logs + a metrics endpoint per instance.
-- [ ] Per-tenant audit export (audit_log already exists).
-- [ ] Data-classification tag on artifacts + retention/purge policy.
-- [ ] Secrets handling (M1) + backup encryption (M3).
+- [x] Structured logs (`ATLAS_REQUEST_LOG`) + a metrics endpoint per instance
+      (`GET /api/metrics`).
+- [x] Per-tenant audit export (`GET /api/audit?from=&to=&format=csv`).
+- [x] Data-classification tag on artifacts (`classification` →
+      `metadata.classification`) + retention/purge policy
+      (`python3 -m atlas.admin purge-artifacts`, docs/ops/deployment.md §6).
+- [x] Secrets handling (M1) + backup encryption (`ATLAS_BACKUP_KEY` in
+      scripts/backup.sh).
+- Check: `scripts/check_observability.py`.
 
 ---
 

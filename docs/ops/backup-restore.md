@@ -37,6 +37,28 @@ Schedule it from cron (hourly example):
 
 Retention is your call — the script never deletes old snapshots. Add a `find ... -mtime +N -delete` to the cron line if you want pruning.
 
+### Encrypted backups
+
+Set `ATLAS_BACKUP_KEY` to encrypt both files at rest (AES-256-CBC via `openssl`,
+PBKDF2 KDF). The plaintext copies are removed after successful encryption, and the
+key is passed via the environment — never argv — so it does not leak in `ps`:
+
+```bash
+ATLAS_BACKUP_KEY="$(cat /etc/atlas/backup.key)" scripts/backup.sh /srv/atlas-bak
+# -> atlas-<ts>.sqlite.enc, atlas-uploads-<ts>.tar.gz.enc
+```
+
+Decrypt before restoring:
+
+```bash
+ATLAS_BACKUP_KEY="$(cat /etc/atlas/backup.key)" \
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:ATLAS_BACKUP_KEY \
+  -in atlas-20260629T120000Z.sqlite.enc -out atlas-20260629T120000Z.sqlite
+```
+
+Store the key outside the backup destination (secret store / offline), or the
+encryption buys nothing.
+
 ## Restore
 
 1. **Stop Atlas** (`systemctl stop atlas`) so nothing is writing.

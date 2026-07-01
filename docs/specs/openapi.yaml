@@ -1414,18 +1414,47 @@ paths:
     get:
       tags: [Audit]
       operationId: listAudit
-      summary: List audit entries newest first
+      summary: List or export audit entries newest first
+      description: |
+        `from`/`to` bound entries by created_at (inclusive; ISO-8601 date or
+        timestamp). `format=csv` exports the same rows for compliance hand-off.
       parameters:
         - {$ref: '#/components/parameters/Limit100'}
+        - {$ref: '#/components/parameters/UsageFrom'}
+        - {$ref: '#/components/parameters/UsageTo'}
+        - {$ref: '#/components/parameters/UsageFormat'}
       responses:
         '200':
-          description: Audit entries
+          description: Audit entries, or an audit CSV
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   audit: {type: array, items: {$ref: '#/components/schemas/AuditEntry'}}
+            text/csv:
+              schema: {type: string}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/metrics:
+    get:
+      tags: [Audit]
+      operationId: getMetrics
+      summary: Aggregate operational counters for dashboards and Fleet scraping
+      description: |
+        Counts by state for workers/jobs/workflow runs plus definition, trigger,
+        approval, artifact, and usage totals, the schema version, the Atlas
+        version, and the server time. Aggregates only — any `read`-role caller
+        could already list the underlying items one by one.
+      responses:
+        '200':
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  metrics: {type: object, additionalProperties: true}
         default: {$ref: '#/components/responses/Error'}
 
   /api/usage:
