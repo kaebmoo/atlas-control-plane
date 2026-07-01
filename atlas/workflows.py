@@ -10,12 +10,19 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .db import Database, now_iso
+from .outbound import resolve_outbound_target
 from .router import Router
 from .usage import elapsed_seconds
 
 
 _FIELD_RE = re.compile(r"{([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)}")
 _JOB_TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
+# Input Adapter Contract (docs/specs/input-adapter-contract.md) §3: the reserved `_meta` key
+# inside run input. Every field is optional; only a malformed shape / unknown channel / an
+# undeliverable callback_url rejects the run (fail closed) — a bare payload with no `_meta` is
+# unaffected, matching every channel that posts to Atlas today.
+_META_SOURCE_CHANNELS = frozenset({"line", "email", "web_form", "api", "schedule", "other"})
+_META_REPLY_MODES = frozenset({"webhook", "none"})
 _MANAGER_SCHEMA = "manager_decision_v1"
 _TRIGGER_STATES = {"manual", "schedule", "webhook", "workflow_run_completed", "artifact_created", "worker_status_changed"}
 _EVENT_TRIGGER_FILTERS = {
@@ -49,6 +56,62 @@ def _trigger_chain_blocks(target_workflow_id: Any, source_workflow_id: Any, chai
     if target_workflow_id and target_workflow_id in chain:
         return True
     return len(chain) >= MAX_TRIGGER_CHAIN_DEPTH
+
+
+def validate_run_input_envelope(input: dict[str, Any], outbound_allowlist: tuple[str, ...]) -> None:
+    """IA-1: validate the reserved `_meta` object on run input, if present, on BOTH ingress
+    paths (they share this one choke point: WorkflowRunner.start_workflow). `_meta` and every
+    field inside it are optional; only `_meta` not being an object, an unknown source.channel,
+    or a reply.callback_url that IA-1's shared allowlist check would refuse rejects the run —
+    fail closed so Atlas never creates a run promising provenance or a reply it cannot honor."""
+    if "_meta" not in input:
+        return
+    meta = input["_meta"]
+    if not isinstance(meta, dict):
+        raise ValueError("_meta must be an object")
+    source = meta.get("source")
+    if source is not None:
+        if not isinstance(source, dict):
+            raise ValueError("_meta.source must be an object")
+        channel = source.get("channel")
+        if channel is not None and channel not in _META_SOURCE_CHANNELS:
+            raise ValueError(f"_meta.source.channel must be one of {sorted(_META_SOURCE_CHANNELS)}")
+        for key in ("adapter", "form", "external_id", "received_at"):
+            if key in source and source[key] is not None and not isinstance(source[key], str):
+                raise ValueError(f"_meta.source.{key} must be a string")
+    reply = meta.get("reply")
+    if reply is not None:
+        if not isinstance(reply, dict):
+            raise ValueError("_meta.reply must be an object")
+        mode = reply.get("mode") or "none"
+        if mode not in _META_REPLY_MODES:
+            raise ValueError(f"_meta.reply.mode must be one of {sorted(_META_REPLY_MODES)}")
+        callback_url = reply.get("callback_url")
+        if callback_url is not None:
+            if not isinstance(callback_url, str) or not callback_url:
+                raise ValueError("_meta.reply.callback_url must be a non-empty string")
+            target = resolve_outbound_target(callback_url, outbound_allowlist)
+            if not target.allowed:
+                raise ValueError(f"_meta.reply.callback_url is not deliverable: {target.reason}")
+        elif mode == "webhook":
+            raise ValueError("_meta.reply.callback_url is required when mode is webhook")
+        correlation_id = reply.get("correlation_id")
+        if correlation_id is not None and not isinstance(correlation_id, str):
+            raise ValueError("_meta.reply.correlation_id must be a string")
+
+
+def _audit_input_provenance(db: Database, run_id: str, input: dict[str, Any]) -> None:
+    """IA-1 guarantee: on run start, record `_meta.source` (visibility only, no secrets — there
+    are none in the envelope by design) against the resulting run_id."""
+    source = (input.get("_meta") or {}).get("source")
+    if not isinstance(source, dict):
+        return
+    db.audit(
+        "workflow_run.provenance",
+        "workflow_run",
+        run_id,
+        {key: source.get(key) for key in ("channel", "adapter", "form", "external_id")},
+    )
 
 
 def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -257,11 +320,19 @@ def render_prompt(
 
 
 class WorkflowRunner:
-    def __init__(self, db: Database, job_service: Any, poll_interval_seconds: float = 0.2, max_wait_seconds: float = 3600):
+    def __init__(
+        self,
+        db: Database,
+        job_service: Any,
+        poll_interval_seconds: float = 0.2,
+        max_wait_seconds: float = 3600,
+        outbound_allowlist: tuple[str, ...] = (),
+    ):
         self.db = db
         self.job_service = job_service
         self.poll_interval_seconds = poll_interval_seconds
         self.max_wait_seconds = max_wait_seconds
+        self.outbound_allowlist = outbound_allowlist
         self.trigger_service: WorkflowTriggerService | None = None
         self._threads: dict[str, threading.Thread] = {}
         self._thread_lock = threading.RLock()
@@ -290,8 +361,10 @@ class WorkflowRunner:
             # Normalize only None -> {}; a falsy non-object ([], "", 0, False) must be rejected,
             # not silently coerced to an empty object.
             raise ValueError("workflow input must be an object")
+        validate_run_input_envelope(input, self.outbound_allowlist)
         validate_workflow_graph(graph, policy)
         run = self._create_run(graph, policy, input, workflow_definition_id, definition.get("name") or "Workflow run")
+        _audit_input_provenance(self.db, run["id"], input)
         self._start_background(run["id"], graph, policy, input)
         return self.db.get_workflow_run(run["id"]) or run
 

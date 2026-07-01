@@ -76,7 +76,7 @@ class AtlasRuntime:
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.jobs = JobManager(self.db, config.request_timeout_seconds)
         self.router = Router(self.db)
-        self.workflows = WorkflowRunner(self.db, self.jobs)
+        self.workflows = WorkflowRunner(self.db, self.jobs, outbound_allowlist=config.outbound_allowlist)
         self.triggers = WorkflowTriggerService(self.db, self.workflows)
         # Reconcile jobs first so orphaned worker jobs are terminal before runs recover,
         # then reconcile workflow runs (which re-arm interrupted nodes).

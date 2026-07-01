@@ -16,6 +16,15 @@ stage at close-out (gate green + docs synced + committed).
 | M9 — pooled-tenancy ADR | ✅ done | `docs/adr/0001-multi-tenancy-silo-vs-pooled.md`: silo decision, exact pooled change-list (tenant_id on every table, scoping layer, cross-tenant RBAC, per-tenant limits, Fleet export scoping), staged migration + risks + test strategy, revisit trigger. No `tenant_id` in core — proven and guarded by `scripts/check_silo.py` (in gate). Docs/ADR only; zero core/tenant code. |
 | GA wrap — security + docs + green gate | ✅ done | Full-surface security review (per-stage codex + a holistic `codex review --base main`): auth/RBAC on every new route, no plaintext key/token in logs (request log path-only)/DB (BYOK key absent; fleet token by ref + 0600)/responses, `/healthz` leaks nothing, ATLAS_SECRET_KEY signing, BYOK no-key-in-core. 3 pack findings fixed (import reference validation; version round-trip; non-string role → clean 400). Canonical gate `scripts/gate.sh` green from a clean tree; docs/README links all resolve. |
 
+## Input Adapter & Return Path
+
+Tracks [docs/plans/input-adapter-return-path-plan.md](docs/plans/input-adapter-return-path-plan.md).
+
+| Milestone | Status | Notes |
+|---|---|---|
+| IA-1 — envelope + provenance | ✅ done | Reserved `_meta` (`source`/`reply`) parsed/validated at the single `WorkflowRunner.start_workflow` choke point shared by both ingress paths (`/api/workflow-triggers/{id}/fire` and `POST /api/workflow-runs`); legacy payloads without `_meta` unaffected. `_meta.source` audited (`workflow_run.provenance`) against the run_id. New `atlas/outbound.py` (`resolve_outbound_target`): stdlib-only SSRF/allowlist guard for `reply.callback_url` (empty `ATLAS_OUTBOUND_ALLOWLIST` = disabled by default), shared as-is by OB-1. `scripts/check_input_adapter.py` added to gate. Docs: contract status updated, plan DoD ticked. |
+| OB-1 — outbound delivery | ☐ not started | Signed return-path delivery on `workflow_run_completed`; `deliveries` table + API. |
+
 ## External confirmations still outstanding
 
 - **CDR record schema** — proposed (`x-schema: atlas.cdr.v1-proposed`); confirm fields/units with NT billing/mediation.

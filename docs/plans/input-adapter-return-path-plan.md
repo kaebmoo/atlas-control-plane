@@ -60,21 +60,21 @@ Implement the contract in [../specs/input-adapter-contract.md](../specs/input-ad
 
 **Definition of Done:**
 
-- [ ] `_meta` parsed/validated on both ingress paths; legacy payloads unchanged.
-- [ ] Business fields still resolve in prompts (`{input.*}`).
-- [ ] `_meta.source` recorded in `audit_log` with `run_id`.
-- [ ] Invalid envelope rejected pre-run with a clear error.
-- [ ] Spec's Guarantees section matches behavior; docs synced (spec status, concepts if needed).
+- [x] `_meta` parsed/validated on both ingress paths; legacy payloads unchanged.
+- [x] Business fields still resolve in prompts (`{input.*}`).
+- [x] `_meta.source` recorded in `audit_log` with `run_id`.
+- [x] Invalid envelope rejected pre-run with a clear error.
+- [x] Spec's Guarantees section matches behavior; docs synced (spec status, concepts if needed).
 
 **Check — `scripts/check_input_adapter.py` (hermetic: temp DB, ephemeral port, mock thClaws):**
 
-- [ ] `/fire` with an envelope → run created; `_meta.source` present in audit; a business
+- [x] `/fire` with an envelope → run created; `_meta.source` present in audit; a business
       field reaches the mock worker's prompt.
-- [ ] `/fire` **without** `_meta` (legacy) → still works end-to-end.
-- [ ] `POST /api/workflow-runs` with `_meta` in `input` → same provenance recorded.
-- [ ] Invalid `_meta` (non-object / unknown channel / non-allowlisted `callback_url`) →
+- [x] `/fire` **without** `_meta` (legacy) → still works end-to-end.
+- [x] `POST /api/workflow-runs` with `_meta` in `input` → same provenance recorded.
+- [x] Invalid `_meta` (non-object / unknown channel / non-allowlisted `callback_url`) →
       rejected, no run created.
-- [ ] `_meta.reply` round-trips: readable from the persisted run input.
+- [x] `_meta.reply` round-trips: readable from the persisted run input.
 
 ---
 
@@ -166,7 +166,7 @@ stateDiagram-v2
 
 | Milestone | Status | Check | Notes |
 | --- | --- | --- | --- |
-| IA-1 | ☐ not started | `scripts/check_input_adapter.py` | additive; no schema change |
+| IA-1 | ✅ done | `scripts/check_input_adapter.py` | additive; no schema change; `atlas/outbound.py` added (SSRF/allowlist validator shared with OB-1) |
 | OB-1 | ☐ not started | `scripts/check_outbound.py` | needs IA-1 + M3 migrations + `ATLAS_SECRET_KEY` |
 
 ## Order
