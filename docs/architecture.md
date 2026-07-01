@@ -104,6 +104,10 @@ branch, joins track completed upstream keys, and duplicate incoming edges do
 not schedule a node twice. The current executor is queue-based rather than
 parallel.
 
+For which multi-agent patterns this engine can express — and the dynamic
+fan-out (map) gap that bounds the rest — see
+[Workflow Patterns](workflow-patterns.md).
+
 Run completion, artifact creation, and worker status transitions feed the
 trigger service. Internal triggers can filter by source workflow, state,
 artifact key/kind, worker, or status. Atlas blocks unguarded self-triggering to

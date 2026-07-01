@@ -14,7 +14,8 @@ python3 -m py_compile \
   scripts/check_auth.py scripts/check_migrations.py scripts/check_packs.py \
   scripts/check_cdr.py scripts/check_byok_helper.py scripts/check_silo.py \
   scripts/check_jobs.py scripts/check_backup.py scripts/check_audit_fixes.py \
-  scripts/check_docs.py scripts/check_stress.py scripts/check_fuzz.py
+  scripts/check_docs.py scripts/check_stress.py scripts/check_fuzz.py \
+  scripts/check_ui_ux.py
 
 node --check atlas/static/app.js
 
@@ -33,6 +34,7 @@ python3 scripts/check_silo.py         # M9 silo invariant
 python3 scripts/check_backup.py       # backup includes the upload store
 python3 scripts/check_audit_fixes.py  # terminal-state races, run snapshot, trigger/limit guards
 python3 scripts/check_docs.py         # docs-drift: README links + route coverage
+python3 scripts/check_ui_ux.py        # dashboard UX: job sync, mobile drawer, modal focus
 python3 scripts/check_stress.py       # concurrency: atomic transitions converge under load
 python3 scripts/check_fuzz.py         # parsers never crash; validators raise only ValueError
 

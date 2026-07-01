@@ -12,6 +12,7 @@ const state = {
   approvals: [],
   selectedJobId: null,
   selectedWorkflowId: null,
+  selectedWorkflowNode: null,
   selectedWorkflowRunId: null,
   selectedWorkflowTriggerId: null,
   workflowRunDetail: null,
@@ -20,6 +21,7 @@ const state = {
   workflowTriggerEvents: [],
   workerSuggestions: [],
   eventSource: null,
+  auditFilter: "all",
   workflowEditorDirty: false,
   streamText: "",
   events: [],
@@ -53,7 +55,7 @@ async function api(path, options = {}) {
     const message = data?.error || data?.message || response.statusText || `HTTP ${response.status}`;
     if (response.status === 401 && path !== "/api/auth/login") {
       localStorage.removeItem("atlasApiToken");
-      showLogin("Your session is missing or expired.");
+      showLogin("เซสชันหมดอายุหรือไม่พบ กรุณาเข้าสู่ระบบอีกครั้ง");
     }
     throw new Error(message);
   }
@@ -100,10 +102,20 @@ function setDirty(value) {
   reflectEditorDirty();
 }
 
-const VIEWS = ["command", "workflows", "monitor", "jobs", "audit", "usage", "fleet"];
+const VIEWS = ["overview", "command", "workflows", "monitor", "jobs", "audit", "usage", "fleet"];
+const VIEW_META = {
+  overview:  ["ภาพรวม", "Overview", "สรุปสถานะฟลีตและงานล่าสุด"],
+  command:   ["สั่งงาน", "Command", "ส่งงานไปยัง thClaws worker ที่เหมาะสมโดยอัตโนมัติ"],
+  workflows: ["เวิร์กโฟลว์", "Workflows", "ออกแบบและจัดการ workflow แบบกราฟโหนด"],
+  monitor:   ["ติดตาม", "Monitor", "คิวอนุมัติและสถานะ run ที่ทำงานพร้อมกัน"],
+  jobs:      ["งาน", "Jobs", "สตรีมผลงานแบบสดและประวัติงาน"],
+  fleet:     ["ฟลีต", "Fleet", "จัดการ worker และ workspace"],
+  audit:     ["ตรวจสอบ", "Audit", "30 การกระทำล่าสุดบน control plane"],
+  usage:     ["การใช้งาน", "Usage", "Workflow run, งาน และ budget units ต่อช่วงเวลา"],
+};
 
 function showView(view) {
-  if (!VIEWS.includes(view)) view = "command";
+  if (!VIEWS.includes(view)) view = "overview";
   for (const section of document.querySelectorAll(".view")) {
     section.classList.toggle("is-active", section.dataset.view === view);
   }
@@ -112,6 +124,11 @@ function showView(view) {
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   }
+  const meta = VIEW_META[view] || VIEW_META.overview;
+  $("#pageTitleTh").textContent = meta[0];
+  $("#pageTitleEn").textContent = meta[1];
+  $("#pageSub").textContent = meta[2];
+  if (view === "workflows") requestAnimationFrame(() => wfApplyScale());
   try { localStorage.setItem("atlasView", view); } catch { /* private mode */ }
 }
 
@@ -125,6 +142,7 @@ function setNavBadge(name, count) {
 function renderNavBadges() {
   setNavBadge("approvals", state.approvals.length);
   setNavBadge("jobs", state.jobs.filter((job) => ["queued", "running", "cancel_requested"].includes(job.state)).length);
+  setNavBadge("workers", state.workers.length);
 }
 
 function tagsToText(tags) {
@@ -324,7 +342,8 @@ async function loadAll() {
     await loadWorkflowRunDetail(state.selectedWorkflowRunId);
   }
   render();
-  $("#lastRefresh").textContent = `Refreshed ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  const lastRefresh = document.getElementById("lastRefresh");
+  if (lastRefresh) lastRefresh.textContent = `อัปเดต ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
 async function refreshAll({ poll = false, notice = false } = {}) {
@@ -349,9 +368,12 @@ function render() {
   reflectEditorDirty();
   renderIdentity();
   applyRoleGate();
+  // Last: keep the selected job's header/cancel/cursor in sync on every poll, after
+  // applyRoleGate (which would otherwise re-enable Cancel for operators on finished jobs).
+  updateStreamHeader();
 }
 
-function showLogin(message = "Use your instance account.") {
+function showLogin(message = "ลงชื่อเข้าใช้ด้วยบัญชีผู้ดูแลของอินสแตนซ์นี้") {
   state.currentUser = null;
   if (state.eventSource) state.eventSource.close();
   $("#loginMessage").textContent = message;
@@ -364,13 +386,17 @@ function showLogin(message = "Use your instance account.") {
 function hideLogin() {
   $("#loginScreen").hidden = true;
   document.querySelector(".app-shell").inert = false;
-  $("#loginMessage").textContent = "Use your instance account.";
+  $("#loginMessage").textContent = "ลงชื่อเข้าใช้ด้วยบัญชีผู้ดูแลของอินสแตนซ์นี้";
 }
 
 function renderIdentity() {
   const panel = $("#signedInPanel");
   panel.hidden = !state.currentUser;
-  $("#signedInIdentity").textContent = state.currentUser ? `${state.currentUser.username} (${state.currentUser.role})` : "";
+  if (!state.currentUser) return;
+  const name = state.currentUser.username || "";
+  $("#userName").textContent = name;
+  $("#userRole").textContent = state.currentUser.role || "";
+  $("#userAvatar").textContent = (name.trim()[0] || "–").toUpperCase();
 }
 
 function applyRoleGate() {
@@ -396,8 +422,8 @@ function applyRoleGate() {
   if (usageNav) usageNav.hidden = !["admin", "auditor"].includes(role);
   for (const node of document.querySelectorAll(".edit-worker, .delete-worker, .edit-workspace, .delete-workspace")) node.disabled = !admin;
   for (const node of document.querySelectorAll(".poll-worker, .approve-approval, .reject-approval, .choose-approval, .fire-trigger, .toggle-trigger, .delete-trigger, .apply-worker-suggestion")) node.disabled = !operator;
-  if (auditNav?.hidden && document.querySelector("#view-audit.is-active")) showView("command");
-  if (usageNav?.hidden && document.querySelector("#view-usage.is-active")) showView("command");
+  if (auditNav?.hidden && document.querySelector("#view-audit.is-active")) showView("overview");
+  if (usageNav?.hidden && document.querySelector("#view-usage.is-active")) showView("overview");
 }
 
 async function login(event) {
@@ -416,7 +442,7 @@ async function signOut() {
   try { await api("/api/auth/logout", { method: "POST" }); } catch { /* token may already be invalid */ }
   localStorage.removeItem("atlasApiToken");
   state.currentUser = null;
-  showLogin("Signed out.");
+  showLogin("ออกจากระบบแล้ว");
 }
 
 function renderRunSummary() {
@@ -444,9 +470,69 @@ function renderRunSummary() {
 }
 
 function renderMetrics() {
-  $("#metricWorkers").textContent = state.workers.length;
-  $("#metricRunning").textContent = state.jobs.filter((job) => ["queued", "running", "cancel_requested"].includes(job.state)).length;
-  $("#metricDone").textContent = state.jobs.filter((job) => ["succeeded", "failed", "cancelled"].includes(job.state)).length;
+  const set = (id, value) => { const node = document.getElementById(id); if (node) node.textContent = value; };
+  const total = state.workers.length;
+  const online = state.workers.filter((w) => w.status === "online").length;
+  const offline = state.workers.filter((w) => w.status === "offline").length;
+  const unknown = Math.max(0, total - online - offline);
+  const queued = state.jobs.filter((j) => j.state === "queued").length;
+  const running = state.jobs.filter((j) => j.state === "running").length;
+  const active = state.jobs.filter((j) => ["queued", "running", "cancel_requested"].includes(j.state)).length;
+  const activeRuns = state.workflowRuns.filter((r) => ["running", "waiting_for_human", "paused"].includes(r.state)).length;
+  set("metricWorkers", online);
+  set("metricWorkersUnit", `/ ${total}`);
+  set("metricWorkersDelta", total ? `ออนไลน์ ${online} · ออฟไลน์ ${offline}` : "ยังไม่มี worker");
+  set("metricRunning", active);
+  set("metricRunningDelta", `queued ${queued} · running ${running}`);
+  const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+  const runsToday = state.workflowRuns.filter((run) => run.created_at && new Date(run.created_at) >= midnight).length;
+  set("metricRuns", runsToday);
+  set("metricRunsDelta", activeRuns ? `กำลังทำงาน ${activeRuns} · ทั้งหมด ${state.workflowRuns.length}` : `จากทั้งหมด ${state.workflowRuns.length}`);
+  set("metricApprovals", state.approvals.length);
+  set("metricApprovalsDelta", state.approvals.length ? "ต้องการการอนุมัติ" : "ไม่มีรายการรออนุมัติ");
+  // Fleet health donut: yellow arc = online / total (r=40 → circumference 251.33)
+  const arc = document.getElementById("fleetArc");
+  if (arc) {
+    const circumference = 2 * Math.PI * 40;
+    const fraction = total ? online / total : 0;
+    arc.setAttribute("stroke-dasharray", circumference.toFixed(1));
+    arc.setAttribute("stroke-dashoffset", (circumference * (1 - fraction)).toFixed(1));
+  }
+  set("fleetFraction", `${online}/${total}`);
+  set("fleetOnline", online);
+  set("fleetOffline", offline);
+  set("fleetUnknown", unknown);
+  renderOverviewLists();
+}
+
+function renderOverviewLists() {
+  const jobsBox = document.getElementById("overviewJobs");
+  if (jobsBox) {
+    const recent = state.jobs.slice(0, 5);
+    jobsBox.innerHTML = recent.length
+      ? recent.map((job) => `
+        <div class="dash-job">
+          <span class="status ${statusClass(job.state)} dot-only" aria-hidden="true"></span>
+          <div class="grow">
+            <div class="title">${escapeHtml(job.prompt || job.id)}</div>
+            <div class="meta">${escapeHtml(job.worker_name || shortId(job.worker_id) || "—")} · ${escapeHtml(shortId(job.id))}</div>
+          </div>
+          <span class="status ${statusClass(job.state)}">${escapeHtml(job.state)}</span>
+          <span class="ago">${escapeHtml(formatTime(job.created_at))}</span>
+        </div>`).join("")
+      : '<div class="empty">ยังไม่มีงาน</div>';
+  }
+  const apBox = document.getElementById("overviewApproval");
+  if (apBox) {
+    const a = state.approvals[0];
+    apBox.innerHTML = a
+      ? `<div class="approve-row">
+          <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span>
+          <div class="grow"><div class="title">${escapeHtml(a.label || a.reason || "รออนุมัติ")}</div><div class="meta">run ${escapeHtml(shortId(a.run_id))} · ${escapeHtml(formatTime(a.created_at))}</div></div>
+          <button class="primary-btn btn-sm" type="button" data-view-link="monitor">ตรวจสอบ</button>
+        </div>`
+      : '<div class="approve-empty">ไม่มีรายการรออนุมัติในขณะนี้</div>';
+  }
 }
 
 function renderWorkers() {
@@ -455,21 +541,29 @@ function renderWorkers() {
     list.innerHTML = '<div class="empty">No workers</div>';
     return;
   }
-  list.innerHTML = state.workers.map((worker) => `
-    <article class="worker-item">
-      <div class="item-title">
-        <span>${escapeHtml(worker.name)}</span>
+  list.innerHTML = state.workers.map((worker) => {
+    const tags = (worker.tags || []).map((tag) => `<span class="wc-tag">${escapeHtml(tag)}</span>`).join("");
+    const seen = worker.last_seen_at ? `เห็นล่าสุด ${formatTime(worker.last_seen_at)}` : "ยังไม่เคยเห็น";
+    return `
+    <article class="worker-card">
+      <div class="wc-head">
+        <span class="status ${statusClass(worker.status)} dot-only" aria-hidden="true"></span>
+        <span class="name">${escapeHtml(worker.name)}</span>
         <span class="status ${statusClass(worker.status)}">${escapeHtml(worker.status)}</span>
       </div>
-      <div class="item-sub">${escapeHtml(worker.role || "unassigned")} · ${escapeHtml(worker.base_url)}</div>
-      <div class="item-sub">last seen ${escapeHtml(formatTime(worker.last_seen_at) || "never")} · ${workspaceCountForWorker(worker.id)} workspace(s)</div>
-      <div class="item-actions">
-        <button class="secondary-btn poll-worker" data-worker-id="${escapeHtml(worker.id)}">Poll</button>
-        <button class="secondary-btn edit-worker" data-worker-id="${escapeHtml(worker.id)}">Edit</button>
-        <button class="danger-btn delete-worker" data-worker-id="${escapeHtml(worker.id)}">Delete</button>
+      <div class="wc-url">${escapeHtml(worker.base_url)}</div>
+      <div class="wc-role">
+        <span class="role-chip">${escapeHtml(worker.role || "unassigned")}</span>
+        <span class="latency">${escapeHtml(seen)}</span>
       </div>
-    </article>
-  `).join("");
+      <div class="wc-tags">${tags}</div>
+      <div class="wc-actions">
+        <button class="secondary-btn poll-worker" data-worker-id="${escapeHtml(worker.id)}">Poll</button>
+        <button class="secondary-btn edit-worker" data-worker-id="${escapeHtml(worker.id)}">แก้ไข</button>
+        <button class="danger-btn delete-worker" data-worker-id="${escapeHtml(worker.id)}">ลบ</button>
+      </div>
+    </article>`;
+  }).join("");
 }
 
 function renderWorkspaces() {
@@ -479,17 +573,16 @@ function renderWorkspaces() {
     return;
   }
   list.innerHTML = state.workspaces.map((workspace) => `
-    <article class="workspace-item">
-      <div class="item-title">
-        <span>${escapeHtml(workspace.workspace_key)}</span>
-        <span>${escapeHtml(workspace.worker_name || shortId(workspace.worker_id))}</span>
-      </div>
-      <div class="item-sub">${escapeHtml(workspace.company || "no company")} · ${escapeHtml(workspace.workspace_dir)}</div>
-      <div class="item-actions">
-        <button class="secondary-btn edit-workspace" data-workspace-id="${escapeHtml(workspace.id)}">Edit</button>
-        <button class="danger-btn delete-workspace" data-workspace-id="${escapeHtml(workspace.id)}">Delete</button>
-      </div>
-    </article>
+    <div class="ws-row">
+      <span class="key">${escapeHtml(workspace.workspace_key)}</span>
+      <span>${escapeHtml(workspace.worker_name || shortId(workspace.worker_id))}</span>
+      <span class="dir">${escapeHtml(workspace.workspace_dir)}</span>
+      <span>${escapeHtml(workspace.company || "—")}</span>
+      <span class="ws-actions">
+        <button class="ws-mini edit-workspace" data-workspace-id="${escapeHtml(workspace.id)}">แก้ไข</button>
+        <button class="ws-mini danger delete-workspace" data-workspace-id="${escapeHtml(workspace.id)}">ลบ</button>
+      </span>
+    </div>
   `).join("");
 }
 
@@ -548,24 +641,32 @@ function workspaceCountForWorker(workerId) {
 
 function renderJobs() {
   const list = $("#jobList");
+  const count = document.getElementById("jobCount");
+  if (count) count.textContent = `${state.jobs.length} รายการ`;
   if (!state.jobs.length) {
-    list.innerHTML = '<div class="empty">No jobs</div>';
+    list.innerHTML = '<div class="empty">ยังไม่มีงาน</div>';
     return;
   }
-  list.innerHTML = state.jobs.map((job) => `
-    <article class="job-item ${job.id === state.selectedJobId ? "selected" : ""}" data-job-id="${escapeHtml(job.id)}">
-      <div class="item-title">
-        <span>${escapeHtml(job.worker_name || shortId(job.worker_id))}</span>
+  list.innerHTML = state.jobs.map((job) => {
+    const handoff = job.handoff_error
+      ? { label: "handoff error", cls: "err" }
+      : job.handoff_job_id
+        ? { label: "child", cls: "child" }
+        : (job.handoff_worker_id ? { label: "handoff armed", cls: "armed" } : null);
+    return `
+    <button class="job-row ${job.id === state.selectedJobId ? "selected" : ""}" type="button" data-job-id="${escapeHtml(job.id)}">
+      <div class="job-row-top">
+        <span class="status ${statusClass(job.state)} dot-only" aria-hidden="true"></span>
         <span class="status ${statusClass(job.state)}">${escapeHtml(job.state)}</span>
+        <span class="job-row-ago">${escapeHtml(formatTime(job.created_at))}</span>
       </div>
-      <div class="item-sub">${escapeHtml(job.workspace_key || "auto")} · ${formatTime(job.created_at)} · ${shortId(job.id)}</div>
-      ${job.parent_job_id ? `<div class="item-sub">child of ${shortId(job.parent_job_id)}</div>` : ""}
-      ${job.handoff_job_id ? `<div class="item-sub">handoff -> ${shortId(job.handoff_job_id)}</div>` : ""}
-      ${job.handoff_worker_id && !job.handoff_job_id && !job.handoff_error ? '<div class="item-sub">handoff armed</div>' : ""}
-      ${job.handoff_error ? `<div class="item-sub">handoff error: ${escapeHtml(job.handoff_error)}</div>` : ""}
-      <div class="job-prompt">${escapeHtml(job.prompt)}</div>
-    </article>
-  `).join("");
+      <div class="job-row-prompt">${escapeHtml(job.prompt)}</div>
+      <div class="job-row-meta">
+        <span>${escapeHtml(job.worker_name || shortId(job.worker_id) || "—")}</span><span>·</span><span class="mono">${escapeHtml(shortId(job.id))}</span>
+        ${handoff ? `<span class="handoff-badge ${handoff.cls}">${escapeHtml(handoff.label)}</span>` : ""}
+      </div>
+    </button>`;
+  }).join("");
 }
 
 function renderWorkflows() {
@@ -626,7 +727,181 @@ function renderWorkflowEditor(force = false) {
   $("#workflowPolicyInput").value = prettyJson(workflow?.policy || { max_jobs: 5, max_iterations: 10 });
   syncPolicyFormFromJson();
   if (!$("#workflowRunInput").value.trim()) $("#workflowRunInput").value = "{}";
+  const nameDisplay = document.getElementById("workflowName");
+  if (nameDisplay) nameDisplay.textContent = workflow?.name || "เวิร์กโฟลว์ใหม่";
+  renderWorkflowGraph();
   renderWorkerSuggestions();
+}
+
+// ----- Visual node graph (parses the editable Graph JSON above) -----
+const WF_NODE_W = 158, WF_NODE_H = 88, WF_COL_GAP = 60, WF_ROW_GAP = 30, WF_START_W = 92, WF_PAD = 36;
+let wfUserZoom = 1;
+let wfResizeObserver = null;
+
+function wfParseGraph() {
+  try {
+    const graph = parseJsonField("#workflowGraphInput", null);
+    if (!graph || !Array.isArray(graph.nodes)) return null;
+    return graph;
+  } catch {
+    return null;
+  }
+}
+
+function wfNodeSubline(node) {
+  if (node.type === "human_gate") return node.reason || "รออนุมัติ";
+  const role = node.role || node.worker_id || node.id;
+  const outputs = Array.isArray(node.outputs) ? node.outputs.join(",") : (node.outputs || "");
+  return outputs ? `${role}→${outputs}` : String(role);
+}
+
+function wfLayout(graph) {
+  const nodes = graph.nodes.filter((node) => node && node.id);
+  const ids = nodes.map((node) => node.id);
+  const idset = new Set(ids);
+  const edges = (graph.edges || []).filter((edge) => edge && idset.has(edge.from) && idset.has(edge.to));
+  // Longest-path layering; cap iterations at node count so cycles (manager loops) terminate.
+  const depth = Object.fromEntries(ids.map((id) => [id, 0]));
+  for (let k = 0; k < nodes.length; k++) {
+    let changed = false;
+    for (const edge of edges) {
+      if (depth[edge.to] < depth[edge.from] + 1) { depth[edge.to] = depth[edge.from] + 1; changed = true; }
+    }
+    if (!changed) break;
+  }
+  const columns = {};
+  for (const id of ids) (columns[depth[id]] ||= []).push(id);
+  const maxCol = Math.max(0, ...Object.keys(columns).map(Number));
+  let maxRows = 1;
+  for (let c = 0; c <= maxCol; c++) maxRows = Math.max(maxRows, (columns[c] || []).length);
+  const totalH = maxRows * WF_NODE_H + (maxRows - 1) * WF_ROW_GAP;
+  const colX = (c) => WF_PAD + WF_START_W + WF_COL_GAP + c * (WF_NODE_W + WF_COL_GAP);
+  const place = {};
+  for (let c = 0; c <= maxCol; c++) {
+    const colIds = columns[c] || [];
+    const colH = colIds.length * WF_NODE_H + (colIds.length - 1) * WF_ROW_GAP;
+    const y0 = WF_PAD + (totalH - colH) / 2;
+    colIds.forEach((id, row) => { place[id] = { x: colX(c), y: y0 + row * (WF_NODE_H + WF_ROW_GAP), w: WF_NODE_W, h: WF_NODE_H }; });
+  }
+  const width = colX(maxCol) + WF_NODE_W + WF_PAD;
+  const height = totalH + WF_PAD * 2;
+  const startId = (graph.start && idset.has(graph.start)) ? graph.start : ids[0];
+  const start = startId ? { x: WF_PAD, y: (height - 40) / 2, w: WF_START_W, h: 40, to: startId } : null;
+  return { nodes, edges, place, width, height, start };
+}
+
+function renderWorkflowGraph() {
+  const host = document.getElementById("workflowGraph");
+  if (!host) return;
+  const graph = wfParseGraph();
+  if (!graph || !graph.nodes.length) {
+    host.innerHTML = '<div class="wf-canvas-empty">Graph JSON ไม่ถูกต้อง หรือยังไม่มีโหนด</div>';
+    renderWorkflowNodeInspector();
+    return;
+  }
+  const layout = wfLayout(graph);
+  const byId = Object.fromEntries(graph.nodes.map((node) => [node.id, node]));
+  if (!byId[state.selectedWorkflowNode]) state.selectedWorkflowNode = (layout.start && layout.start.to) || graph.nodes[0]?.id || null;
+
+  const edgePath = (sx, sy, tx, ty) => {
+    const dx = Math.max(46, (tx - sx) / 2);
+    return `M ${sx} ${sy} C ${sx + dx} ${sy}, ${tx - dx} ${ty}, ${tx} ${ty}`;
+  };
+  const segments = [];
+  if (layout.start) {
+    const target = layout.place[layout.start.to];
+    if (target) segments.push({ sx: layout.start.x + layout.start.w, sy: layout.start.y + layout.start.h / 2, tx: target.x, ty: target.y + target.h / 2, color: "var(--nt-grey-300)", dash: "none", width: 1.8 });
+  }
+  for (const edge of layout.edges) {
+    const source = layout.place[edge.from];
+    const target = layout.place[edge.to];
+    if (!source || !target) continue;
+    const cond = edge.condition?.type || "always";
+    const human = cond === "human_selected";
+    segments.push({
+      sx: source.x + source.w, sy: source.y + source.h / 2, tx: target.x, ty: target.y + target.h / 2,
+      color: human ? "var(--nt-yellow-500)" : "var(--nt-grey-300)",
+      dash: cond.startsWith("artifact") ? "5 4" : "none",
+      width: human ? 2.5 : 1.8,
+    });
+  }
+  const svg = `<svg class="wf-edges" width="${layout.width}" height="${layout.height}" aria-hidden="true">${
+    segments.map((seg) => `<path d="${edgePath(seg.sx, seg.sy, seg.tx, seg.ty)}" fill="none" stroke="${seg.color}" stroke-width="${seg.width}" stroke-dasharray="${seg.dash}"/><circle cx="${seg.tx}" cy="${seg.ty}" r="4" fill="${seg.color}"/>`).join("")
+  }</svg>`;
+
+  const tagFor = (type) => type === "human_gate" ? { cls: "gate", label: "human gate" }
+    : type === "manager" ? { cls: "manager", label: "manager" }
+    : type === "join" ? { cls: "join", label: "join" }
+    : { cls: "worker", label: "worker" };
+  const nodeEls = graph.nodes.map((node) => {
+    const place = layout.place[node.id];
+    if (!place) return "";
+    const tag = tagFor(node.type);
+    const cls = node.type === "manager" ? "manager" : node.type === "human_gate" ? "human_gate" : "worker";
+    const selected = node.id === state.selectedWorkflowNode ? " selected" : "";
+    return `<button class="wf-node ${cls}${selected}" type="button" data-wf-node="${escapeHtml(node.id)}" style="left:${place.x}px;top:${place.y}px;width:${place.w}px;height:${place.h}px">
+      <span class="wf-node-head"><span class="wf-node-name">${escapeHtml(node.id)}</span><span class="wf-node-tag ${tag.cls}">${tag.label}</span></span>
+      <span class="wf-node-sub">${escapeHtml(wfNodeSubline(node))}</span>
+    </button>`;
+  }).join("");
+  const startEl = layout.start
+    ? `<div class="wf-node start" style="left:${layout.start.x}px;top:${layout.start.y}px;width:${layout.start.w}px;height:${layout.start.h}px"><span class="wf-node-label">อินพุต</span></div>`
+    : "";
+
+  host.innerHTML = `<div class="wf-fit-wrap"><div class="wf-fit-inner" style="width:${layout.width}px;height:${layout.height}px">${svg}${startEl}${nodeEls}</div></div>`;
+  state.wfGraphSize = { w: layout.width, h: layout.height };
+  wfApplyScale();
+  if (!wfResizeObserver && window.ResizeObserver) {
+    wfResizeObserver = new ResizeObserver(() => wfApplyScale());
+    wfResizeObserver.observe(host);
+  }
+  renderWorkflowNodeInspector();
+}
+
+function wfApplyScale() {
+  const host = document.getElementById("workflowGraph");
+  const inner = host?.querySelector(".wf-fit-inner");
+  const wrap = host?.querySelector(".wf-fit-wrap");
+  if (!inner || !wrap || !state.wfGraphSize) return;
+  const available = host.clientWidth - WF_PAD;
+  if (available <= 0) return;
+  const fit = Math.max(0.4, Math.min(1, available / state.wfGraphSize.w));
+  const scale = Math.max(0.3, Math.min(1.6, fit * wfUserZoom));
+  inner.style.transform = `scale(${scale})`;
+  wrap.style.width = `${state.wfGraphSize.w * scale}px`;
+  wrap.style.height = `${state.wfGraphSize.h * scale}px`;
+}
+
+function renderWorkflowNodeInspector() {
+  const box = document.getElementById("workflowNodeInspector");
+  const labelEl = document.getElementById("wfNodeLabel");
+  const typeEl = document.getElementById("wfNodeType");
+  if (!box) return;
+  const graph = wfParseGraph();
+  const node = graph?.nodes?.find((item) => item.id === state.selectedWorkflowNode);
+  if (!node) {
+    box.innerHTML = '<div class="hint">คลิกโหนดในกราฟด้านบนเพื่อดูฟิลด์ของโหนด</div>';
+    if (labelEl) labelEl.textContent = "เลือกโหนด";
+    if (typeEl) typeEl.textContent = "คลิกโหนดในกราฟ";
+    return;
+  }
+  if (labelEl) labelEl.textContent = node.id;
+  const typeName = { worker: "Worker node", human_gate: "Human gate", manager: "Manager node", join: "Join node" }[node.type] || node.type;
+  if (typeEl) typeEl.textContent = typeName;
+  const fields = [];
+  if (node.type === "human_gate") {
+    fields.push(["เหตุผล", node.reason || "—", false]);
+    const decisions = (node.choices || []).map((choice) => choice.label || choice.id).join(" / ");
+    fields.push(["การตัดสินใจ", decisions || "อนุมัติ / ปฏิเสธ", false]);
+    fields.push(["สร้าง job", "ไม่ — โหนด control plane", false]);
+  } else {
+    fields.push([node.type === "manager" ? "Manager" : "Worker", node.worker_id || (node.role ? `role=${node.role}` : "auto"), false]);
+    if (node.prompt) fields.push(["Prompt", node.prompt, true]);
+    if (node.outputs) fields.push(["Outputs", Array.isArray(node.outputs) ? node.outputs.join(", ") : node.outputs, false]);
+    if (node.budget_units != null) fields.push(["Budget units", String(node.budget_units), false]);
+    if (node.mode) fields.push(["Join mode", `${node.mode}${node.quorum ? ` · quorum ${node.quorum}` : ""}`, false]);
+  }
+  box.innerHTML = `<div class="wf-fields">${fields.map(([label, value, mono]) => `<div><div class="wf-field-l">${escapeHtml(label)}</div><span class="wf-field-v ${mono ? "mono" : ""}">${escapeHtml(value)}</span></div>`).join("")}</div>`;
 }
 
 function renderWorkerSuggestions() {
@@ -640,67 +915,142 @@ function renderWorkerSuggestions() {
   `).join("") : "";
 }
 
+function wfRunNodeTotal(run) {
+  const definition = state.workflows.find((item) => item.id === run?.workflow_definition_id);
+  const nodes = definition?.graph?.nodes;
+  return Array.isArray(nodes) ? nodes.length : 0;
+}
+function wfRunProgress(run) {
+  const done = (run?.counters?.completed_nodes || []).length;
+  const total = wfRunNodeTotal(run) || done || 1;
+  return { done, total, pct: Math.round((done / total) * 100) };
+}
+function wfElapsed(run) {
+  if (!run?.created_at) return "—";
+  const start = new Date(run.created_at).getTime();
+  const end = new Date(run.updated_at || run.created_at).getTime();
+  const minutes = Math.max(0, Math.round((end - start) / 60000));
+  if (minutes < 1) return "ไม่ถึง 1 น.";
+  if (minutes < 60) return `${minutes} น.`;
+  return `${Math.floor(minutes / 60)} ชม. ${minutes % 60} น.`;
+}
+function wfBarColor(runState) {
+  const cls = statusClass(runState);
+  if (["failed", "recovery-required"].includes(cls)) return "var(--nt-danger)";
+  if (cls === "succeeded") return "var(--nt-success)";
+  return "var(--nt-yellow-500)";
+}
+function nodeChip(stateName, label) {
+  return `<span class="nchip ${stateName}"><span class="d"></span>${escapeHtml(label)}</span>`;
+}
+function renderNodeChips(run) {
+  const definition = state.workflows.find((item) => item.id === run.workflow_definition_id);
+  const nodes = definition?.graph?.nodes;
+  const counters = run.counters || {};
+  const done = new Set(counters.completed_nodes || []);
+  const failed = new Set(counters.failed_nodes || []);
+  const waiting = new Set(state.approvals.filter((approval) => approval.run_id === run.id).map((approval) => approval.node_key));
+  if (!Array.isArray(nodes) || !nodes.length) {
+    const chips = [...done].map((id) => nodeChip("done", id)).concat([...failed].map((id) => nodeChip("err", id)));
+    return chips.length ? chips.join("") : '<span class="hint">ไม่มีข้อมูลโหนด</span>';
+  }
+  let markedRun = false;
+  return nodes.map((node) => {
+    let stateName;
+    if (done.has(node.id)) stateName = "done";
+    else if (failed.has(node.id)) stateName = "err";
+    else if (waiting.has(node.id)) stateName = "wait";
+    else if (run.state === "running" && !markedRun) { stateName = "run"; markedRun = true; }
+    else stateName = "pend";
+    return nodeChip(stateName, node.id);
+  }).join("");
+}
+
 function renderWorkflowRuns() {
   const runs = state.selectedWorkflowId ? state.workflowRuns.filter((run) => run.workflow_definition_id === state.selectedWorkflowId) : state.workflowRuns;
   const list = $("#workflowRunList");
+  const legend = document.getElementById("monRunsLegend");
+  if (legend) {
+    const running = runs.filter((run) => run.state === "running").length;
+    const waiting = runs.filter((run) => run.state === "waiting_for_human").length;
+    legend.innerHTML = `<span><span class="d" style="background:var(--nt-yellow-500)"></span>${running} ทำงาน</span><span><span class="d" style="background:var(--nt-warning)"></span>${waiting} รออนุมัติ</span>`;
+  }
   if (!runs.length) {
-    list.innerHTML = '<div class="empty">No workflow runs</div>';
+    list.innerHTML = '<div class="empty">ยังไม่มี run</div>';
   } else {
-    list.innerHTML = runs.slice(0, 20).map((run) => `
-      <article class="workflow-run-item ${run.id === state.selectedWorkflowRunId ? "selected" : ""}" data-run-id="${escapeHtml(run.id)}">
-        <div class="item-title">
-          <span>${escapeHtml(run.name)}</span>
+    list.innerHTML = runs.slice(0, 20).map((run) => {
+      const progress = wfRunProgress(run);
+      return `
+      <button class="run-row ${run.id === state.selectedWorkflowRunId ? "selected" : ""}" type="button" data-run-id="${escapeHtml(run.id)}">
+        <div class="run-row-top">
+          <span class="status ${statusClass(run.state)} dot-only" aria-hidden="true"></span>
+          <span class="name">${escapeHtml(run.name)}</span>
           <span class="status ${statusClass(run.state)}">${escapeHtml(run.state)}</span>
         </div>
-        <div class="item-sub">${formatTime(run.created_at)} · ${shortId(run.id)}</div>
-      </article>
-    `).join("");
+        <div class="run-bar"><div class="track"><div class="fill" style="width:${progress.pct}%;background:${wfBarColor(run.state)}"></div></div><span class="pct">${progress.pct}%</span></div>
+        <div class="run-row-meta"><span class="mono">${escapeHtml(shortId(run.id))}</span><span>·</span><span>${escapeHtml(wfElapsed(run))}</span></div>
+      </button>`;
+    }).join("");
   }
-  const progress = state.workflowRunDetail?.run?.counters || {};
-  $("#workflowRunDetail").textContent = state.workflowRunDetail ? prettyJson({
-    completed_nodes: progress.completed_nodes || [],
-    joins: progress.join_states || {},
-    ...state.workflowRunDetail,
-  }) : "";
+
+  const run = state.workflowRunDetail?.run;
+  const set = (id, fn) => { const node = document.getElementById(id); if (node) fn(node); };
+  set("monRunName", (node) => { node.textContent = run ? run.name : "เลือก run จากรายการ"; });
+  set("monRunChip", (node) => { node.hidden = !run; if (run) { node.className = `status ${statusClass(run.state)}`; node.textContent = run.state; } });
+  set("monRunId", (node) => { node.textContent = run ? run.id : ""; });
+  // Show only the controls valid for the current state (prototype behaviour). Role gating
+  // (applyRoleGate) still disables them for non-operators; this just hides the inapplicable ones.
+  const showCtl = (id, show) => { const node = document.getElementById(id); if (node) node.hidden = !show; };
+  const canControl = run && ["running", "paused"].includes(run.state);
+  showCtl("pauseWorkflowRunBtn", run?.state === "running");
+  showCtl("resumeWorkflowRunBtn", run?.state === "paused");
+  showCtl("cancelWorkflowRunBtn", canControl);
+  showCtl("retryInterruptedRunBtn", run?.state === "recovery_required");
+  const recovery = run?.counters?.recovery;
+  const recoveryEl = $("#workflowRecoveryWarning");
+  recoveryEl.textContent = recovery ? `${recovery.warning} Interrupted: ${(recovery.interrupted || []).map((item) => `${item.node_key}${item.job_id ? ` (${item.job_id})` : ""}`).join(", ")}` : "";
+  recoveryEl.hidden = !recovery;
+
+  const progress = run ? wfRunProgress(run) : { done: 0, total: 0, pct: 0 };
+  set("monProgressBar", (node) => { node.style.width = `${progress.pct}%`; node.style.background = run ? wfBarColor(run.state) : "var(--nt-yellow-500)"; });
+  set("monStats", (node) => {
+    if (!run) { node.innerHTML = ""; return; }
+    const counters = run.counters || {};
+    const stats = [
+      ["โหนดเสร็จ", `${progress.done} / ${progress.total}`],
+      ["งาน (jobs)", String(counters.jobs_started ?? 0)],
+      ["budget units", String(counters.budget_units_spent ?? 0)],
+      ["iteration", counters.iteration != null ? String(counters.iteration) : "—"],
+      ["เวลาที่ใช้", wfElapsed(run)],
+    ];
+    node.innerHTML = stats.map(([label, value]) => `<div class="mon-stat"><div class="l">${escapeHtml(label)}</div><div class="v">${escapeHtml(value)}</div></div>`).join("");
+  });
+  set("monNodeChips", (node) => { node.innerHTML = run ? renderNodeChips(run) : '<span class="hint">เลือก run เพื่อดูความคืบหน้าของโหนด</span>'; });
+  set("workflowEventList", (node) => {
+    node.innerHTML = state.workflowEvents.slice(0, 14).map((event) => {
+      const type = event.event_type || "";
+      const dot = /completed|succeeded|granted/.test(type) ? "ok" : /running|started/.test(type) ? "run" : /failed|error|rejected/.test(type) ? "err" : "";
+      return `<div class="tl-item"><span class="tl-dot ${dot}"></span><div><div class="ttl">${escapeHtml(type)}${event.node_key ? ` · ${escapeHtml(event.node_key)}` : ""}</div><div class="sub">${escapeHtml(formatTime(event.created_at))}</div></div></div>`;
+    }).join("");
+  });
+
+  const counters = run?.counters || {};
+  $("#workflowRunDetail").textContent = state.workflowRunDetail ? prettyJson({ completed_nodes: counters.completed_nodes || [], joins: counters.join_states || {}, ...state.workflowRunDetail }) : "";
   $("#workflowArtifactList").textContent = state.workflowArtifacts.length ? prettyJson(state.workflowArtifacts) : "";
   const files = state.workflowArtifacts.filter((artifact) => artifact.kind === "file_ref");
   $("#workflowArtifactDownloads").innerHTML = files.map((artifact) => `
     <button type="button" class="workflow-run-item download-artifact" data-artifact-id="${escapeHtml(artifact.id)}" data-filename="${escapeHtml(artifact.metadata?.filename || artifact.key)}">
       <span>${escapeHtml(artifact.metadata?.filename || artifact.key)}</span>
       <span class="item-sub">${escapeHtml(artifact.metadata?.size ?? 0)} bytes · ${escapeHtml(artifact.metadata?.sha256 || "")}</span>
-    </button>
-  `).join("");
-  const selectedRun = state.workflowRunDetail?.run;
-  $("#pauseWorkflowRunBtn").disabled = selectedRun?.state !== "running";
-  $("#resumeWorkflowRunBtn").disabled = selectedRun?.state !== "paused";
-  $("#retryInterruptedRunBtn").disabled = selectedRun?.state !== "recovery_required";
-  $("#cancelWorkflowRunBtn").disabled = !selectedRun || ["succeeded", "failed", "cancelled"].includes(selectedRun.state);
-  const recovery = selectedRun?.counters?.recovery;
-  const recoveryEl = $("#workflowRecoveryWarning");
-  recoveryEl.textContent = recovery ? `${recovery.warning} Interrupted: ${(recovery.interrupted || []).map((item) => `${item.node_key}${item.job_id ? ` (${item.job_id})` : ""}`).join(", ")}` : "";
-  recoveryEl.hidden = !recovery;
-  renderRunSummary();
-  $("#workflowEventList").innerHTML = state.workflowEvents.length ? state.workflowEvents.map((event) => `
-    <article class="event-item">
-      <div class="item-title">
-        <span>${escapeHtml(event.event_type)}</span>
-        <span>${escapeHtml(formatTime(event.created_at))}</span>
-      </div>
-      <div class="item-sub">${escapeHtml(event.node_key || `run · #${event.seq}`)}</div>
-      <pre class="event-payload">${escapeHtml(JSON.stringify(event.payload || {}, null, 2))}</pre>
-    </article>
-  `).join("") : '<div class="empty">Select a run</div>';
+    </button>`).join("");
   const managerDecisions = state.workflowEvents.filter((event) => event.event_type.startsWith("manager_proposal_"));
   $("#managerDecisionList").innerHTML = managerDecisions.length ? managerDecisions.map((event) => `
     <article class="event-item">
-      <div class="item-title">
-        <span>${escapeHtml(event.node_key || "manager")}</span>
-        <span class="status ${statusClass(event.payload?.state)}">${escapeHtml(event.payload?.state || "unknown")}</span>
-      </div>
+      <div class="item-title"><span>${escapeHtml(event.node_key || "manager")}</span><span class="status ${statusClass(event.payload?.state)}">${escapeHtml(event.payload?.state || "unknown")}</span></div>
       <div class="item-sub">${escapeHtml(event.payload?.reason || "")}</div>
       <pre class="event-payload">${escapeHtml(JSON.stringify(event.payload?.proposal || event.payload?.response || {}, null, 2))}</pre>
-    </article>
-  `).join("") : '<div class="empty">No manager decisions</div>';
+    </article>`).join("") : '<div class="empty">No manager decisions</div>';
+  renderRunSummary();
 }
 
 function renderApprovals() {
@@ -711,21 +1061,22 @@ function renderApprovals() {
     const runIds = new Set(state.workflowRuns.filter((run) => run.workflow_definition_id === state.selectedWorkflowId).map((run) => run.id));
     approvals = approvals.filter((approval) => runIds.has(approval.run_id));
   }
-  $("#approvalList").innerHTML = approvals.length ? approvals.map((approval) => `
-    <article class="workflow-run-item">
-      <div class="item-title">
-        <span>${escapeHtml(approval.label)}</span>
-        <span class="status waiting-for-human">pending</span>
+  const count = document.getElementById("approvalCount");
+  if (count) count.textContent = `${approvals.length} รายการรออยู่`;
+  $("#approvalList").innerHTML = approvals.length ? approvals.map((approval) => {
+    const wfName = state.workflowRuns.find((run) => run.id === approval.run_id)?.name || approval.node_key;
+    const choices = (approval.choices || []).map((choice) => `<button class="primary-btn choose-approval" type="button" data-approval-id="${escapeHtml(approval.id)}" data-choice="${escapeHtml(choice.id)}">${escapeHtml(choice.label)}</button>`).join("");
+    return `
+    <div class="approval-card">
+      <div class="ac-top"><span class="ac-run">${escapeHtml(shortId(approval.run_id))}</span><span class="ac-wf">· ${escapeHtml(wfName)}</span><span class="ac-ago">${escapeHtml(formatTime(approval.created_at))}</span></div>
+      <div class="ac-title">${escapeHtml(approval.label)}</div>
+      <div class="ac-reason">${escapeHtml(approval.reason || "")}</div>
+      <div class="ac-actions">
+        ${choices || `<button class="primary-btn approve-approval" type="button" data-approval-id="${escapeHtml(approval.id)}">อนุมัติ</button>`}
+        <button class="secondary-btn reject-approval" type="button" data-approval-id="${escapeHtml(approval.id)}">ปฏิเสธ</button>
       </div>
-      <div class="item-sub">${escapeHtml(approval.node_key)} · run ${shortId(approval.run_id)} · ${formatTime(approval.created_at)}</div>
-      <div class="item-sub">${escapeHtml(approval.reason)}</div>
-      <div class="item-actions">
-        ${(approval.choices || []).map((choice) => `<button class="primary-btn choose-approval" type="button" data-approval-id="${escapeHtml(approval.id)}" data-choice="${escapeHtml(choice.id)}">${escapeHtml(choice.label)}</button>`).join("")}
-        ${approval.choices?.length ? "" : `<button class="primary-btn approve-approval" type="button" data-approval-id="${escapeHtml(approval.id)}">Approve</button>`}
-        <button class="danger-btn reject-approval" type="button" data-approval-id="${escapeHtml(approval.id)}">Reject</button>
-      </div>
-    </article>
-  `).join("") : '<div class="empty">No pending approvals</div>';
+    </div>`;
+  }).join("") : '<div class="empty">ไม่มีรายการรออนุมัติ</div>';
 }
 
 function renderWorkflowTriggers() {
@@ -760,19 +1111,33 @@ function renderWorkflowTriggers() {
 
 function renderAudit() {
   const list = $("#auditList");
-  if (!state.audit.length) {
-    list.innerHTML = '<div class="empty">No audit entries</div>';
+  const filter = state.auditFilter || "all";
+  let rows = state.audit;
+  if (filter !== "all") {
+    rows = rows.filter((entry) => (entry.resource_type || "").includes(filter) || (entry.action || "").includes(filter));
+  }
+  if (!rows.length) {
+    list.innerHTML = '<div class="empty">ไม่มีรายการ</div>';
     return;
   }
-  list.innerHTML = state.audit.slice(0, 12).map((entry) => `
-    <article class="audit-item">
-      <div class="item-title">
-        <span>${escapeHtml(entry.action)}</span>
-        <span>${formatTime(entry.created_at)}</span>
-      </div>
-      <pre>${escapeHtml(JSON.stringify(entry.details || {}, null, 2))}</pre>
-    </article>
-  `).join("");
+  list.innerHTML = rows.slice(0, 30).map((entry) => {
+    const action = entry.action || "";
+    let tone = "grey";
+    if (/fail|error|cancel|reject|refused|denied|delete/.test(action)) tone = "danger";
+    else if (/grant|approv/.test(action)) tone = "brand";
+    else if (/succeed|complete|online|bind/.test(action)) tone = "success";
+    const details = entry.details && typeof entry.details === "object"
+      ? Object.entries(entry.details).map(([key, value]) => `${key}=${value}`).join(" · ")
+      : String(entry.details || "");
+    return `
+    <div class="audit-row">
+      <span class="audit-time">${escapeHtml(formatTime(entry.created_at))}</span>
+      <span class="audit-action ${tone}">${escapeHtml(action)}</span>
+      <span class="audit-target">${escapeHtml(entry.resource_id || entry.resource_type || "")}</span>
+      <span class="audit-detail">${escapeHtml(details)}</span>
+      <span class="audit-actor"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>${escapeHtml(entry.actor || "system")}</span>
+    </div>`;
+  }).join("");
 }
 
 // Authenticated download: fetch with the Bearer header (never a token in the URL, which
@@ -847,9 +1212,65 @@ async function loadUsage() {
   $("#usageJobs").textContent = totals.jobs ?? 0;
   $("#usageBudgetUnits").textContent = totals.budget_units ?? 0;
   $("#usageMeta").textContent = (data.from || data.to)
-    ? `Period ${data.from || "…"} → ${data.to || "…"}`
-    : "All time";
+    ? `ช่วง ${data.from || "…"} → ${data.to || "…"}`
+    : "ทุกช่วงเวลา";
+  renderUsageBars(data.usage || []);
+  renderUsageQuota(totals.workflow_runs ?? 0);
+  renderUsageEvents(data.usage || []);
   renderUsageAlert(totals.workflow_runs ?? 0);
+}
+
+const USAGE_DOW = ["อา", "จ", "อ", "พ", "พฤ", "ศ", "ส"];
+
+function renderUsageBars(events) {
+  const box = document.getElementById("usageBars");
+  if (!box) return;
+  const counts = {};
+  for (const event of events) {
+    if (event.kind !== "workflow_run") continue;
+    const day = String(event.created_at || "").slice(0, 10);
+    if (day) counts[day] = (counts[day] || 0) + 1;
+  }
+  const days = Object.keys(counts).sort().slice(-7);
+  if (!days.length) { box.innerHTML = '<div class="hint">ยังไม่มีข้อมูล run ในช่วงนี้</div>'; return; }
+  const max = Math.max(1, ...days.map((day) => counts[day]));
+  box.innerHTML = days.map((day) => {
+    const value = counts[day];
+    const pct = Math.round((value / max) * 100);
+    const label = USAGE_DOW[new Date(day).getDay()] || day.slice(5);
+    return `<div class="usage-bar"><span class="n">${value}</span><div class="track"><div class="fill${value === max ? " peak" : ""}" style="height:${pct}%"></div></div><span class="d">${escapeHtml(label)}</span></div>`;
+  }).join("");
+}
+
+function renderUsageQuota(usedRuns) {
+  const box = document.getElementById("usageQuota");
+  if (!box) return;
+  const expected = Number($("#usageExpectedInput").value) || 0;
+  const threshold = Number($("#usageThresholdInput").value) || 80;
+  if (expected <= 0) {
+    box.innerHTML = '<p class="hint" style="margin-top:14px">ใส่ Expected runs เพื่อดูโควตาและการแจ้งเตือน</p>';
+    return;
+  }
+  const pct = Math.round((usedRuns / expected) * 100);
+  const over = pct >= threshold;
+  box.innerHTML = `
+    <div class="usage-quota-val"><b>${usedRuns}</b><span>/ ${expected} run ที่คาดไว้</span></div>
+    <div class="usage-quota-track"><div class="usage-quota-fill ${over ? "over" : ""}" style="width:${Math.min(100, pct)}%"></div></div>
+    <div class="usage-quota-note ${over ? "over" : ""}"><span class="d"></span><span>ใช้ไป <b>${pct}%</b> ของเป้า · ${over ? `เกินเกณฑ์แจ้งเตือน ${threshold}%` : `ต่ำกว่าเกณฑ์แจ้งเตือน ${threshold}%`}</span></div>`;
+}
+
+function renderUsageEvents(events) {
+  const box = document.getElementById("usageEvents");
+  if (!box) return;
+  if (!events.length) { box.innerHTML = '<div class="empty">ไม่มีเหตุการณ์ในช่วงนี้</div>'; return; }
+  box.innerHTML = events.slice(0, 30).map((event) => `
+    <div class="ue-row">
+      <span>${escapeHtml(event.kind || "—")}</span>
+      <span class="ref">${escapeHtml(event.reference || event.resource_id || event.idempotency_key || "—")}</span>
+      <span>${escapeHtml(event.units ?? 0)}</span>
+      <span class="secs">${escapeHtml(event.seconds ?? 0)}</span>
+      <span>${escapeHtml(formatTime(event.created_at))}</span>
+    </div>`).join("");
 }
 
 async function submitJob() {
@@ -971,10 +1392,21 @@ function appendEvent(type, payload) {
 
 function updateStreamHeader() {
   const job = state.jobs.find((item) => item.id === state.selectedJobId);
-  $("#streamTitle").textContent = job ? `Job ${shortId(job.id)}` : "Live Stream";
-  $("#streamMeta").textContent = job ? `${job.state} · ${job.worker_name || shortId(job.worker_id)} · ${job.route_reason || ""}${job.handoff_job_id ? ` · handoff ${shortId(job.handoff_job_id)}` : ""}` : "Select a job";
-  $("#routePreview").textContent = job ? job.route_reason || "Route selected" : composerRouteText();
-  $("#cancelJobBtn").disabled = !job || ["succeeded", "failed", "cancelled"].includes(job.state);
+  const st = statusClass(job?.state || "queued");
+  const set = (id, fn) => { const node = document.getElementById(id); if (node) fn(node); };
+  set("jobDetailDot", (n) => { n.className = `status ${st} dot-only`; });
+  set("jobDetailChip", (n) => { n.className = `status ${st}`; n.textContent = job ? job.state : "—"; });
+  set("jobDetailId", (n) => { n.textContent = job ? job.id : ""; });
+  set("jobDetailPrompt", (n) => { n.textContent = job ? job.prompt : "เลือกงานจากรายการเพื่อดูสตรีมสด"; });
+  set("jobDetailRoute", (n) => {
+    n.textContent = job
+      ? `${job.route_reason || `${job.worker_name || shortId(job.worker_id)} · ${job.workspace_key || "auto"}`}${job.handoff_job_id ? ` · handoff ${shortId(job.handoff_job_id)}` : ""}`
+      : "";
+  });
+  const live = !!job && ["queued", "running", "cancel_requested"].includes(job.state);
+  const operator = ["admin", "operator"].includes(state.currentUser?.role);
+  set("cancelJobBtn", (n) => { n.disabled = !job || !operator || !["queued", "running", "cancel_requested"].includes(job.state); });
+  set("streamOutput", (n) => { n.classList.toggle("stream-live", live); });
 }
 
 function composerRouteText() {
@@ -1043,6 +1475,7 @@ async function cancelSelectedJob() {
 
 function newWorkflow() {
   state.selectedWorkflowId = null;
+  state.selectedWorkflowNode = null;
   state.selectedWorkflowRunId = null;
   state.selectedWorkflowTriggerId = null;
   state.workflowRunDetail = null;
@@ -1061,6 +1494,7 @@ function newWorkflow() {
 
 function selectWorkflow(workflowId) {
   state.selectedWorkflowId = workflowId;
+  state.selectedWorkflowNode = null;
   state.selectedWorkflowRunId = null;
   state.selectedWorkflowTriggerId = null;
   state.workflowRunDetail = null;
@@ -1381,7 +1815,10 @@ async function deleteTrigger(triggerId) {
   await loadAll();
 }
 
+let lastModalTrigger = null;
+
 function openWorkerModal(worker = null) {
+  lastModalTrigger = document.activeElement;
   const form = $("#workerForm");
   form.reset();
   form.elements.id.value = worker?.id || "";
@@ -1397,6 +1834,7 @@ function openWorkerModal(worker = null) {
 }
 
 function openWorkspaceModal(workspace = null) {
+  lastModalTrigger = document.activeElement;
   if (!state.workers.length) {
     toast("Add a worker first");
     return;
@@ -1416,8 +1854,16 @@ function openWorkspaceModal(workspace = null) {
 }
 
 function closeModals() {
+  const wasOpen = !$("#workerModal").hidden || !$("#workspaceModal").hidden;
   $("#workerModal").hidden = true;
   $("#workspaceModal").hidden = true;
+  if (wasOpen) {
+    // Return focus to the control that opened the modal (a11y); fall back to the content
+    // region if that trigger was re-rendered away by a poll while the modal was open.
+    const target = lastModalTrigger && lastModalTrigger.isConnected ? lastModalTrigger : document.getElementById("main");
+    target?.focus?.();
+  }
+  lastModalTrigger = null;
 }
 
 async function deleteWorker(workerId) {
@@ -1479,12 +1925,16 @@ document.addEventListener("click", async (event) => {
     selectWorkflow(workflowItem.dataset.workflowId);
     return;
   }
-  const workflowRunItem = event.target.closest(".workflow-run-item");
-  if (workflowRunItem) {
-    if (workflowRunItem.dataset.runId) {
-      await selectWorkflowRun(workflowRunItem.dataset.runId).catch((error) => toast(error.message));
-      return;
-    }
+  const wfNode = event.target.closest("[data-wf-node]");
+  if (wfNode) {
+    state.selectedWorkflowNode = wfNode.dataset.wfNode;
+    renderWorkflowGraph();
+    return;
+  }
+  const runRow = event.target.closest(".run-row, .workflow-run-item[data-run-id]");
+  if (runRow && runRow.dataset.runId) {
+    await selectWorkflowRun(runRow.dataset.runId).catch((error) => toast(error.message));
+    return;
   }
   const applyWorkerButton = event.target.closest(".apply-worker-suggestion");
   if (applyWorkerButton) {
@@ -1526,14 +1976,43 @@ document.addEventListener("click", async (event) => {
     await selectWorkflowTrigger(triggerItem.dataset.triggerId).catch((error) => toast(error.message));
     return;
   }
-  const jobItem = event.target.closest(".job-item");
+  const jobItem = event.target.closest(".job-row");
   if (jobItem) {
     openJobStream(jobItem.dataset.jobId);
   }
 });
 
 $("#submitJobBtn").addEventListener("click", () => submitJob().catch((error) => toast(error.message)));
-$("#refreshBtn").addEventListener("click", () => refreshAll({ poll: true, notice: true }).catch((error) => toast(error.message)));
+// Command: handoff switch reveals its form; ⌘/Ctrl+Enter submits the prompt.
+$("#handoffEnabled").addEventListener("change", (event) => {
+  $("#handoffBox").classList.toggle("is-open", event.currentTarget.checked);
+});
+$("#promptInput").addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+    event.preventDefault();
+    submitJob().catch((error) => toast(error.message));
+  }
+});
+// Jobs: stream / events tab toggle.
+for (const tab of document.querySelectorAll(".tab[data-job-tab]")) {
+  tab.addEventListener("click", () => {
+    for (const other of document.querySelectorAll(".tab[data-job-tab]")) other.classList.toggle("is-active", other === tab);
+    for (const pane of document.querySelectorAll("[data-job-pane]")) pane.hidden = pane.dataset.jobPane !== tab.dataset.jobTab;
+  });
+}
+$("#refreshBtn").addEventListener("click", (event) => {
+  const btn = event.currentTarget;
+  btn.classList.add("spinning");
+  setTimeout(() => btn.classList.remove("spinning"), 600);
+  refreshAll({ poll: true, notice: true }).catch((error) => toast(error.message));
+});
+// Overview "ดูทั้งหมด" buttons and list rows navigate to a view.
+document.addEventListener("click", (event) => {
+  const link = event.target.closest("[data-view-link]");
+  if (!link) return;
+  showView(link.dataset.viewLink);
+  if (link.dataset.viewLink === "usage") loadUsage().catch((error) => toast(error.message));
+});
 $("#pollAllBtn").addEventListener("click", async () => {
   await refreshAll({ poll: true, notice: true }).catch((error) => toast(error.message));
 });
@@ -1542,17 +2021,23 @@ $("#newWorkflowBtn").addEventListener("click", () => newWorkflow());
 $("#saveWorkflowBtn").addEventListener("click", () => saveWorkflow().catch((error) => toast(error.message)));
 $("#validateWorkflowBtn").addEventListener("click", () => validateWorkflow().catch((error) => toast(error.message)));
 $("#explainWorkflowBtn").addEventListener("click", () => explainWorkflow().catch((error) => toast(error.message)));
-$("#repairWorkflowBtn").addEventListener("click", () => repairWorkflow().catch((error) => toast(error.message)));
+$("#repairWorkflowBtn").addEventListener("click", () => repairWorkflow().then(() => renderWorkflowGraph()).catch((error) => toast(error.message)));
 $("#suggestWorkersBtn").addEventListener("click", () => suggestWorkers().catch((error) => toast(error.message)));
 $("#draftWorkflowBtn").addEventListener("click", () => draftWorkflow().catch((error) => toast(error.message)));
 $("#applyWorkflowTemplateBtn").addEventListener("click", () => {
-  try { applyWorkflowTemplate(); } catch (error) { toast(error.message); }
+  try {
+    applyWorkflowTemplate();
+    syncPolicyFormFromJson();
+    const display = document.getElementById("workflowName");
+    if (display) display.textContent = $("#workflowNameInput").value || "เวิร์กโฟลว์ใหม่";
+    renderWorkflowGraph();
+  } catch (error) { toast(error.message); }
 });
 $("#builderAddNodeBtn").addEventListener("click", () => {
-  try { addBuilderNode(); } catch (error) { toast(error.message); }
+  try { addBuilderNode(); renderWorkflowGraph(); } catch (error) { toast(error.message); }
 });
 $("#builderAddEdgeBtn").addEventListener("click", () => {
-  try { addBuilderEdge(); } catch (error) { toast(error.message); }
+  try { addBuilderEdge(); renderWorkflowGraph(); } catch (error) { toast(error.message); }
 });
 $("#runWorkflowBtn").addEventListener("click", () => runWorkflow().catch((error) => toast(error.message)));
 $("#uploadWorkflowFileBtn").addEventListener("click", () => uploadWorkflowFile().catch((error) => toast(error.message)));
@@ -1582,7 +2067,7 @@ $("#workspaceSelect").addEventListener("change", () => {
 $("#workerForm").addEventListener("submit", (event) => saveWorker(event).catch((error) => toast(error.message)));
 $("#workspaceForm").addEventListener("submit", (event) => saveWorkspace(event).catch((error) => toast(error.message)));
 $("#loginForm").addEventListener("submit", (event) => login(event).catch((error) => {
-  $("#loginMessage").textContent = error.message === "unauthorized" ? "Invalid username or password." : error.message;
+  $("#loginMessage").textContent = error.message === "unauthorized" ? "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" : error.message;
 }));
 $("#signOutBtn").addEventListener("click", () => signOut());
 for (const selector of ["#workflowNameInput", "#workflowDescriptionInput", "#workflowGraphInput", "#workflowPolicyInput"]) {
@@ -1592,17 +2077,47 @@ $("#workflowPolicyInput").addEventListener("input", () => { syncPolicyFormFromJs
 for (const [, selector] of POLICY_FORM_FIELDS) {
   $(selector).addEventListener("input", () => { syncPolicyJsonFromForm(); });
 }
+// Workflows: editing the Graph JSON re-renders the node graph; the name display tracks the input.
+$("#workflowGraphInput").addEventListener("input", () => { renderWorkflowGraph(); });
+$("#workflowNameInput").addEventListener("input", () => {
+  const display = document.getElementById("workflowName");
+  if (display) display.textContent = $("#workflowNameInput").value || "เวิร์กโฟลว์ใหม่";
+});
+for (const tab of document.querySelectorAll(".tab-pill[data-wf-tab]")) {
+  tab.addEventListener("click", () => {
+    for (const other of document.querySelectorAll(".tab-pill[data-wf-tab]")) other.classList.toggle("is-active", other === tab);
+    for (const pane of document.querySelectorAll("[data-wf-pane]")) pane.hidden = pane.dataset.wfPane !== tab.dataset.wfTab;
+  });
+}
+$("#wfZoomIn").addEventListener("click", () => { wfUserZoom = Math.min(2, wfUserZoom * 1.15); wfApplyScale(); });
+$("#wfZoomOut").addEventListener("click", () => { wfUserZoom = Math.max(0.5, wfUserZoom / 1.15); wfApplyScale(); });
 
+// Mobile nav: hamburger toggles the sidebar drawer; picking a view collapses it again.
+const sidebarEl = document.querySelector(".sidebar");
+const navToggleBtn = document.getElementById("navToggle");
+navToggleBtn?.addEventListener("click", () => {
+  const open = sidebarEl.classList.toggle("nav-open");
+  navToggleBtn.setAttribute("aria-expanded", String(open));
+});
 for (const button of document.querySelectorAll(".nav-item")) {
   button.addEventListener("click", () => {
     showView(button.dataset.view);
+    sidebarEl?.classList.remove("nav-open");
+    navToggleBtn?.setAttribute("aria-expanded", "false");
     if (button.dataset.view === "usage") loadUsage().catch((error) => toast(error.message));
+  });
+}
+for (const chip of document.querySelectorAll(".audit-chip[data-audit-filter]")) {
+  chip.addEventListener("click", () => {
+    state.auditFilter = chip.dataset.auditFilter;
+    for (const other of document.querySelectorAll(".audit-chip")) other.classList.toggle("is-active", other === chip);
+    renderAudit();
   });
 }
 $("#loadUsageBtn").addEventListener("click", () => loadUsage().catch((error) => toast(error.message)));
 $("#usageJsonBtn").addEventListener("click", () => downloadUsage("").catch((error) => toast(error.message)));
 $("#usageCsvBtn").addEventListener("click", () => downloadUsage("csv").catch((error) => toast(error.message)));
-showView(localStorage.getItem("atlasView") || "command");
+showView(localStorage.getItem("atlasView") || "overview");
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeModals();

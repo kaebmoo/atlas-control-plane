@@ -29,6 +29,8 @@
 - Artifact โดยเฉพาะ: [ความหมายและตัวอย่าง (ไทย)](concepts-th.md#9-ชนิด-artifact) ·
   [definition and examples (English)](concepts-en.md#9-artifact-kinds)
 - [Architecture](architecture.md) — บทบาท runtime, routing, state และ workflow execution
+- [Workflow Patterns](workflow-patterns.md) — 6 multi-agent pattern map กับ Atlas:
+  อะไรทำได้ (fixed N), อะไรติด (dynamic fan-out / map), workaround และเงื่อนไขควรสร้างเพิ่ม
 - [thClaws Capability Matrix](thclaws-capability-matrix.md) — ความสามารถที่ใช้ได้ทันที,
   workaround และข้อจำกัดของ thClaws
 
@@ -135,6 +137,7 @@ docs/
 ├── concepts-en.md
 ├── concepts-th.md
 ├── architecture.md
+├── workflow-patterns.md
 ├── thclaws-capability-matrix.md
 ├── workflow-examples.md
 └── demo-script.md

@@ -85,6 +85,7 @@ class ThClawsClient:
         *,
         prompt: str,
         workspace_dir: str | None = None,
+        system: str | None = None,
         model: str | None = None,
         session_id: str | None = None,
         max_tokens: int | None = None,
@@ -97,6 +98,8 @@ class ThClawsClient:
         }
         if workspace_dir:
             payload["workspace_dir"] = workspace_dir
+        if system:
+            payload["system"] = system
         if model:
             payload["model"] = model
         if session_id:
