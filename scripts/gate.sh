@@ -16,7 +16,7 @@ python3 -m py_compile \
   scripts/check_jobs.py scripts/check_backup.py scripts/check_audit_fixes.py \
   scripts/check_docs.py scripts/check_stress.py scripts/check_fuzz.py \
   scripts/check_ui_ux.py scripts/check_input_adapter.py scripts/check_outbound.py \
-  scripts/check_observability.py
+  scripts/check_observability.py scripts/check_lib.py
 
 node --check atlas/static/app.js
 

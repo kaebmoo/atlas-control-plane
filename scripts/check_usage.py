@@ -6,8 +6,6 @@ import json
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,6 +23,7 @@ from atlas.usage import (
     verify_signed_usage_export_file,
     write_signed_usage_export,
 )
+from scripts.check_lib import request, request_json
 
 
 class MockThClawsHandler(BaseHTTPRequestHandler):
@@ -217,36 +216,6 @@ def check_metering_failure_is_non_fatal(runtime: AtlasRuntime, base_url: str, de
             assert job_log.called and run_log.called
     finally:
         runtime.db.emit_usage_event = original
-
-
-def request(
-    base_url: str,
-    method: str,
-    path: str,
-    payload: dict | None = None,
-    token: str | None = None,
-) -> tuple[int, bytes, dict[str, str]]:
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json"} if body is not None else {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(base_url + path, data=body, method=method, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=5) as response:
-            return response.status, response.read(), dict(response.headers)
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read(), dict(exc.headers)
-
-
-def request_json(
-    base_url: str,
-    method: str,
-    path: str,
-    payload: dict | None = None,
-    token: str | None = None,
-) -> tuple[int, dict, dict[str, str]]:
-    status, body, headers = request(base_url, method, path, payload, token)
-    return status, json.loads(body or b"{}"), headers
 
 
 def wait_for_run(runtime: AtlasRuntime, run_id: str) -> dict:

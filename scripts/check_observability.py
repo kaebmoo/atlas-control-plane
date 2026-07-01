@@ -17,7 +17,6 @@ import json
 import sys
 import threading
 import time
-import urllib.error
 import urllib.request
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -30,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 from atlas import admin
 from atlas.app import AtlasHttpServer, AtlasRuntime
 from atlas.config import Config
+from scripts.check_lib import request, request_json
 
 JOIN_ONLY_GRAPH = {"start": "done", "nodes": [{"id": "done", "type": "join", "mode": "all"}], "edges": []}
 GATE_GRAPH = {
@@ -158,36 +158,6 @@ def main() -> None:
             server.shutdown()
 
     print("observability check ok")
-
-
-def request(
-    base_url: str,
-    method: str,
-    path: str,
-    payload: dict | None = None,
-    token: str | None = None,
-) -> tuple[int, bytes, dict[str, str]]:
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json"} if body is not None else {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(base_url + path, data=body, method=method, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=5) as response:
-            return response.status, response.read(), dict(response.headers)
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read(), dict(exc.headers)
-
-
-def request_json(
-    base_url: str,
-    method: str,
-    path: str,
-    payload: dict | None = None,
-    token: str | None = None,
-) -> tuple[int, dict, dict[str, str]]:
-    status, body, headers = request(base_url, method, path, payload, token)
-    return status, json.loads(body or b"{}"), headers
 
 
 def wait_for_run(runtime: AtlasRuntime, run_id: str, state: str) -> dict:
