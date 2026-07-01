@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import replace
 from http import HTTPStatus
@@ -94,6 +95,10 @@ class AtlasRuntime:
         # then reconcile workflow runs (which re-arm interrupted nodes).
         self.jobs.reconcile_jobs()
         self.workflows.reconcile_runs()
+        # OB-1 restart recovery: no delivery-attempt thread survives a restart either. Off the
+        # main thread since a large backlog of stuck/missing deliveries could otherwise block
+        # server startup for as long as their retry loops take.
+        threading.Thread(target=self.outbound.reconcile, name="atlas-outbound-reconcile", daemon=True).start()
 
 
 class AtlasHttpServer(ThreadingHTTPServer):

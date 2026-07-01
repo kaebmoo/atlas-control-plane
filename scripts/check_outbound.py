@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT))
 
 from atlas.app import AtlasHttpServer, AtlasRuntime
 from atlas.config import Config
+from atlas.db import now_iso
 
 
 class MockThClawsHandler(BaseHTTPRequestHandler):
@@ -61,6 +62,21 @@ class MockReceiverHandler(BaseHTTPRequestHandler):
         MockReceiverHandler.received.append(
             {"path": self.path, "signature": self.headers.get("X-Atlas-Signature"), "raw": raw, "body": json.loads(raw or b"{}")}
         )
+        if self.path == "/reply/slow":
+            # 200 immediately, then drip the body far slower than the client's attempt timeout.
+            # The client must give up reading the body (but has already captured the status)
+            # well before this loop finishes.
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Length", "1000")
+            self.end_headers()
+            try:
+                for _ in range(50):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.06)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the client closed once its drain deadline passed — expected
+            return
         remaining = MockReceiverHandler.fail_counts.get(self.path, 0)
         if remaining > 0:
             MockReceiverHandler.fail_counts[self.path] = remaining - 1
@@ -138,6 +154,7 @@ def main() -> None:
             assert body["artifacts"] == [{"key": "notes", "kind": "text", "content": "delivered"}], body["artifacts"]
             expected_sig = "sha256=" + hmac.new(SECRET_KEY.encode(), posts_ok[0]["raw"], hashlib.sha256).hexdigest()
             assert hmac.compare_digest(posts_ok[0]["signature"], expected_sig)
+            wait_for_audit(runtime, "delivery.delivered", delivery_a["id"])
 
             # B. A private-IP literal that is not in ATLAS_OUTBOUND_ALLOWLIST is blocked, never
             #    sent (tested against the delivery mechanism directly: IA-1 would already refuse
@@ -150,6 +167,7 @@ def main() -> None:
             assert status == 202, retried
             assert retried["delivery"]["status"] == "blocked", retried
             assert "ATLAS_OUTBOUND_ALLOWLIST" in retried["delivery"]["last_error"], retried
+            wait_for_audit(runtime, "delivery.blocked", blocked_seed["id"])
 
             # C. Receiver fails MAX_ATTEMPTS times -> failed (dead-letter); run stays succeeded;
             #    every attempt reuses the SAME delivery_id (receiver-dedupable). A manual retry
@@ -163,6 +181,7 @@ def main() -> None:
             flaky_posts = [item for item in MockReceiverHandler.received if item["path"] == "/reply/flaky"]
             assert len(flaky_posts) == MAX_ATTEMPTS
             assert len({post["body"]["delivery_id"] for post in flaky_posts}) == 1
+            wait_for_audit(runtime, "delivery.failed", delivery_c["id"])
 
             status, retried_c = request_json(base_url, "POST", f"/api/deliveries/{delivery_c['id']}/retry")
             assert status == 202, retried_c
@@ -184,10 +203,71 @@ def main() -> None:
             posts_ok_after = [item for item in MockReceiverHandler.received if item["path"] == "/reply/ok"]
             assert len(posts_ok_after) == 1, "no-secret run must never reach the receiver"
 
+            # E. A callback_url carrying embedded credentials (userinfo or a credential-shaped
+            #    query key) is blocked at send time too — defense in depth for a delivery row
+            #    seeded directly (bypassing IA-1's own ingress rejection of the same URL shapes).
+            userinfo_seed = runtime.db.create_delivery(
+                {"run_id": run_a, "url": f"http://user:pass@127.0.0.1:{mock_receiver.server_address[1]}/reply/ok"}
+            )
+            status, userinfo_retried = request_json(base_url, "POST", f"/api/deliveries/{userinfo_seed['id']}/retry")
+            assert status == 202 and userinfo_retried["delivery"]["status"] == "blocked", userinfo_retried
+            assert "credentials" in userinfo_retried["delivery"]["last_error"], userinfo_retried
+
+            query_secret_seed = runtime.db.create_delivery(
+                {"run_id": run_a, "url": f"{receiver_base}/reply/ok?access_token=TOPSECRET"}
+            )
+            status, query_retried = request_json(base_url, "POST", f"/api/deliveries/{query_secret_seed['id']}/retry")
+            assert status == 202 and query_retried["delivery"]["status"] == "blocked", query_retried
+            assert "credentials" in query_retried["delivery"]["last_error"], query_retried
+            assert len([item for item in MockReceiverHandler.received if item["path"] == "/reply/ok"]) == 1, (
+                "a credential-leaking callback_url must never actually be sent"
+            )
+
+            # F. Restart recovery: OutboundService.reconcile() is the exact method
+            #    AtlasRuntime.__init__ runs in a background thread at startup. (1) a delivery
+            #    left `pending` (its attempt thread died with the old process) is resumed; (2) a
+            #    completed run that asked for webhook delivery but crashed before a delivery row
+            #    was ever written gets one created and attempted now.
+            stuck_run = start_run(base_url, definition["id"], f"{receiver_base}/reply/stuck", "corr-stuck")
+            wait_for_run(runtime, stuck_run)
+            stuck_delivery = wait_for_delivery(runtime, stuck_run, "delivered")
+            runtime.db.update_delivery(stuck_delivery["id"], status="pending", attempts=0, delivered_at=None)
+
+            missing_run = runtime.db.create_workflow_run(
+                {
+                    "workflow_definition_id": definition["id"],
+                    "name": "Crashed-before-delivery-row run",
+                    "state": "succeeded",
+                    "input": {"_meta": {"reply": {"mode": "webhook", "callback_url": f"{receiver_base}/reply/missing"}}},
+                    "started_at": now_iso(),
+                    "finished_at": now_iso(),
+                }
+            )
+            assert not runtime.db.list_deliveries(run_id=missing_run["id"])
+
+            runtime.outbound.reconcile()
+            assert wait_for_delivery(runtime, stuck_run, "delivered")["id"] == stuck_delivery["id"]
+            wait_for_delivery(runtime, missing_run["id"], "delivered")
+
+            # G. A receiver that answers 200 immediately but drips the body slowly must not hold
+            #    a delivery open beyond its timeout (the socket timeout alone would not catch
+            #    this — every individual read still completes inside it).
+            wait_for_run(runtime, run_a)  # no-op sync point; run_a already terminal
+            slow_start = time.monotonic()
+            run_g = start_run(base_url, definition["id"], f"{receiver_base}/reply/slow", "corr-slow")
+            wait_for_run(runtime, run_g)
+            delivery_g = wait_for_delivery(runtime, run_g, "delivered", timeout=6)
+            elapsed = time.monotonic() - slow_start
+            assert delivery_g["attempts"] == 1, delivery_g
+            assert elapsed < 2.9, f"delivery took {elapsed:.2f}s — response drain did not respect the deadline"
+
             # GET /api/deliveries lists everything created above, filterable by run_id/status.
-            # (run_a also carries the synthetic `blocked_seed` delivery from scenario B.)
+            # (run_a also carries the synthetic blocked_seed/userinfo_seed/query_secret_seed
+            # deliveries from scenarios B and E.)
             status, listed = request_json(base_url, "GET", f"/api/deliveries?run_id={run_a}")
-            assert status == 200 and {d["id"] for d in listed["deliveries"]} == {delivery_a["id"], blocked_seed["id"]}, listed
+            assert status == 200 and {d["id"] for d in listed["deliveries"]} == {
+                delivery_a["id"], blocked_seed["id"], userinfo_seed["id"], query_secret_seed["id"]
+            }, listed
             status, failed_listed = request_json(base_url, "GET", "/api/deliveries?status=blocked")
             assert status == 200 and {d["id"] for d in failed_listed["deliveries"]} >= {blocked_seed["id"], delivery_d["id"]}
         finally:
@@ -228,6 +308,19 @@ def request_json(base_url: str, method: str, path: str, payload: dict | None = N
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def wait_for_audit(runtime: AtlasRuntime, action: str, resource_id: str, timeout: float = 2) -> dict:
+    """update_delivery() and audit() are separate, sequential writes (no shared transaction), so
+    a delivery's new status can be observable a beat before its audit entry commits. Poll
+    instead of asserting on a single snapshot."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for entry in runtime.db.list_audit(limit=1000):
+            if entry["action"] == action and entry["resource_id"] == resource_id:
+                return entry
+        time.sleep(0.02)
+    raise AssertionError(f"no {action} audit entry for {resource_id}")
 
 
 def wait_for_run(runtime: AtlasRuntime, run_id: str) -> dict:

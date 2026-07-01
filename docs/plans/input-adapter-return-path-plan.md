@@ -112,10 +112,13 @@ internal trigger fan-out already happens) and add delivery as a failure-isolated
 - **Semantics:** at-least-once; `delivery_id` lets the receiver dedupe. Bounded retries with
   backoff up to `max_attempts`, then `failed` (dead-letter, visible). A non-2xx or timeout
   never changes the run outcome.
-- **Restart:** `pending` deliveries may be re-attempted (bounded) because the receiver
-  dedupes on `delivery_id`. This is distinct from the worker-job rule ("never auto-retry an
-  interrupted worker job") — deliveries are Atlas-side idempotent notifications, not worker
-  side effects. Document this explicitly.
+- **Restart:** no delivery-attempt thread survives a restart (same as workflow runs and jobs).
+  `AtlasRuntime.__init__` runs `OutboundService.reconcile()` in a background thread: any
+  `pending` delivery is resumed automatically (bounded, because the receiver dedupes on
+  `delivery_id`), and a completed run that asked for webhook delivery but crashed before its
+  delivery row was ever written gets one created and attempted. This is distinct from the
+  worker-job rule ("never auto-retry an interrupted worker job") — deliveries are Atlas-side
+  idempotent notifications, not worker side effects.
 - **Endpoints (additive, RBAC-guarded):**
   `GET /api/deliveries?run_id=&status=` (operator/auditor);
   `POST /api/deliveries/{id}/retry` (operator; bounded);

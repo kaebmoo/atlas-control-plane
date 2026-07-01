@@ -62,9 +62,10 @@ def main() -> None:
                 request_timeout_seconds=2,
                 enable_loopback_without_token=True,
                 upload_dir=root / "uploads",
-                # A bare hostname allowlist entry matches by exact name (no DNS needed), so this
-                # stays hermetic — see atlas/outbound.py resolve_outbound_target.
-                outbound_allowlist=("relay.internal.test",),
+                # An IP literal allowlist entry matches by exact string AND resolves instantly
+                # (no real DNS lookup for a literal), so this stays hermetic — see
+                # atlas/outbound.py resolve_outbound_target.
+                outbound_allowlist=("127.0.0.1",),
             )
         )
         worker = runtime.db.upsert_worker(
@@ -112,7 +113,7 @@ def main() -> None:
                             },
                             "reply": {
                                 "mode": "webhook",
-                                "callback_url": "https://relay.internal.test/atlas/reply",
+                                "callback_url": "https://127.0.0.1/atlas/reply",
                                 "correlation_id": "line:U1:msg-1",
                             },
                         },
@@ -135,7 +136,7 @@ def main() -> None:
 
             persisted_reply = run["input"]["_meta"]["reply"]
             assert persisted_reply["correlation_id"] == "line:U1:msg-1", persisted_reply
-            assert persisted_reply["callback_url"] == "https://relay.internal.test/atlas/reply", persisted_reply
+            assert persisted_reply["callback_url"] == "https://127.0.0.1/atlas/reply", persisted_reply
 
             # 2. /fire WITHOUT _meta (legacy payload): unaffected end-to-end, no provenance entry.
             legacy = request(
@@ -196,6 +197,33 @@ def main() -> None:
             )
             assert "not deliverable" in bad_callback["error"], bad_callback
 
+            # A callback_url embedding credentials (userinfo or a credential-shaped query key)
+            # is rejected pre-run too — it must never be persisted into run input where any
+            # "read"-permission role could later see it via GET /api/workflow-runs.
+            bad_userinfo = request_error(
+                base_url,
+                "POST",
+                "/api/workflow-runs",
+                {
+                    "workflow_definition_id": definition["id"],
+                    "input": {"_meta": {"reply": {"mode": "webhook", "callback_url": "https://user:pass@relay.internal.test/reply"}}},
+                },
+            )
+            assert "credentials" in bad_userinfo["error"], bad_userinfo
+
+            bad_query_secret = request_error(
+                base_url,
+                "POST",
+                "/api/workflow-runs",
+                {
+                    "workflow_definition_id": definition["id"],
+                    "input": {
+                        "_meta": {"reply": {"mode": "webhook", "callback_url": "https://127.0.0.1/reply?access_token=TOPSECRET"}}
+                    },
+                },
+            )
+            assert "credentials" in bad_query_secret["error"], bad_query_secret
+
             # Same invalid envelope via /fire: always 202 (fire never surfaces a 4xx), but no run
             # starts — the trigger event records the rejection instead.
             fired_bad = request(
@@ -208,7 +236,7 @@ def main() -> None:
             assert fired_bad["event"]["state"] == "failed", fired_bad
             assert "channel" in fired_bad["event"]["error"], fired_bad
 
-            # Exactly the 3 valid attempts started a run; the 4 invalid attempts created none.
+            # Exactly the 3 valid attempts started a run; the 6 invalid attempts created none.
             assert len(runtime.db.list_workflow_runs(limit=1000)) == run_count_before + 3
         finally:
             server.shutdown()
