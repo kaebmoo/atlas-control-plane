@@ -831,6 +831,7 @@ def check_recovery() -> None:
         )
         runner.reconcile_runs()
         assert wait_for_run(reopened, control_run["id"], "succeeded")["state"] == "succeeded"
+        wait_for_runner_stopped(runner, control_run["id"])
 
         gate_definition = reopened.create_workflow_definition(
             {
@@ -848,6 +849,7 @@ def check_recovery() -> None:
         assert reopened.get_workflow_run(waiting["id"])["state"] == "waiting_for_human"
         runner.approve_approval(approval["id"])
         assert wait_for_run(reopened, waiting["id"], "succeeded")["state"] == "succeeded"
+        wait_for_runner_stopped(runner, waiting["id"])
 
 
 class FakeJobService:
@@ -943,10 +945,18 @@ def wait_for_current_nodes(db: Database, run_id: str, current_nodes: list[str]) 
 
 
 def wait_for_runner_stopped(runner: WorkflowRunner, run_id: str) -> None:
+    """`_run_background`'s finally block pops `run_id` from `_threads` and THEN does a DB read
+    (and maybe a respawn), all under `_thread_lock` — so an unsynchronized `run_id not in
+    _threads` check can observe the pop before that DB read finishes, letting a caller tear
+    down its TemporaryDirectory out from under a still-running background thread (the
+    "Directory not empty" / "disk I/O error" flake). Acquiring the same lock here makes this a
+    real barrier: we can only see the dict update once the whole critical section — pop, DB
+    read, and any respawn — has released it."""
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
-        if run_id not in runner._threads:
-            return
+        with runner._thread_lock:
+            if run_id not in runner._threads:
+                return
         time.sleep(0.01)
     raise AssertionError(f"workflow runner did not stop: {run_id}")
 
