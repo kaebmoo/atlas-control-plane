@@ -113,6 +113,41 @@ trigger service. Internal triggers can filter by source workflow, state,
 artifact key/kind, worker, or status. Atlas blocks unguarded self-triggering to
 avoid infinite automation loops.
 
+## Input Adapters & Return Path
+
+Atlas's ingress is a **contract, not a channel.** Any source — LINE, email
+filtered through n8n, a web form (complaint / service request / permit), or
+another system — becomes a thin, interchangeable adapter by POSTing one JSON
+envelope to an existing endpoint (`POST /api/workflow-triggers/{id}/fire` or
+`POST /api/workflow-runs`). Business fields stay top-level (`{input.*}`); a
+reserved `_meta` object carries provenance (`source`) for audit and a return
+address (`reply`) for the reply. Governance, approval, audit, and metering are
+enforced once in the control plane, independent of which channel arrived.
+
+```mermaid
+flowchart TB
+  subgraph IN["Input adapters (interchangeable)"]
+    L["LINE OA"]
+    E["Email → n8n"]
+    F["Web form<br/>complaint · service · permit"]
+    A["Other API / system"]
+  end
+  IN -->|"envelope: fields + _meta"| ING["Atlas ingress<br/>/fire · /workflow-runs"]
+  ING --> CORE["Atlas control plane<br/>routing · policy · approval · audit · metering"]
+  CORE --> WK["thClaws workers<br/>execute in real workspace · BYOK"]
+  WK --> CORE
+  CORE -. "reply: OB-1 signed webhook, or adapter poll" .-> IN
+```
+
+The return path reuses the existing `workflow_run_completed` event: an outbound
+delivery (**OB-1**) signs the result (`X-Atlas-Signature`) and POSTs it to the
+adapter's allowlisted `callback_url`; adapters that set no reply address simply
+poll `GET /api/workflow-runs/{id}`. Outbound delivery is a failure-isolated side
+effect — like usage metering, it runs only after the run outcome is persisted
+and can never change it. See the
+[Input Adapter Contract](specs/input-adapter-contract.md) and its
+[build plan](plans/input-adapter-return-path-plan.md).
+
 ## Usage Metering
 
 Job and workflow completion persist their outcome first, then attempt usage
