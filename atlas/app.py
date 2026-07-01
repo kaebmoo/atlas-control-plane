@@ -136,7 +136,12 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
     def handle_one_request(self) -> None:
         self._t0 = time.monotonic()
-        super().handle_one_request()
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, BrokenPipeError):
+            # Client dropped the connection (browser speculative sockets,
+            # closed tabs); harmless — suppress the stdlib traceback spam.
+            self.close_connection = True
 
     def log_request(self, code: Any = "-", size: Any = "-") -> None:
         # Structured (JSON) request log behind ATLAS_REQUEST_LOG; off by default so
