@@ -28,6 +28,7 @@ tags:
   - name: Artifacts
   - name: Approvals
   - name: Triggers
+  - name: Deliveries
   - name: Audit
   - name: Usage
   - name: Packs
@@ -1100,6 +1101,27 @@ paths:
         '200': {$ref: '#/components/responses/RunResponse'}
         default: {$ref: '#/components/responses/Error'}
 
+  /api/workflow-runs/{run_id}/deliver:
+    parameters: [{$ref: '#/components/parameters/RunId'}]
+    post:
+      tags: [Deliveries]
+      operationId: deliverWorkflowRun
+      summary: Manually (re)send the signed result to _meta.reply.callback_url
+      description: |
+        Requires the run to have already completed and to carry a
+        _meta.reply.callback_url; mode need not be "webhook" — a manual
+        request overrides the adapter's original poll preference.
+      responses:
+        '202':
+          description: Delivery created and attempted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  delivery: {$ref: '#/components/schemas/Delivery'}
+        default: {$ref: '#/components/responses/Error'}
+
   /api/artifacts:
     post:
       tags: [Artifacts]
@@ -1347,6 +1369,47 @@ paths:
                   events: {type: array, items: {$ref: '#/components/schemas/TriggerEvent'}}
         default: {$ref: '#/components/responses/Error'}
 
+  /api/deliveries:
+    get:
+      tags: [Deliveries]
+      operationId: listDeliveries
+      summary: List outbound deliveries (operator/auditor)
+      parameters:
+        - {$ref: '#/components/parameters/Limit100'}
+        - name: run_id
+          in: query
+          schema: {type: string}
+        - name: status
+          in: query
+          schema: {type: string, enum: [pending, delivered, failed, blocked]}
+      responses:
+        '200':
+          description: Deliveries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deliveries: {type: array, items: {$ref: '#/components/schemas/Delivery'}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /api/deliveries/{delivery_id}/retry:
+    parameters: [{$ref: '#/components/parameters/DeliveryId'}]
+    post:
+      tags: [Deliveries]
+      operationId: retryDelivery
+      summary: One bounded manual (re)attempt of a failed or blocked delivery
+      responses:
+        '202':
+          description: Delivery re-attempted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  delivery: {$ref: '#/components/schemas/Delivery'}
+        default: {$ref: '#/components/responses/Error'}
+
   /api/audit:
     get:
       tags: [Audit]
@@ -1413,6 +1476,7 @@ components:
     ArtifactId: {name: artifact_id, in: path, required: true, schema: {type: string}}
     ApprovalId: {name: approval_id, in: path, required: true, schema: {type: string}}
     TriggerId: {name: trigger_id, in: path, required: true, schema: {type: string}}
+    DeliveryId: {name: delivery_id, in: path, required: true, schema: {type: string}}
     UserId: {name: user_id, in: path, required: true, schema: {type: string}}
     TokenId: {name: token_id, in: path, required: true, schema: {type: string}}
     UsageFrom:
@@ -1929,6 +1993,23 @@ components:
         error: {type: [string, 'null']}
         dedupe_key: {type: [string, 'null']}
         created_at: {type: string, format: date-time}
+      additionalProperties: true
+
+    Delivery:
+      type: object
+      required: [id, run_id, url, status, attempts, max_attempts, created_at, updated_at]
+      properties:
+        id: {type: string}
+        run_id: {type: string}
+        url: {type: string}
+        correlation_id: {type: [string, 'null']}
+        status: {type: string, enum: [pending, delivered, failed, blocked]}
+        attempts: {type: integer}
+        max_attempts: {type: integer}
+        last_error: {type: [string, 'null']}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        delivered_at: {type: [string, 'null'], format: date-time}
       additionalProperties: true
 
     AuditEntry:

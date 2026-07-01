@@ -60,21 +60,21 @@ Implement the contract in [../specs/input-adapter-contract.md](../specs/input-ad
 
 **Definition of Done:**
 
-- [ ] `_meta` parsed/validated on both ingress paths; legacy payloads unchanged.
-- [ ] Business fields still resolve in prompts (`{input.*}`).
-- [ ] `_meta.source` recorded in `audit_log` with `run_id`.
-- [ ] Invalid envelope rejected pre-run with a clear error.
-- [ ] Spec's Guarantees section matches behavior; docs synced (spec status, concepts if needed).
+- [x] `_meta` parsed/validated on both ingress paths; legacy payloads unchanged.
+- [x] Business fields still resolve in prompts (`{input.*}`).
+- [x] `_meta.source` recorded in `audit_log` with `run_id`.
+- [x] Invalid envelope rejected pre-run with a clear error.
+- [x] Spec's Guarantees section matches behavior; docs synced (spec status, concepts if needed).
 
 **Check — `scripts/check_input_adapter.py` (hermetic: temp DB, ephemeral port, mock thClaws):**
 
-- [ ] `/fire` with an envelope → run created; `_meta.source` present in audit; a business
+- [x] `/fire` with an envelope → run created; `_meta.source` present in audit; a business
       field reaches the mock worker's prompt.
-- [ ] `/fire` **without** `_meta` (legacy) → still works end-to-end.
-- [ ] `POST /api/workflow-runs` with `_meta` in `input` → same provenance recorded.
-- [ ] Invalid `_meta` (non-object / unknown channel / non-allowlisted `callback_url`) →
+- [x] `/fire` **without** `_meta` (legacy) → still works end-to-end.
+- [x] `POST /api/workflow-runs` with `_meta` in `input` → same provenance recorded.
+- [x] Invalid `_meta` (non-object / unknown channel / non-allowlisted `callback_url`) →
       rejected, no run created.
-- [ ] `_meta.reply` round-trips: readable from the persisted run input.
+- [x] `_meta.reply` round-trips: readable from the persisted run input.
 
 ---
 
@@ -109,13 +109,19 @@ internal trigger fan-out already happens) and add delivery as a failure-isolated
   `file_ref` stays a pointer, not bytes). Sign the exact bytes with HMAC-SHA256 over
   `ATLAS_SECRET_KEY` (reuse the usage-export signing helper) → header
   `X-Atlas-Signature: sha256=<hex>`.
-- **Semantics:** at-least-once; `delivery_id` lets the receiver dedupe. Bounded retries with
-  backoff up to `max_attempts`, then `failed` (dead-letter, visible). A non-2xx or timeout
-  never changes the run outcome.
-- **Restart:** `pending` deliveries may be re-attempted (bounded) because the receiver
-  dedupes on `delivery_id`. This is distinct from the worker-job rule ("never auto-retry an
-  interrupted worker job") — deliveries are Atlas-side idempotent notifications, not worker
-  side effects. Document this explicitly.
+- **Semantics:** at-least-once; `delivery_id` lets the receiver dedupe. The automatic
+  completion delivery uses a **deterministic id derived from the run**, inserted with
+  `INSERT OR IGNORE`, so the live completion path and a restart reconcile converge on ONE row —
+  a receiver never sees two competing ids for the same run. Bounded retries with backoff up to
+  `max_attempts`, then `failed` (dead-letter, visible). A non-2xx, timeout, or a total-deadline
+  abort never changes the run outcome.
+- **Restart:** no delivery-attempt thread survives a restart (same as workflow runs and jobs).
+  `AtlasRuntime.__init__` runs `OutboundService.reconcile()` in a background thread, keyed off
+  the deliveries/runs tables directly (not a capped run scan): **every** `pending` delivery is
+  resumed regardless of run age, and **every** completed run that asked for webhook delivery but
+  has no delivery row (a crash before the row was written) gets one created and attempted. This
+  is distinct from the worker-job rule ("never auto-retry an interrupted worker job") —
+  deliveries are Atlas-side idempotent notifications, not worker side effects.
 - **Endpoints (additive, RBAC-guarded):**
   `GET /api/deliveries?run_id=&status=` (operator/auditor);
   `POST /api/deliveries/{id}/retry` (operator; bounded);
@@ -133,23 +139,23 @@ stateDiagram-v2
 
 **Definition of Done:**
 
-- [ ] `deliveries` table added via a numbered migration; `init()` twice is a no-op; no `tenant_id`.
-- [ ] Delivery fires on `workflow_run_completed` only when `_meta.reply` requests it.
-- [ ] SSRF allowlist enforced; non-allowlisted / private targets are `blocked`, not sent.
-- [ ] Body signed with `X-Atlas-Signature`; missing `ATLAS_SECRET_KEY` refuses to send.
-- [ ] Bounded retries → `failed`; run outcome provably unchanged on delivery failure.
-- [ ] `GET /api/deliveries`, `POST /api/deliveries/{id}/retry`, `POST /api/workflow-runs/{id}/deliver` work under RBAC.
-- [ ] Docs synced: this plan ticked, spec §7 confirmed, `openapi.yaml` + `api-reference-en.md` + `api-reference-th.md` updated for the new routes (EN+TH parity), `docs/README.md` linked.
+- [x] `deliveries` table added via a numbered migration; `init()` twice is a no-op; no `tenant_id`.
+- [x] Delivery fires on `workflow_run_completed` only when `_meta.reply` requests it.
+- [x] SSRF allowlist enforced; non-allowlisted / private targets are `blocked`, not sent.
+- [x] Body signed with `X-Atlas-Signature`; missing `ATLAS_SECRET_KEY` refuses to send.
+- [x] Bounded retries → `failed`; run outcome provably unchanged on delivery failure.
+- [x] `GET /api/deliveries`, `POST /api/deliveries/{id}/retry`, `POST /api/workflow-runs/{id}/deliver` work under RBAC.
+- [x] Docs synced: this plan ticked, spec §7 confirmed, `openapi.yaml` + `api-reference-en.md` + `api-reference-th.md` updated for the new routes (EN+TH parity), `docs/README.md` linked.
 
 **Check — `scripts/check_outbound.py` (hermetic: temp DB, ephemeral port, mock thClaws, plus a mock receiver on an ephemeral loopback port added to the allowlist):**
 
-- [ ] Run completes with `_meta.reply.webhook` → receiver gets one POST with a **valid**
+- [x] Run completes with `_meta.reply.webhook` → receiver gets one POST with a **valid**
       `X-Atlas-Signature` and correct `run_id`/`state`/`correlation_id`/artifacts.
-- [ ] `callback_url` not in allowlist (and a private-IP literal) → `blocked`, no POST sent.
-- [ ] Receiver returns 500 → retried up to `max_attempts` then `failed`; the run is still
+- [x] `callback_url` not in allowlist (and a private-IP literal) → `blocked`, no POST sent.
+- [x] Receiver returns 500 → retried up to `max_attempts` then `failed`; the run is still
       `succeeded`; a second identical `delivery_id` is not processed twice.
-- [ ] No `ATLAS_SECRET_KEY` → delivery refused (never sent unsigned), recorded with reason.
-- [ ] `POST /api/deliveries/{id}/retry` re-attempts a `failed` delivery within the bound.
+- [x] No `ATLAS_SECRET_KEY` → delivery refused (never sent unsigned), recorded with reason.
+- [x] `POST /api/deliveries/{id}/retry` re-attempts a `failed` delivery within the bound.
 
 ---
 
@@ -166,8 +172,8 @@ stateDiagram-v2
 
 | Milestone | Status | Check | Notes |
 | --- | --- | --- | --- |
-| IA-1 | ☐ not started | `scripts/check_input_adapter.py` | additive; no schema change |
-| OB-1 | ☐ not started | `scripts/check_outbound.py` | needs IA-1 + M3 migrations + `ATLAS_SECRET_KEY` |
+| IA-1 | ✅ done | `scripts/check_input_adapter.py` | additive; no schema change; `atlas/outbound.py` added (SSRF/allowlist validator shared with OB-1) |
+| OB-1 | ✅ done | `scripts/check_outbound.py` | `deliveries` table (migration 005); signed delivery on `workflow_run_completed`; `GET /api/deliveries`, `POST /api/deliveries/{id}/retry`, `POST /api/workflow-runs/{id}/deliver` |
 
 ## Order
 

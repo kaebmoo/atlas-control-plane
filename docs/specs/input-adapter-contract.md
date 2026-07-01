@@ -16,9 +16,9 @@ every channel is a thin, interchangeable adapter and so a reply can later be rou
 to the originating user. Atlas remains the single place where policy, approval, audit, and
 metering are enforced — independent of the channel.
 
-**Status:** design target. **IA-1** (envelope + provenance + audit, verified by
-`scripts/check_input_adapter.py`) and **OB-1** (the return path that consumes `_meta.reply`,
-verified by `scripts/check_outbound.py`) are specified in
+**Status:** **IA-1 and OB-1 implemented.** IA-1 (envelope + provenance + audit) is verified by
+`scripts/check_input_adapter.py`; OB-1 (the signed return path that consumes `_meta.reply`) is
+verified by `scripts/check_outbound.py`. Both are tracked in
 [Input Adapter & Return Path Plan](../plans/input-adapter-return-path-plan.md).
 
 ## 1. The boundary
@@ -102,7 +102,7 @@ the business fields, and it is persisted with the run so OB-1 can consume `_meta
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `mode` | enum | `webhook` = Atlas should POST the result to `callback_url` (OB-1). `none` (default) = adapter will poll instead. |
-| `callback_url` | URL (opt) | Where OB-1 delivers the signed result. **Must** match `ATLAS_OUTBOUND_ALLOWLIST` or delivery is refused (SSRF guard). |
+| `callback_url` | URL (opt) | Where OB-1 delivers the signed result. **Must** match `ATLAS_OUTBOUND_ALLOWLIST` or delivery is refused (SSRF guard). **Must be a bare address** — scheme, host, path only; **no userinfo, no query string, no fragment** (any of these could smuggle a secret that would then be persisted in run input and echoed by read APIs). Authenticate the receiver with `X-Atlas-Signature`, and carry per-user routing in `correlation_id`, not the URL. A URL with any of those parts is rejected pre-run. |
 | `correlation_id` | string (opt) | Opaque handle the adapter maps back to the end user (e.g. LINE user + message). Atlas echoes it in the delivery, never interprets it. |
 
 ## 4. Dedupe conventions
@@ -213,9 +213,10 @@ run reaches `succeeded` / `waiting_for_human`.
 - Business fields remain reachable via `{input.*}` in worker/manager prompts.
 - `_meta.source` is recorded in the audit log with the resulting `run_id`; the raw model
   key or any secret is never written (there is none in the envelope by design).
-- An invalid envelope (`_meta` not an object, unknown `source.channel`, or a
-  `reply.callback_url` outside `ATLAS_OUTBOUND_ALLOWLIST`) is rejected with a clear error
-  and **no run is created**.
+- An invalid envelope (`_meta` not an object, unknown `source.channel`, a
+  `reply.callback_url` outside `ATLAS_OUTBOUND_ALLOWLIST`, or a `callback_url` that carries
+  userinfo, a query string, or a fragment) is rejected with a clear error and **no run is
+  created**.
 - `_meta.reply` is persisted with the run so OB-1 can address the delivery.
 
 ## 10. Out of scope

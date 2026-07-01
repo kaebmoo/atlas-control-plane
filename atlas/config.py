@@ -12,6 +12,11 @@ def _bool_env(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _csv_env(name: str) -> tuple[str, ...]:
+    raw = os.getenv(name) or ""
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
 @dataclass(frozen=True)
 class Config:
     host: str
@@ -25,6 +30,9 @@ class Config:
     max_upload_bytes: int = 10 * 1024 * 1024
     request_log: bool = False
     require_signed_packs: bool = False
+    outbound_allowlist: tuple[str, ...] = ()
+    outbound_max_attempts: int = 5
+    outbound_timeout_seconds: float = 10.0
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -43,6 +51,9 @@ class Config:
             max_upload_bytes=int(os.getenv("ATLAS_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))),
             request_log=_bool_env("ATLAS_REQUEST_LOG", False),
             require_signed_packs=_bool_env("ATLAS_REQUIRE_SIGNED_PACKS", False),
+            outbound_allowlist=_csv_env("ATLAS_OUTBOUND_ALLOWLIST"),
+            outbound_max_attempts=int(os.getenv("ATLAS_OUTBOUND_MAX_ATTEMPTS", "5")),
+            outbound_timeout_seconds=float(os.getenv("ATLAS_OUTBOUND_TIMEOUT", "10")),
         )
 
     @property

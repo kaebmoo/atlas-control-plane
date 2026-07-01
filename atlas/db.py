@@ -493,6 +493,33 @@ def _migration_004_workflow_run_snapshot(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_005_deliveries(conn: sqlite3.Connection) -> None:
+    # OB-1: the outbound-delivery ledger (docs/plans/input-adapter-return-path-plan.md). A NEW
+    # table as a numbered step (not folded into SCHEMA) so it is created for databases that
+    # already migrated past version 1. No per-tenant column (silo invariant, scripts/check_silo.py).
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS deliveries (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          url TEXT NOT NULL,
+          correlation_id TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          attempts INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 5,
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          delivered_at TEXT,
+          FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_deliveries_run ON deliveries(run_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_deliveries_status ON deliveries(status, updated_at);
+        """
+    )
+
+
 # Ordered, append-only migration steps. A step is either a SQL string (run via
 # executescript) or a callable(conn). The 1-based index is the schema version.
 # Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
@@ -505,6 +532,7 @@ MIGRATIONS: list[str | Any] = [
     _migration_002_jobs_columns,
     _migration_003_approval_columns,
     _migration_004_workflow_run_snapshot,
+    _migration_005_deliveries,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -1480,6 +1508,111 @@ class Database:
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [row_to_dict(row) or {} for row in rows]
+
+    def _insert_delivery(self, conn: sqlite3.Connection, payload: dict[str, Any]) -> tuple[str, bool]:
+        """INSERT OR IGNORE a delivery row and report whether THIS call created it. `OR IGNORE`
+        makes a deterministic-id completion delivery an atomic claim: a concurrent live
+        completion and startup reconcile both target the same id, and exactly one wins the
+        insert (the other sees created=False), so the receiver only ever gets one delivery_id
+        to dedupe. Random-id manual/retry deliveries never collide, so they always create."""
+        delivery_id = payload.get("id") or new_id("dlv")
+        now = now_iso()
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO deliveries(
+              id, run_id, url, correlation_id, status, attempts, max_attempts,
+              last_error, created_at, updated_at, delivered_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                delivery_id,
+                payload["run_id"],
+                payload["url"],
+                payload.get("correlation_id"),
+                payload.get("status") or "pending",
+                int(payload.get("attempts", 0) or 0),
+                int(payload.get("max_attempts", 5) or 5),
+                payload.get("last_error"),
+                now,
+                now,
+                payload.get("delivered_at"),
+            ),
+        )
+        return delivery_id, cursor.rowcount > 0
+
+    def create_delivery(self, payload: dict[str, Any]) -> dict[str, Any]:
+        delivery, _created = self.claim_delivery(payload)
+        return delivery
+
+    def claim_delivery(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Create a delivery, returning (row, created). `created` is False iff a row with this
+        exact id already existed — used by the completion path (deterministic id) to decide who
+        drives the send so a run never gets two competing delivery attempts."""
+        with self._lock, self.connect() as conn:
+            delivery_id, created = self._insert_delivery(conn, payload)
+        if created:
+            self.audit("delivery.create", "delivery", delivery_id, {"run_id": payload["run_id"]})
+        return self.get_delivery(delivery_id) or {}, created
+
+    def iter_pending_delivery_ids(self) -> list[str]:
+        """Every delivery still `pending` (indexed by status), oldest first — no run-count cap,
+        so restart recovery re-drives ALL interrupted sends regardless of how old the run is."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT id FROM deliveries WHERE status = 'pending' ORDER BY rowid").fetchall()
+        return [row["id"] for row in rows]
+
+    def runs_missing_webhook_delivery(self) -> list[str]:
+        """IDs of terminal runs whose `_meta.reply` asked for webhook delivery but that have NO
+        delivery row at all (a crash between run finalization and delivery creation). json_extract
+        filters to only the webhook runs in one indexed-ish pass, so this is complete without
+        loading every run's input into Python or capping the scan.
+        ponytail: full table scan on json_extract; add a persisted webhook-intent flag + index
+        if run volume ever makes this startup scan slow."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.id FROM workflow_runs r
+                LEFT JOIN deliveries d ON d.run_id = r.id
+                WHERE r.state IN ('succeeded', 'failed')
+                  AND d.id IS NULL
+                  AND json_extract(r.input, '$._meta.reply.mode') = 'webhook'
+                  AND json_extract(r.input, '$._meta.reply.callback_url') IS NOT NULL
+                """
+            ).fetchall()
+        return [row["id"] for row in rows]
+
+    def get_delivery(self, delivery_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()
+        return row_to_dict(row)
+
+    def list_deliveries(self, limit: int = 100, run_id: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
+        where = []
+        params: list[Any] = []
+        if run_id:
+            where.append("run_id = ?")
+            params.append(run_id)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        sql = "SELECT * FROM deliveries"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def update_delivery(self, delivery_id: str, **fields: Any) -> dict[str, Any] | None:
+        if not fields:
+            return self.get_delivery(delivery_id)
+        fields["updated_at"] = now_iso()
+        assignments = _set_clause(fields)
+        with self._lock, self.connect() as conn:
+            conn.execute(f"UPDATE deliveries SET {assignments} WHERE id = ?", list(fields.values()) + [delivery_id])  # nosec B608
+        return self.get_delivery(delivery_id)
 
     def upsert_worker(self, payload: dict[str, Any]) -> dict[str, Any]:
         worker_id = payload.get("id") or new_id("wrk")
