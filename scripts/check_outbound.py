@@ -6,7 +6,9 @@ non-allowlisted/private callback is `blocked` and never sent; a receiver that ke
 retried up to `ATLAS_OUTBOUND_MAX_ATTEMPTS` then dead-lettered as `failed` WITHOUT touching the
 run's own outcome, and the same `delivery_id` is reused across every attempt (dedupable);
 `POST /api/deliveries/{id}/retry` re-attempts a `failed` delivery within the bound; a missing
-`ATLAS_SECRET_KEY` refuses to send unsigned and records why.
+`ATLAS_SECRET_KEY` refuses to send unsigned and records why; and attempts on one delivery row
+are exclusively owned — a reconcile or manual retry racing a live in-flight attempt is skipped
+or refused instead of double-sending and regressing `delivered` to `failed`.
 """
 
 from __future__ import annotations
@@ -53,6 +55,11 @@ class MockReceiverHandler(BaseHTTPRequestHandler):
     received: list[dict] = []
     # path -> remaining number of times to answer 500 before answering 200.
     fail_counts: dict[str, int] = {}
+    # /reply/race: the FIRST request parks here (signalling race_first_seen) until the test
+    # sets race_release, then gets 200; any request that arrives while the first is parked
+    # gets an instant 500 — a losing concurrent sender that must never be allowed to run.
+    race_first_seen = threading.Event()
+    race_release = threading.Event()
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -90,6 +97,16 @@ class MockReceiverHandler(BaseHTTPRequestHandler):
                     time.sleep(0.15)
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass  # the client's watchdog shut the socket down at the deadline — expected
+            return
+        if self.path == "/reply/race":
+            if not MockReceiverHandler.race_first_seen.is_set():
+                MockReceiverHandler.race_first_seen.set()
+                assert MockReceiverHandler.race_release.wait(timeout=10), "race test never released the receiver"
+                self.send_response(HTTPStatus.OK)
+            else:
+                self.send_response(HTTPStatus.INTERNAL_SERVER_ERROR)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
         remaining = MockReceiverHandler.fail_counts.get(self.path, 0)
         if remaining > 0:
@@ -300,6 +317,32 @@ def main() -> None:
             header_elapsed = time.monotonic() - header_start
             assert status == 202 and sh_retried["delivery"]["status"] == "failed", sh_retried
             assert header_elapsed < 2.9, f"slow-header attempt not bounded: {header_elapsed:.2f}s"
+
+            # I. Attempt ownership: while a LIVE completion attempt is in flight (the receiver is
+            #    holding its request open), a concurrent reconcile() must NOT drive the same
+            #    pending row — its racing 500 would overwrite the live attempt's `delivered`
+            #    (delivered -> failed regression), and a manual retry must be refused for the
+            #    same reason. NOTE: everything between race_first_seen and race_release must stay
+            #    well under outbound_timeout_seconds (2s) or the parked live attempt gets cut by
+            #    _send's total deadline — reconcile skipping an owned row is immediate, so it does.
+            run_i = start_run(base_url, definition["id"], f"{receiver_base}/reply/race", "corr-race")
+            assert MockReceiverHandler.race_first_seen.wait(timeout=5), "live attempt never reached the receiver"
+            # The live sender is now parked inside the receiver; its delivery row is still `pending`.
+            reconcile_racer = threading.Thread(target=runtime.outbound.reconcile)
+            reconcile_racer.start()
+            reconcile_racer.join(timeout=5)
+            assert not reconcile_racer.is_alive(), "reconcile did not return while the delivery was owned"
+            status, retry_racer = request_json(base_url, "POST", f"/api/deliveries/{_completion_delivery_id(run_i)}/retry")
+            assert status == 400 and "in progress" in retry_racer["error"], retry_racer
+            MockReceiverHandler.race_release.set()
+            delivery_i = wait_for_delivery(runtime, run_i, "delivered")
+            assert delivery_i["attempts"] == 1, delivery_i
+            race_posts = [item for item in MockReceiverHandler.received if item["path"] == "/reply/race"]
+            assert len(race_posts) == 1, f"same delivery sent {len(race_posts)} times — attempt ownership not exclusive"
+            # A late reconcile over the now-terminal row re-reads after claiming and leaves it alone.
+            runtime.outbound.reconcile()
+            delivery_i_after = runtime.db.get_delivery(delivery_i["id"])
+            assert delivery_i_after and delivery_i_after["status"] == "delivered", delivery_i_after
 
             # GET /api/deliveries lists everything created above, filterable by run_id/status.
             # (run_a also carries the synthetic blocked_seed/userinfo_seed/query_secret_seed/
