@@ -7,10 +7,11 @@ import ipaddress
 import json
 import socket
 import ssl
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import urlparse
 
 from .db import Database, now_iso
 
@@ -58,25 +59,20 @@ def _split_allowlist(allowlist: tuple[str, ...]) -> tuple[set[str], list[ipaddre
     return hosts, networks
 
 
-# Heuristic, not exhaustive: catches the common credential-shaped query-param names so a
-# webhook secret typed into callback_url doesn't get persisted into run input / the deliveries
-# ledger and echoed back through read APIs. The intended auth mechanism is X-Atlas-Signature,
-# not a URL-embedded secret — adapters that need auth should rely on that instead.
-_CREDENTIAL_QUERY_KEYS = frozenset(
-    {
-        "token", "access_token", "id_token", "refresh_token", "api_key", "apikey",
-        "secret", "client_secret", "password", "passwd", "auth", "authorization",
-        "key", "credential", "signature",
-    }
-)
-
-
-def _credential_leak_reason(parsed: Any) -> str | None:
+def _url_shape_reason(parsed: Any) -> str | None:
+    """Reject a callback_url that carries data in the parts where a secret would hide, instead
+    of chasing credential-shaped keywords (a denylist any `webhook_secret`/`code`/`sig` slips
+    past). A webhook callback is an ADDRESS: it needs scheme+host+path, nothing else. Userinfo,
+    a query string, or a fragment are the three places a token gets smuggled — and they'd then
+    be persisted into run input and echoed back through read APIs. Structurally forbidding all
+    three ends the class. Adapters authenticate the receiver with X-Atlas-Signature, and route
+    per-user context with `_meta.reply.correlation_id` (echoed in the delivery), not the URL."""
     if parsed.username or parsed.password:
-        return "callback_url must not embed credentials (user:pass@host); sign with X-Atlas-Signature instead"
-    leaked = {key.lower() for key, _ in parse_qsl(parsed.query)} & _CREDENTIAL_QUERY_KEYS
-    if leaked:
-        return f"callback_url query string must not carry credentials ({', '.join(sorted(leaked))}); sign with X-Atlas-Signature instead"
+        return "callback_url must not embed credentials (no user:pass@host); authenticate with X-Atlas-Signature"
+    if parsed.query:
+        return "callback_url must not contain a query string; use _meta.reply.correlation_id for routing context"
+    if parsed.fragment:
+        return "callback_url must not contain a URL fragment"
     return None
 
 
@@ -107,16 +103,14 @@ def resolve_outbound_target(url: str, allowlist: tuple[str, ...]) -> OutboundTar
     hostname = parsed.hostname
     if not hostname or parsed.scheme not in {"http", "https"}:
         return OutboundTarget(False, "callback_url must be an http(s) URL")
-    leak_reason = _credential_leak_reason(parsed)
-    if leak_reason:
-        return OutboundTarget(False, leak_reason)
+    shape_reason = _url_shape_reason(parsed)
+    if shape_reason:
+        return OutboundTarget(False, shape_reason)
     loopback = _is_loopback_literal(hostname)
     if parsed.scheme == "http" and not loopback:
         return OutboundTarget(False, "callback_url must use https (http is only allowed to a loopback host)")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     path = parsed.path or "/"
-    if parsed.query:
-        path = f"{path}?{parsed.query}"
     hosts, networks = _split_allowlist(allowlist)
     by_name = hostname.lower() in hosts
     # Resolve unconditionally (even for a by-name allowlist match) so the sender always has a
@@ -189,14 +183,51 @@ def _send(target: OutboundTarget, body: bytes, headers: dict[str, str], timeout:
         # ponytail: plain-http only ever reaches a loopback host (enforced above) — connecting
         # by the pinned address directly is simplest, no SNI/cert concern to preserve hostname for.
         conn = http.client.HTTPConnection(target.pinned_ip, target.port, timeout=timeout)
+    # Hard TOTAL wall-clock ceiling for the whole exchange. The socket timeout is only a
+    # per-recv INACTIVITY timeout, so a receiver trickling status-line/header bytes just under
+    # it resets the clock on every byte and never trips — the deadline check in _drain_response
+    # covers only the body, after the status is already read. A watchdog shuts the socket down
+    # at `timeout` to bound connect + request + response headers + body together. It uses
+    # shutdown(), not close(): getresponse() hands the socket to an HTTPResponse whose file
+    # object keeps the fd open, so a plain close() would not interrupt an in-flight header read
+    # — shutdown(SHUT_RDWR) forces the blocked recv to return at the OS level.
+    deadline = time.monotonic() + timeout
+    aborted = threading.Event()
+
+    def _fire() -> None:
+        aborted.set()
+        _abort_connection(conn)
+
+    watchdog = threading.Timer(timeout, _fire)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         conn.request("POST", target.path, body=body, headers=headers)
         response = conn.getresponse()
+        # If the watchdog fired while reading the status/headers, http.client may still salvage
+        # a lenient status (e.g. a truncated "HTTP/1.1 200" line at EOF parses as 200). That is
+        # NOT a delivery — we never received a complete response within the deadline. Treat it
+        # as a timeout (TimeoutError is an OSError subclass, so _attempt records a failed
+        # attempt). A slow BODY does not hit this: its status+headers were read before the
+        # deadline, so `aborted` is still clear here and only the (discarded) body drain is cut.
+        if aborted.is_set():
+            raise TimeoutError(f"delivery exceeded its {timeout:g}s deadline before a response was received")
         status = response.status
-        _drain_response(response, timeout)
+        _drain_response(response, max(0.0, deadline - time.monotonic()))
         return status
     finally:
+        watchdog.cancel()
         conn.close()
+
+
+def _abort_connection(conn: http.client.HTTPConnection) -> None:
+    sock = conn.sock
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    conn.close()
 
 
 @dataclass(frozen=True)
@@ -235,10 +266,12 @@ class OutboundService:
         self.settings = settings
 
     def deliver_run_completion(self, run: dict[str, Any]) -> dict[str, Any] | None:
-        """Call once, right after a run reaches succeeded/failed. Runs the full bounded-retry
-        loop synchronously in the caller's thread (the run's own background completion thread,
-        never the HTTP request thread) and returns the final delivery row — or None if this
-        run's _meta.reply did not request webhook delivery."""
+        """Call once, right after a run reaches succeeded/failed (from the run's own background
+        completion thread) AND from restart reconcile. Both target a deterministic delivery id
+        for the run, claimed atomically: whoever wins the insert drives the full bounded-retry
+        loop; a loser (e.g. a startup reconcile racing the live completion) returns the existing
+        row without opening a second, differently-id'd delivery the receiver couldn't dedupe.
+        Returns None if this run's _meta.reply did not request webhook delivery."""
         if run.get("state") not in {"succeeded", "failed"}:
             return None
         reply = _reply_of(run)
@@ -247,7 +280,17 @@ class OutboundService:
         callback_url = reply.get("callback_url")
         if not isinstance(callback_url, str) or not callback_url:
             return None
-        delivery = self._create_delivery(run["id"], callback_url, reply.get("correlation_id"))
+        delivery, created = self.db.claim_delivery(
+            {
+                "id": _completion_delivery_id(run["id"]),
+                "run_id": run["id"],
+                "url": callback_url,
+                "correlation_id": reply.get("correlation_id") if isinstance(reply.get("correlation_id"), str) else None,
+                "max_attempts": self.settings.max_attempts,
+            }
+        )
+        if not created:
+            return delivery  # another path already owns this run's completion delivery
         return self._run_to_completion(delivery, run)
 
     def deliver_run(self, run: dict[str, Any]) -> dict[str, Any]:
@@ -286,25 +329,24 @@ class OutboundService:
         )
 
     def reconcile(self) -> None:
-        """Crash/restart recovery: no delivery-attempt thread survives a restart, so (1) any
-        delivery left `pending` (attempted mid-flight when the process stopped) is resumed, and
-        (2) any completed run that asked for webhook delivery but crashed before a delivery row
-        was ever written (the gap between finalize_workflow_run committing and _create_delivery
-        running) gets one created and attempted now. Mirrors WorkflowRunner.reconcile_runs /
-        JobManager.reconcile_jobs — same "no thread survives, resume from the DB" discipline."""
-        for run in self.db.list_workflow_runs(limit=10000):
-            if run.get("state") not in {"succeeded", "failed"}:
-                continue
-            reply = _reply_of(run)
-            if not reply or reply.get("mode") != "webhook" or not reply.get("callback_url"):
-                continue
-            existing = self.db.list_deliveries(limit=1000, run_id=run["id"])
-            if not existing:
+        """Crash/restart recovery — no delivery-attempt thread survives a restart. Complete on
+        both axes, keyed off the deliveries/runs tables directly (NOT a capped run scan, so an
+        interrupted delivery is recovered no matter how old its run is): (1) every delivery left
+        `pending` is re-driven to a terminal state, and (2) every terminal run whose _meta.reply
+        asked for webhook delivery but that has NO delivery row (a crash between finalizing the
+        run and creating the row) gets one created and driven. Mirrors WorkflowRunner.reconcile_runs
+        / JobManager.reconcile_jobs — same "no thread survives, resume from the DB" discipline."""
+        for delivery_id in self.db.iter_pending_delivery_ids():
+            delivery = self.db.get_delivery(delivery_id)
+            if not delivery or delivery["status"] != "pending":
+                continue  # a concurrent live attempt may have already moved it
+            run = self.db.get_workflow_run(delivery["run_id"])
+            if run:
+                self._run_to_completion(delivery, run)
+        for run_id in self.db.runs_missing_webhook_delivery():
+            run = self.db.get_workflow_run(run_id)
+            if run:
                 self.deliver_run_completion(run)
-                continue
-            for delivery in existing:
-                if delivery["status"] == "pending":
-                    self._run_to_completion(delivery, run)
 
     def _run_to_completion(self, delivery: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
         while True:
@@ -354,6 +396,15 @@ class OutboundService:
         updated = self.db.update_delivery(delivery["id"], status="blocked", last_error=reason) or delivery
         self.db.audit("delivery.blocked", "delivery", delivery["id"], {"run_id": delivery.get("run_id"), "reason": reason})
         return updated
+
+
+def _completion_delivery_id(run_id: str) -> str:
+    """Stable, opaque id for a run's ONE automatic completion delivery, so the live completion
+    path and a restart reconcile insert the same row (INSERT OR IGNORE → one wins) and the
+    receiver sees a single delivery_id to dedupe. Manual `deliver_run` sends keep random ids —
+    an explicit re-send is meant to be a distinct delivery."""
+    digest = hashlib.sha256(f"completion:{run_id}".encode("utf-8")).hexdigest()
+    return f"dlv_{digest[:16]}"
 
 
 def _reply_of(run: dict[str, Any]) -> dict[str, Any] | None:

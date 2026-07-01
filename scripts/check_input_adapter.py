@@ -197,32 +197,45 @@ def main() -> None:
             )
             assert "not deliverable" in bad_callback["error"], bad_callback
 
-            # A callback_url embedding credentials (userinfo or a credential-shaped query key)
-            # is rejected pre-run too — it must never be persisted into run input where any
-            # "read"-permission role could later see it via GET /api/workflow-runs.
+            # A callback_url that carries data where a secret would hide — userinfo, a query
+            # string, or a fragment — is rejected pre-run structurally (not by keyword), so a
+            # token can never be persisted into run input where any "read"-permission role could
+            # later see it via GET /api/workflow-runs. These shapes are refused regardless of the
+            # param name (webhook_secret / code / access_token all rejected the same way).
             bad_userinfo = request_error(
                 base_url,
                 "POST",
                 "/api/workflow-runs",
                 {
                     "workflow_definition_id": definition["id"],
-                    "input": {"_meta": {"reply": {"mode": "webhook", "callback_url": "https://user:pass@relay.internal.test/reply"}}},
+                    "input": {"_meta": {"reply": {"mode": "webhook", "callback_url": "https://user:pass@127.0.0.1/reply"}}},
                 },
             )
             assert "credentials" in bad_userinfo["error"], bad_userinfo
 
-            bad_query_secret = request_error(
+            for leaky_url in (
+                "https://127.0.0.1/reply?access_token=TOPSECRET",
+                "https://127.0.0.1/reply?webhook_secret=s3cr3t",  # a denylist keyword-chase would miss this
+                "https://127.0.0.1/reply?code=abc",
+            ):
+                rejected = request_error(
+                    base_url,
+                    "POST",
+                    "/api/workflow-runs",
+                    {"workflow_definition_id": definition["id"], "input": {"_meta": {"reply": {"mode": "webhook", "callback_url": leaky_url}}}},
+                )
+                assert "query string" in rejected["error"], rejected
+
+            bad_fragment = request_error(
                 base_url,
                 "POST",
                 "/api/workflow-runs",
                 {
                     "workflow_definition_id": definition["id"],
-                    "input": {
-                        "_meta": {"reply": {"mode": "webhook", "callback_url": "https://127.0.0.1/reply?access_token=TOPSECRET"}}
-                    },
+                    "input": {"_meta": {"reply": {"mode": "webhook", "callback_url": "https://127.0.0.1/reply#access_token=TOPSECRET"}}},
                 },
             )
-            assert "credentials" in bad_query_secret["error"], bad_query_secret
+            assert "fragment" in bad_fragment["error"], bad_fragment
 
             # Same invalid envelope via /fire: always 202 (fire never surfaces a 4xx), but no run
             # starts — the trigger event records the rejection instead.
@@ -236,7 +249,7 @@ def main() -> None:
             assert fired_bad["event"]["state"] == "failed", fired_bad
             assert "channel" in fired_bad["event"]["error"], fired_bad
 
-            # Exactly the 3 valid attempts started a run; the 6 invalid attempts created none.
+            # Only the 3 valid attempts started a run; every invalid envelope above created none.
             assert len(runtime.db.list_workflow_runs(limit=1000)) == run_count_before + 3
         finally:
             server.shutdown()

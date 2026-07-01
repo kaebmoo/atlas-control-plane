@@ -1509,35 +1509,78 @@ class Database:
             rows = conn.execute(sql, params).fetchall()
         return [row_to_dict(row) or {} for row in rows]
 
-    def create_delivery(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _insert_delivery(self, conn: sqlite3.Connection, payload: dict[str, Any]) -> tuple[str, bool]:
+        """INSERT OR IGNORE a delivery row and report whether THIS call created it. `OR IGNORE`
+        makes a deterministic-id completion delivery an atomic claim: a concurrent live
+        completion and startup reconcile both target the same id, and exactly one wins the
+        insert (the other sees created=False), so the receiver only ever gets one delivery_id
+        to dedupe. Random-id manual/retry deliveries never collide, so they always create."""
         delivery_id = payload.get("id") or new_id("dlv")
         now = now_iso()
-        status = payload.get("status") or "pending"
-        with self._lock, self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO deliveries(
-                  id, run_id, url, correlation_id, status, attempts, max_attempts,
-                  last_error, created_at, updated_at, delivered_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    delivery_id,
-                    payload["run_id"],
-                    payload["url"],
-                    payload.get("correlation_id"),
-                    status,
-                    int(payload.get("attempts", 0) or 0),
-                    int(payload.get("max_attempts", 5) or 5),
-                    payload.get("last_error"),
-                    now,
-                    now,
-                    payload.get("delivered_at"),
-                ),
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO deliveries(
+              id, run_id, url, correlation_id, status, attempts, max_attempts,
+              last_error, created_at, updated_at, delivered_at
             )
-        self.audit("delivery.create", "delivery", delivery_id, {"run_id": payload["run_id"], "status": status})
-        return self.get_delivery(delivery_id) or {}
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                delivery_id,
+                payload["run_id"],
+                payload["url"],
+                payload.get("correlation_id"),
+                payload.get("status") or "pending",
+                int(payload.get("attempts", 0) or 0),
+                int(payload.get("max_attempts", 5) or 5),
+                payload.get("last_error"),
+                now,
+                now,
+                payload.get("delivered_at"),
+            ),
+        )
+        return delivery_id, cursor.rowcount > 0
+
+    def create_delivery(self, payload: dict[str, Any]) -> dict[str, Any]:
+        delivery, _created = self.claim_delivery(payload)
+        return delivery
+
+    def claim_delivery(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Create a delivery, returning (row, created). `created` is False iff a row with this
+        exact id already existed — used by the completion path (deterministic id) to decide who
+        drives the send so a run never gets two competing delivery attempts."""
+        with self._lock, self.connect() as conn:
+            delivery_id, created = self._insert_delivery(conn, payload)
+        if created:
+            self.audit("delivery.create", "delivery", delivery_id, {"run_id": payload["run_id"]})
+        return self.get_delivery(delivery_id) or {}, created
+
+    def iter_pending_delivery_ids(self) -> list[str]:
+        """Every delivery still `pending` (indexed by status), oldest first — no run-count cap,
+        so restart recovery re-drives ALL interrupted sends regardless of how old the run is."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT id FROM deliveries WHERE status = 'pending' ORDER BY rowid").fetchall()
+        return [row["id"] for row in rows]
+
+    def runs_missing_webhook_delivery(self) -> list[str]:
+        """IDs of terminal runs whose `_meta.reply` asked for webhook delivery but that have NO
+        delivery row at all (a crash between run finalization and delivery creation). json_extract
+        filters to only the webhook runs in one indexed-ish pass, so this is complete without
+        loading every run's input into Python or capping the scan.
+        ponytail: full table scan on json_extract; add a persisted webhook-intent flag + index
+        if run volume ever makes this startup scan slow."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.id FROM workflow_runs r
+                LEFT JOIN deliveries d ON d.run_id = r.id
+                WHERE r.state IN ('succeeded', 'failed')
+                  AND d.id IS NULL
+                  AND json_extract(r.input, '$._meta.reply.mode') = 'webhook'
+                  AND json_extract(r.input, '$._meta.reply.callback_url') IS NOT NULL
+                """
+            ).fetchall()
+        return [row["id"] for row in rows]
 
     def get_delivery(self, delivery_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:

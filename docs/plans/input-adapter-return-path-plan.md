@@ -109,16 +109,19 @@ internal trigger fan-out already happens) and add delivery as a failure-isolated
   `file_ref` stays a pointer, not bytes). Sign the exact bytes with HMAC-SHA256 over
   `ATLAS_SECRET_KEY` (reuse the usage-export signing helper) → header
   `X-Atlas-Signature: sha256=<hex>`.
-- **Semantics:** at-least-once; `delivery_id` lets the receiver dedupe. Bounded retries with
-  backoff up to `max_attempts`, then `failed` (dead-letter, visible). A non-2xx or timeout
-  never changes the run outcome.
+- **Semantics:** at-least-once; `delivery_id` lets the receiver dedupe. The automatic
+  completion delivery uses a **deterministic id derived from the run**, inserted with
+  `INSERT OR IGNORE`, so the live completion path and a restart reconcile converge on ONE row —
+  a receiver never sees two competing ids for the same run. Bounded retries with backoff up to
+  `max_attempts`, then `failed` (dead-letter, visible). A non-2xx, timeout, or a total-deadline
+  abort never changes the run outcome.
 - **Restart:** no delivery-attempt thread survives a restart (same as workflow runs and jobs).
-  `AtlasRuntime.__init__` runs `OutboundService.reconcile()` in a background thread: any
-  `pending` delivery is resumed automatically (bounded, because the receiver dedupes on
-  `delivery_id`), and a completed run that asked for webhook delivery but crashed before its
-  delivery row was ever written gets one created and attempted. This is distinct from the
-  worker-job rule ("never auto-retry an interrupted worker job") — deliveries are Atlas-side
-  idempotent notifications, not worker side effects.
+  `AtlasRuntime.__init__` runs `OutboundService.reconcile()` in a background thread, keyed off
+  the deliveries/runs tables directly (not a capped run scan): **every** `pending` delivery is
+  resumed regardless of run age, and **every** completed run that asked for webhook delivery but
+  has no delivery row (a crash before the row was written) gets one created and attempted. This
+  is distinct from the worker-job rule ("never auto-retry an interrupted worker job") —
+  deliveries are Atlas-side idempotent notifications, not worker side effects.
 - **Endpoints (additive, RBAC-guarded):**
   `GET /api/deliveries?run_id=&status=` (operator/auditor);
   `POST /api/deliveries/{id}/retry` (operator; bounded);

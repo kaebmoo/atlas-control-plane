@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT))
 from atlas.app import AtlasHttpServer, AtlasRuntime
 from atlas.config import Config
 from atlas.db import now_iso
+from atlas.outbound import _completion_delivery_id
 
 
 class MockThClawsHandler(BaseHTTPRequestHandler):
@@ -74,8 +75,21 @@ class MockReceiverHandler(BaseHTTPRequestHandler):
                     self.wfile.write(b"x")
                     self.wfile.flush()
                     time.sleep(0.06)
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, OSError):
                 pass  # the client closed once its drain deadline passed — expected
+            return
+        if self.path == "/reply/slowheader":
+            # Trickle the response one byte at a time — starting with the status line itself —
+            # far slower than the timeout, so getresponse() can't even parse a status within the
+            # deadline. Each byte resets the per-recv socket timeout, so only the total-deadline
+            # watchdog in _send bounds this; without it the attempt would run for the full ~5s.
+            try:
+                for byte in b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n":
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                    time.sleep(0.15)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass  # the client's watchdog shut the socket down at the deadline — expected
             return
         remaining = MockReceiverHandler.fail_counts.get(self.path, 0)
         if remaining > 0:
@@ -203,9 +217,10 @@ def main() -> None:
             posts_ok_after = [item for item in MockReceiverHandler.received if item["path"] == "/reply/ok"]
             assert len(posts_ok_after) == 1, "no-secret run must never reach the receiver"
 
-            # E. A callback_url carrying embedded credentials (userinfo or a credential-shaped
-            #    query key) is blocked at send time too — defense in depth for a delivery row
-            #    seeded directly (bypassing IA-1's own ingress rejection of the same URL shapes).
+            # E. A callback_url carrying data where a secret would hide (userinfo, query string,
+            #    or fragment) is blocked at send time too — defense in depth for a delivery row
+            #    seeded directly (bypassing IA-1's ingress rejection of the same URL shapes). The
+            #    guard is structural, so a param name a keyword denylist would miss is caught too.
             userinfo_seed = runtime.db.create_delivery(
                 {"run_id": run_a, "url": f"http://user:pass@127.0.0.1:{mock_receiver.server_address[1]}/reply/ok"}
             )
@@ -214,11 +229,11 @@ def main() -> None:
             assert "credentials" in userinfo_retried["delivery"]["last_error"], userinfo_retried
 
             query_secret_seed = runtime.db.create_delivery(
-                {"run_id": run_a, "url": f"{receiver_base}/reply/ok?access_token=TOPSECRET"}
+                {"run_id": run_a, "url": f"{receiver_base}/reply/ok?webhook_secret=s3cr3t"}
             )
             status, query_retried = request_json(base_url, "POST", f"/api/deliveries/{query_secret_seed['id']}/retry")
             assert status == 202 and query_retried["delivery"]["status"] == "blocked", query_retried
-            assert "credentials" in query_retried["delivery"]["last_error"], query_retried
+            assert "query string" in query_retried["delivery"]["last_error"], query_retried
             assert len([item for item in MockReceiverHandler.received if item["path"] == "/reply/ok"]) == 1, (
                 "a credential-leaking callback_url must never actually be sent"
             )
@@ -249,10 +264,21 @@ def main() -> None:
             assert wait_for_delivery(runtime, stuck_run, "delivered")["id"] == stuck_delivery["id"]
             wait_for_delivery(runtime, missing_run["id"], "delivered")
 
+            # F2. The completion delivery id is DETERMINISTIC per run, so the live completion path
+            #     and a restart reconcile converge on ONE row (atomic INSERT OR IGNORE claim) —
+            #     the receiver never gets two competing delivery_ids for the same run. Re-running
+            #     reconcile and re-invoking the completion path add no duplicate rows.
+            assert stuck_delivery["id"] == _completion_delivery_id(stuck_run), stuck_delivery
+            missing_delivery = runtime.db.list_deliveries(run_id=missing_run["id"])
+            assert len(missing_delivery) == 1 and missing_delivery[0]["id"] == _completion_delivery_id(missing_run["id"])
+            runtime.outbound.reconcile()
+            runtime.outbound.deliver_run_completion(runtime.db.get_workflow_run(stuck_run))
+            assert {d["id"] for d in runtime.db.list_deliveries(run_id=stuck_run)} == {stuck_delivery["id"]}
+            assert {d["id"] for d in runtime.db.list_deliveries(run_id=missing_run["id"])} == {missing_delivery[0]["id"]}
+
             # G. A receiver that answers 200 immediately but drips the body slowly must not hold
             #    a delivery open beyond its timeout (the socket timeout alone would not catch
             #    this — every individual read still completes inside it).
-            wait_for_run(runtime, run_a)  # no-op sync point; run_a already terminal
             slow_start = time.monotonic()
             run_g = start_run(base_url, definition["id"], f"{receiver_base}/reply/slow", "corr-slow")
             wait_for_run(runtime, run_g)
@@ -261,12 +287,26 @@ def main() -> None:
             assert delivery_g["attempts"] == 1, delivery_g
             assert elapsed < 2.9, f"delivery took {elapsed:.2f}s — response drain did not respect the deadline"
 
+            # H. A receiver that trickles the STATUS LINE / HEADERS (not just the body) slower
+            #    than the timeout must still be bounded: the per-recv socket timeout resets on
+            #    every byte, so only the total wall-clock watchdog in _send catches this. One
+            #    bounded attempt (max_attempts=1) → failed, well within a small multiple of the
+            #    2s timeout, and never delivered.
+            slowheader_seed = runtime.db.create_delivery(
+                {"run_id": run_a, "url": f"{receiver_base}/reply/slowheader", "max_attempts": 1}
+            )
+            header_start = time.monotonic()
+            status, sh_retried = request_json(base_url, "POST", f"/api/deliveries/{slowheader_seed['id']}/retry")
+            header_elapsed = time.monotonic() - header_start
+            assert status == 202 and sh_retried["delivery"]["status"] == "failed", sh_retried
+            assert header_elapsed < 2.9, f"slow-header attempt not bounded: {header_elapsed:.2f}s"
+
             # GET /api/deliveries lists everything created above, filterable by run_id/status.
-            # (run_a also carries the synthetic blocked_seed/userinfo_seed/query_secret_seed
-            # deliveries from scenarios B and E.)
+            # (run_a also carries the synthetic blocked_seed/userinfo_seed/query_secret_seed/
+            # slowheader_seed deliveries from scenarios B, E, and H.)
             status, listed = request_json(base_url, "GET", f"/api/deliveries?run_id={run_a}")
             assert status == 200 and {d["id"] for d in listed["deliveries"]} == {
-                delivery_a["id"], blocked_seed["id"], userinfo_seed["id"], query_secret_seed["id"]
+                delivery_a["id"], blocked_seed["id"], userinfo_seed["id"], query_secret_seed["id"], slowheader_seed["id"]
             }, listed
             status, failed_listed = request_json(base_url, "GET", "/api/deliveries?status=blocked")
             assert status == 200 and {d["id"] for d in failed_listed["deliveries"]} >= {blocked_seed["id"], delivery_d["id"]}
