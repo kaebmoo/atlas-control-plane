@@ -1,0 +1,50 @@
+{
+  "_howto": "Atlas dashboard → Workflows → New. Put `name` in the Name box, `graph` in the Graph JSON box, `policy` in the Policy JSON box, Save. Then paste `sample_input` into the run Input box to test. Routing uses role='permit', so first register ONE online worker with role 'permit' (Fleet view) — no worker_id needed.",
+  "name": "PoC Permit Application",
+  "graph": {
+    "start": "intake",
+    "nodes": [
+      {
+        "id": "intake",
+        "type": "worker",
+        "role": "permit",
+        "prompt": "STEP=intake\nตรวจความครบถ้วนของคำขออนุญาตต่อไปนี้ และระบุสิ่งที่ขาด:\nผู้ขอ: {input.applicant_name}\nประเภทคำขอ: {input.permit_type}\nรายละเอียด: {input.detail}\nเอกสารแนบ: {input.attachments}",
+        "outputs": ["review"]
+      },
+      {
+        "id": "brief",
+        "type": "worker",
+        "role": "permit",
+        "prompt": "STEP=summary\nจากผลตรวจต่อไปนี้ เขียนบันทึกสรุปเสนอผู้พิจารณาพร้อมข้อเสนอแนะ:\n{artifact.review}",
+        "outputs": ["brief"]
+      },
+      {
+        "id": "approval",
+        "type": "human_gate",
+        "label": "อนุมัติคำขออนุญาต",
+        "reason": "ตรวจบันทึกสรุปก่อนตัดสินใจอนุมัติหรือปฏิเสธ"
+      },
+      {
+        "id": "notice",
+        "type": "worker",
+        "role": "permit",
+        "prompt": "STEP=notice\nร่างหนังสือแจ้งผลการอนุมัติตามบันทึกสรุปนี้:\n{artifact.brief}",
+        "outputs": ["notice"]
+      }
+    ],
+    "edges": [
+      {"from": "intake", "to": "brief", "condition": {"type": "always"}},
+      {"from": "brief", "to": "approval", "condition": {"type": "always"}},
+      {"from": "approval", "to": "notice", "condition": {"type": "always"}}
+    ]
+  },
+  "policy": {"max_jobs": 10, "max_iterations": 3, "max_attempts_per_node": 2, "max_budget_units": 10},
+  "sample_input": {
+    "applicant_name": "นายทดสอบ ระบบ",
+    "national_id": "1234567890123",
+    "permit_type": "ขออนุญาตก่อสร้าง",
+    "detail": "ขออนุญาตก่อสร้างอาคารพาณิชย์ 2 ชั้น บนที่ดินของตนเอง",
+    "attachments": "สำเนาบัตรประชาชน, โฉนดที่ดิน, แบบแปลน",
+    "_meta": {"source": {"channel": "web_form", "adapter": "manual-dashboard", "form": "permit_request", "external_id": "manual-001"}}
+  }
+}

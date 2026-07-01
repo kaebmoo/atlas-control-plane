@@ -313,7 +313,7 @@ select { appearance: none; -webkit-appearance: none; background-image: url("data
 .code-field { display: flex; flex-direction: column; gap: 7px; }
 .code-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .code-label > span:first-child { font-size: 17px; font-weight: var(--fw-medium); color: var(--text-body); }
-.code-area { font-family: var(--font-mono); font-size: 15.5px; line-height: 1.6; background: var(--nt-grey-900) !important; color: #eef0f0; border: 1.5px solid var(--nt-grey-700) !important; border-radius: var(--radius-sm); padding: 14px; white-space: pre; overflow: auto; tab-size: 2; }
+.code-area { font-family: var(--font-mono); font-size: 15.5px; line-height: 1.6; background: var(--nt-grey-900) !important; color: #eef0f0 !important; border: 1.5px solid var(--nt-grey-700) !important; border-radius: var(--radius-sm); padding: 14px; white-space: pre; overflow: auto; tab-size: 2; }
 .code-area::placeholder { color: #6a6f71; }
 .code-area:focus { box-shadow: 0 0 0 3px rgba(255,209,0,.3) !important; }
 .code-block { font-family: var(--font-mono); font-size: 15px; line-height: 1.55; background: var(--nt-grey-900); color: rgba(255,255,255,.82); border-radius: var(--radius-sm); padding: 16px 18px; margin: 0; overflow: auto; max-height: 320px; white-space: pre-wrap; word-break: break-word; }
@@ -500,7 +500,7 @@ a.workflow-run-item:hover { border-color: var(--nt-yellow-500); background: var(
 .job-detail-head .grow { flex: 1; min-width: 0; }
 .job-detail-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
 .job-detail-id { font-size: 15.5px; color: var(--text-muted); }
-.job-detail-prompt { font-size: 19px; font-weight: var(--fw-medium); line-height: 1.5; }
+.job-detail-prompt { font-size: 19px; font-weight: var(--fw-medium); line-height: 1.5; max-height: 30vh; overflow-y: auto; }
 .job-detail-route { font-size: 15.5px; color: var(--text-muted); margin-top: 6px; }
 .tabs { display: flex; gap: 4px; padding: 0 22px; border-bottom: 1px solid var(--nt-line); flex: none; }
 .tab { padding: 13px 4px; margin-right: 18px; font-size: 18px; font-weight: var(--fw-medium); color: var(--text-muted); border-bottom: 2.5px solid transparent; background: none; cursor: pointer; }
@@ -522,6 +522,8 @@ a.workflow-run-item:hover { border-color: var(--nt-yellow-500); background: var(
 .wc-role { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .role-chip { font-size: 14.5px; padding: 4px 10px; border-radius: 999px; background: var(--nt-yellow-100); color: var(--nt-grey-900); font-weight: var(--fw-semibold); }
 .wc-role .latency { font-size: 15px; color: var(--text-faint); margin-left: auto; }
+.copy-btn { border: 0; background: none; padding: 0 4px; margin-left: 4px; cursor: pointer; color: var(--text-muted); font-size: 14px; line-height: 1; vertical-align: baseline; }
+.copy-btn:hover { color: var(--text-strong); }
 .wc-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 14px; min-height: 22px; }
 .wc-tag { font-size: 14px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--nt-line); color: var(--text-muted); }
 .wc-actions { display: flex; gap: 7px; border-top: 1px solid var(--nt-surface-2); padding-top: 13px; }
