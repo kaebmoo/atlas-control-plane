@@ -552,6 +552,7 @@ function renderWorkers() {
         <span class="status ${statusClass(worker.status)}">${escapeHtml(worker.status)}</span>
       </div>
       <div class="wc-url">${escapeHtml(worker.base_url)}</div>
+      <div class="wc-url" title="Worker ID">${escapeHtml(worker.id)}</div>
       <div class="wc-role">
         <span class="role-chip">${escapeHtml(worker.role || "unassigned")}</span>
         <span class="latency">${escapeHtml(seen)}</span>

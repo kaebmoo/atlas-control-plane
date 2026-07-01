@@ -52,6 +52,147 @@ Open **http://127.0.0.1:8080**, submit the form, watch the run go
 `succeeded` with the drafted notice. Clicking **ปฏิเสธ (reject)** fails the run at
 the gate (as designed).
 
+## Create it manually in the Atlas web dashboard
+
+`setup.py` does all of this for you through the API. If you'd rather build it by hand in
+the dashboard (to learn the pieces), here is exactly what to enter and what each value
+means. A machine-readable copy of the name/graph/policy/sample-input is in
+[`workflow.dashboard.json`](workflow.dashboard.json).
+
+> **Order matters:** register the worker **first**, then save the workflow. Saving a
+> workflow whose node `role` has no matching worker fails with
+> `workflow node intake role no matching worker: permit`.
+
+### Step 1 — Add a worker (Fleet view)
+
+Fleet → **Add worker**:
+
+| Field | PoC value | Meaning |
+| --- | --- | --- |
+| Name | `permit-mock` | any label |
+| Base URL | `http://127.0.0.1:4399` | the mock worker (or real thClaws `http://127.0.0.1:4317`) |
+| Token | `mock-token` | the worker's `THCLAWS_API_TOKEN` (the mock accepts anything) |
+| Role | `permit` | **must match** the `role` used in the workflow nodes below |
+| Tags | `poc,permit` | optional; a tag `permit` also satisfies the role match |
+
+Save → Atlas polls it. It must reach **online** to run a job (start the mock first:
+`python3 poc/permit_web/mock_worker.py 4399`). A worker matches a node's `role` when its
+**Role field equals the role, OR the role is one of its Tags** (case-insensitive).
+
+### Step 2 — Create the workflow (Workflows view)
+
+Workflows → **New**. There are separate boxes — put each JSON in the matching box.
+
+**Name box:**
+
+```
+PoC Permit Application
+```
+
+**Graph box** (the `{start, nodes, edges}` object only):
+
+```json
+{
+  "start": "intake",
+  "nodes": [
+    {"id": "intake", "type": "worker", "role": "permit",
+     "prompt": "STEP=intake\nตรวจความครบถ้วนของคำขออนุญาตต่อไปนี้ และระบุสิ่งที่ขาด:\nผู้ขอ: {input.applicant_name}\nประเภทคำขอ: {input.permit_type}\nรายละเอียด: {input.detail}\nเอกสารแนบ: {input.attachments}",
+     "outputs": ["review"]},
+    {"id": "brief", "type": "worker", "role": "permit",
+     "prompt": "STEP=summary\nจากผลตรวจต่อไปนี้ เขียนบันทึกสรุปเสนอผู้พิจารณาพร้อมข้อเสนอแนะ:\n{artifact.review}",
+     "outputs": ["brief"]},
+    {"id": "approval", "type": "human_gate",
+     "label": "อนุมัติคำขออนุญาต", "reason": "ตรวจบันทึกสรุปก่อนตัดสินใจอนุมัติหรือปฏิเสธ"},
+    {"id": "notice", "type": "worker", "role": "permit",
+     "prompt": "STEP=notice\nร่างหนังสือแจ้งผลการอนุมัติตามบันทึกสรุปนี้:\n{artifact.brief}",
+     "outputs": ["notice"]}
+  ],
+  "edges": [
+    {"from": "intake", "to": "brief", "condition": {"type": "always"}},
+    {"from": "brief", "to": "approval", "condition": {"type": "always"}},
+    {"from": "approval", "to": "notice", "condition": {"type": "always"}}
+  ]
+}
+```
+
+**Policy box:**
+
+```json
+{"max_jobs": 10, "max_iterations": 3, "max_attempts_per_node": 2, "max_budget_units": 10}
+```
+
+Click **Save** (optionally **Validate** first). You get a `wfd_…` in `draft` status —
+draft workflows run fine.
+
+### Step 3 — Run it
+
+Open the workflow → paste this into the **run Input** box → **Run**:
+
+```json
+{
+  "applicant_name": "นายทดสอบ ระบบ",
+  "national_id": "1234567890123",
+  "permit_type": "ขออนุญาตก่อสร้าง",
+  "detail": "ขออนุญาตก่อสร้างอาคารพาณิชย์ 2 ชั้น บนที่ดินของตนเอง",
+  "attachments": "สำเนาบัตรประชาชน, โฉนดที่ดิน, แบบแปลน",
+  "_meta": {"source": {"channel": "web_form", "adapter": "manual-dashboard", "form": "permit_request", "external_id": "manual-001"}}
+}
+```
+
+Watch `running → waiting_for_human`; open **Monitor**, **Approve** → `succeeded` with the
+`notice` artifact (Reject → run fails at the gate).
+
+### Field reference (what each value does)
+
+**Worker node** (`intake`, `brief`, `notice`):
+
+- `id` — unique node id, referenced by edges.
+- `type` — `worker` (runs a job on a worker), `human_gate`, `join`, or `manager`.
+- `role` — routes to any online worker advertising this role. Alternative: `worker_id`
+  (an exact `wrk_…`) — set that **instead of** `role` and the save-time role check is skipped.
+- `prompt` — the instruction. `{input.X}` pulls a submitted field; `{artifact.KEY}` pulls a
+  prior node's output. (The leading `STEP=…` line only helps the mock choose canned text;
+  a real model ignores it.)
+- `outputs` — names the artifact this node writes (the **first** key is used). Omit it and
+  the next node's `{artifact.KEY}` has nothing to read. Add `"output_format": "json"` to
+  parse the answer as JSON (then conditions/prompts can use dot-paths).
+
+**Human gate** (`approval`): `label` + `reason` are shown to the approver. Approve resumes
+the outgoing edges; Reject fails the run. For a multi-choice gate add
+`"choices": [{"id","label"}]` and use `human_selected` edges.
+
+**Edges** — `{from, to, condition}`. Here `condition.type` is `always`; other types:
+`artifact_equals`, `artifact_in`, `human_selected`, `manager_selected`,
+`max_iterations_below`. Two edges out of one node are OR (independent), not AND.
+
+**Policy keys** used here:
+
+- `max_jobs` — max worker jobs per run.
+- `max_iterations` — max total node executions (loop guard).
+- `max_attempts_per_node` — retries allowed per node.
+- `max_budget_units` — total abstract cost cap (each worker node costs `budget_units`,
+  default `1`). This is **not** money or tokens.
+
+Also available: `max_minutes`, `requires_human_after_iterations`, `allowed_worker_ids`,
+`allowed_workspace_ids`, `stop_on_first_failure` (default `true`).
+
+**Run input (the envelope):** business fields at the top level (read via `{input.*}`) plus
+the reserved `_meta.source` for provenance. `channel` must be one of
+`line, email, web_form, api, schedule, other` (an unknown channel is rejected pre-run).
+
+### Common dashboard errors
+
+| Message | Cause / fix |
+| --- | --- |
+| `… role no matching worker: permit` | No worker with role/tag `permit` exists yet → add it in Fleet **first** (Step 1). |
+| run stuck in `running`, never finishes | The matching worker is **offline** → start the mock / thClaws and confirm it shows online. |
+| `missing prompt variable {artifact.review}` | A prior node didn't declare `outputs` (so no artifact) → add `outputs` to that node. |
+| `unknown prompt variable …` | `{input.X}` names a field you didn't include in the run input. |
+
+The dashboard version above uses `role: "permit"` (any online permit worker can serve it);
+`setup.py` instead pins each node to a specific `worker_id`. Use one or the other — don't
+keep two workflows with the same name.
+
 ## With a real API token (closer to production)
 
 Start Atlas normally (no bypass), create an operator token, then point the PoC at it:
