@@ -58,6 +58,9 @@
 - [Visual Workflow Builder Specification (ไทย)](specs/workflow-visual-builder-spec-th.md) ·
   [English](specs/workflow-visual-builder-spec-en.md) — visual grammar, drag/drop rules,
   JSON mapping, validation, AI workflow และ QA criteria
+- [Input Adapter Contract](specs/input-adapter-contract.md) — the ingress envelope
+  (`_meta.source` / `_meta.reply`) any channel (LINE, email→n8n, web form) POSTs to
+  `/fire` or `/workflow-runs`, provenance→audit, and the return-path addressing
 - [Solution Pack Format](specs/pack-format.md) — pack bundle schema, validation rules,
   `/api/packs` endpoints, and the `gov_complaint` reference pack
 - [CDR Record Schema (proposed)](specs/cdr-schema.md) — Fleet's per-tenant usage/charge
@@ -88,6 +91,9 @@
   committed) — BYOK, billable unit, CDR export, metering schema, B-milestones
 - [GA Completion Plan (run-to-completion)](plans/ga-completion-plan.md) — ลำดับเดินจนจบ
   ทุกงานที่เหลือ (M3→M9 + B3–B7), definition-of-done ต่อ milestone, scope tiers และ commit policy
+- [Input Adapter & Return Path Plan](plans/input-adapter-return-path-plan.md) — IA-1
+  (ingress envelope + provenance→audit) และ OB-1 (signed outbound delivery / ขากลับ),
+  DoD + hermetic check ต่อ milestone, additive และคง silo
 
 ## Prompt files
 
@@ -98,6 +104,8 @@
   prompts สำหรับ implement ตาม sovereign platform plan (M1–M3 พร้อมรัน)
 - [GA Completion — Autonomous Spin Prompts](prompts/ga-completion-spin-prompts.md) —
   driver ที่ไล่ทำ M3→M9 ต่อเนื่องจนจบ, commit เมื่อ gate เขียวจบแต่ละ milestone
+- [Input Adapter & Return Path — Spin Prompts](prompts/input-adapter-return-path-spin-prompts.md)
+  — driver สำหรับ IA-1 → OB-1 (ทำต่อเนื่อง, commit เมื่อ check เขียว)
 
 ## โครงสร้าง
 
@@ -119,16 +127,19 @@ docs/
 │   ├── sovereign-platform-plan.md
 │   ├── usage-metering-billing-plan.md   (internal, not committed)
 │   ├── nt-aiaas-business-plan.md        (internal, not committed)
-│   └── ga-completion-plan.md
+│   ├── ga-completion-plan.md
+│   └── input-adapter-return-path-plan.md
 ├── prompts/
 │   ├── workflow-engine-spin-prompts.md
 │   ├── sovereign-platform-spin-prompts.md
-│   └── ga-completion-spin-prompts.md
+│   ├── ga-completion-spin-prompts.md
+│   └── input-adapter-return-path-spin-prompts.md
 ├── specs/
 │   ├── api-reference-th.md
 │   ├── api-reference-en.md
 │   ├── openapi.yaml
 │   ├── pack-format.md
+│   ├── input-adapter-contract.md
 │   ├── workflow-visual-builder-spec-th.md
 │   ├── workflow-visual-builder-spec-en.md
 │   ├── workflow-definition.schema.json
