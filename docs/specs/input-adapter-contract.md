@@ -1,6 +1,6 @@
 # Input Adapter Contract
 
-> **TL;DR (ไทย):** ชั้นรับเข้าของ Atlas ไม่ใช่ "n8n" แต่เป็น **สัญญา (contract)** —
+> **TL;DR (ไทย):** ชั้นรับเข้าของ Atlas เป็น **สัญญา (contract)** —
 > อะไรก็ตาม (LINE, email ที่คัดกรองผ่าน n8n, เว็บฟอร์มร้องเรียน/ขอใช้บริการ/ขออนุญาต,
 > ระบบภายในอื่น) ที่ normalize เป็น JSON แล้วยิงเข้า **สองประตูเดิมที่มีอยู่แล้ว**
 > (`POST /api/workflow-triggers/{id}/fire` หรือ `POST /api/workflow-runs`) ก็เป็น
