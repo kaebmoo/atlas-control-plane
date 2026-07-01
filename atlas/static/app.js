@@ -552,9 +552,9 @@ function renderWorkers() {
         <span class="status ${statusClass(worker.status)}">${escapeHtml(worker.status)}</span>
       </div>
       <div class="wc-url">${escapeHtml(worker.base_url)}</div>
-      <div class="wc-url" title="Worker ID">${escapeHtml(worker.id)}</div>
+      <div class="wc-url" title="Worker ID">${escapeHtml(worker.id)}<button class="copy-btn" type="button" data-copy="${escapeHtml(worker.id)}" title="คัดลอก Worker ID" aria-label="Copy worker id">⧉</button></div>
       <div class="wc-role">
-        <span class="role-chip">${escapeHtml(worker.role || "unassigned")}</span>
+        <span class="role-chip">${escapeHtml(worker.role || "unassigned")}<button class="copy-btn" type="button" data-copy="${escapeHtml(worker.role || "unassigned")}" title="คัดลอก role" aria-label="Copy role">⧉</button></span>
         <span class="latency">${escapeHtml(seen)}</span>
       </div>
       <div class="wc-tags">${tags}</div>
@@ -1887,6 +1887,16 @@ async function deleteWorkspace(workspaceId) {
 document.addEventListener("click", async (event) => {
   if (event.target.closest("[data-close-modal]")) {
     closeModals();
+    return;
+  }
+  const copyButton = event.target.closest("[data-copy]");
+  if (copyButton) {
+    try {
+      await navigator.clipboard.writeText(copyButton.dataset.copy);
+      toast("คัดลอกแล้ว");
+    } catch {
+      toast("คัดลอกไม่สำเร็จ");
+    }
     return;
   }
   const editWorkerButton = event.target.closest(".edit-worker");
