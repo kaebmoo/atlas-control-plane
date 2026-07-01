@@ -493,6 +493,33 @@ def _migration_004_workflow_run_snapshot(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_005_deliveries(conn: sqlite3.Connection) -> None:
+    # OB-1: the outbound-delivery ledger (docs/plans/input-adapter-return-path-plan.md). A NEW
+    # table as a numbered step (not folded into SCHEMA) so it is created for databases that
+    # already migrated past version 1. No per-tenant column (silo invariant, scripts/check_silo.py).
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS deliveries (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          url TEXT NOT NULL,
+          correlation_id TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          attempts INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 5,
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          delivered_at TEXT,
+          FOREIGN KEY(run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_deliveries_run ON deliveries(run_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_deliveries_status ON deliveries(status, updated_at);
+        """
+    )
+
+
 # Ordered, append-only migration steps. A step is either a SQL string (run via
 # executescript) or a callable(conn). The 1-based index is the schema version.
 # Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
@@ -505,6 +532,7 @@ MIGRATIONS: list[str | Any] = [
     _migration_002_jobs_columns,
     _migration_003_approval_columns,
     _migration_004_workflow_run_snapshot,
+    _migration_005_deliveries,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -1480,6 +1508,68 @@ class Database:
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [row_to_dict(row) or {} for row in rows]
+
+    def create_delivery(self, payload: dict[str, Any]) -> dict[str, Any]:
+        delivery_id = payload.get("id") or new_id("dlv")
+        now = now_iso()
+        status = payload.get("status") or "pending"
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO deliveries(
+                  id, run_id, url, correlation_id, status, attempts, max_attempts,
+                  last_error, created_at, updated_at, delivered_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    delivery_id,
+                    payload["run_id"],
+                    payload["url"],
+                    payload.get("correlation_id"),
+                    status,
+                    int(payload.get("attempts", 0) or 0),
+                    int(payload.get("max_attempts", 5) or 5),
+                    payload.get("last_error"),
+                    now,
+                    now,
+                    payload.get("delivered_at"),
+                ),
+            )
+        self.audit("delivery.create", "delivery", delivery_id, {"run_id": payload["run_id"], "status": status})
+        return self.get_delivery(delivery_id) or {}
+
+    def get_delivery(self, delivery_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()
+        return row_to_dict(row)
+
+    def list_deliveries(self, limit: int = 100, run_id: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
+        where = []
+        params: list[Any] = []
+        if run_id:
+            where.append("run_id = ?")
+            params.append(run_id)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        sql = "SELECT * FROM deliveries"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def update_delivery(self, delivery_id: str, **fields: Any) -> dict[str, Any] | None:
+        if not fields:
+            return self.get_delivery(delivery_id)
+        fields["updated_at"] = now_iso()
+        assignments = _set_clause(fields)
+        with self._lock, self.connect() as conn:
+            conn.execute(f"UPDATE deliveries SET {assignments} WHERE id = ?", list(fields.values()) + [delivery_id])  # nosec B608
+        return self.get_delivery(delivery_id)
 
     def upsert_worker(self, payload: dict[str, Any]) -> dict[str, Any]:
         worker_id = payload.get("id") or new_id("wrk")

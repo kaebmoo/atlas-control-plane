@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .db import Database, now_iso
-from .outbound import resolve_outbound_target
+from .outbound import OutboundService, resolve_outbound_target
 from .router import Router
 from .usage import elapsed_seconds
 
@@ -327,12 +327,17 @@ class WorkflowRunner:
         poll_interval_seconds: float = 0.2,
         max_wait_seconds: float = 3600,
         outbound_allowlist: tuple[str, ...] = (),
+        outbound_service: OutboundService | None = None,
     ):
         self.db = db
         self.job_service = job_service
         self.poll_interval_seconds = poll_interval_seconds
         self.max_wait_seconds = max_wait_seconds
         self.outbound_allowlist = outbound_allowlist
+        # OB-1: the sender for _meta.reply.webhook deliveries, subscribed to this runner's own
+        # workflow_run_completed emission (see _notify_run_completed). None in test harnesses
+        # that construct a bare WorkflowRunner — delivery is then simply a no-op.
+        self.outbound_service = outbound_service
         self.trigger_service: WorkflowTriggerService | None = None
         self._threads: dict[str, threading.Thread] = {}
         self._thread_lock = threading.RLock()
@@ -1078,10 +1083,10 @@ class WorkflowRunner:
             LOGGER.exception("usage metering failed for workflow run %s", run_id)
 
     def _notify_run_completed(self, run_id: str) -> None:
-        if not self.trigger_service:
-            return
         run = self.db.get_workflow_run(run_id)
-        if run:
+        if not run:
+            return
+        if self.trigger_service:
             # Carry the chain of workflows that led here (from this run's input) and append
             # this workflow, so fire_internal can reject cycles like A->B->A.
             chain = list((run.get("input") or {}).get("_trigger_chain") or [])
@@ -1099,6 +1104,14 @@ class WorkflowRunner:
                 },
                 f"workflow_run_completed:{run_id}:{run['state']}",
             )
+        # OB-1: subscribe the outbound delivery sender to this SAME completion, after the run
+        # outcome is already persisted. Failure-isolated like usage metering above — a delivery
+        # failure (or missing outbound_service in a test harness) never touches run state.
+        if self.outbound_service:
+            try:
+                self.outbound_service.deliver_run_completion(run)
+            except Exception:
+                LOGGER.exception("outbound delivery failed for workflow run %s", run_id)
 
     def _validate_manager_decision(
         self,

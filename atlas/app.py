@@ -20,6 +20,7 @@ from . import __version__
 from .config import Config
 from .db import ARTIFACT_KINDS, Database, new_id, now_iso
 from .jobs import JobManager, TERMINAL_STATES
+from .outbound import OutboundService, OutboundSettings
 from .packs import export_pack, import_pack, list_available_packs
 from .router import Router
 from .usage import normalize_usage_range, summarize_usage, usage_csv
@@ -49,10 +50,10 @@ _WORKFLOW_POLICY_DEFAULTS = {
     "stop_on_first_failure": True,
 }
 ROLE_PERMISSIONS = {
-    "admin": frozenset({"read", "audit.read", "jobs.run", "workflows.run", "approvals.decide", "workflows.manage", "workers.poll", "resources.manage", "admin"}),
-    "operator": frozenset({"read", "jobs.run", "workflows.run", "approvals.decide", "workflows.manage", "workers.poll", "resources.manage"}),
+    "admin": frozenset({"read", "audit.read", "jobs.run", "workflows.run", "approvals.decide", "workflows.manage", "workers.poll", "resources.manage", "admin", "deliveries.read"}),
+    "operator": frozenset({"read", "jobs.run", "workflows.run", "approvals.decide", "workflows.manage", "workers.poll", "resources.manage", "deliveries.read"}),
     "viewer": frozenset({"read"}),
-    "auditor": frozenset({"read", "audit.read"}),
+    "auditor": frozenset({"read", "audit.read", "deliveries.read"}),
 }
 _LIMIT_CAP = 10000
 
@@ -76,7 +77,18 @@ class AtlasRuntime:
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.jobs = JobManager(self.db, config.request_timeout_seconds)
         self.router = Router(self.db)
-        self.workflows = WorkflowRunner(self.db, self.jobs, outbound_allowlist=config.outbound_allowlist)
+        self.outbound = OutboundService(
+            self.db,
+            OutboundSettings(
+                allowlist=config.outbound_allowlist,
+                secret_key=config.secret_key,
+                max_attempts=config.outbound_max_attempts,
+                timeout_seconds=config.outbound_timeout_seconds,
+            ),
+        )
+        self.workflows = WorkflowRunner(
+            self.db, self.jobs, outbound_allowlist=config.outbound_allowlist, outbound_service=self.outbound
+        )
         self.triggers = WorkflowTriggerService(self.db, self.workflows)
         # Reconcile jobs first so orphaned worker jobs are terminal before runs recover,
         # then reconcile workflow runs (which re-arm interrupted nodes).
@@ -606,6 +618,12 @@ class AtlasHandler(BaseHTTPRequestHandler):
             if action == "cancel":
                 self._json({"run": runtime.workflows.cancel_run(parts[2])})
                 return
+            if action == "deliver":
+                run = runtime.db.get_workflow_run(parts[2])
+                if not run:
+                    raise FileNotFoundError()
+                self._json({"delivery": runtime.outbound.deliver_run(run)}, HTTPStatus.ACCEPTED)
+                return
 
         if parts == ["api", "approvals"] and method == "GET":
             limit = _parse_limit(query)
@@ -688,6 +706,19 @@ class AtlasHandler(BaseHTTPRequestHandler):
         if parts == ["api", "audit"] and method == "GET":
             limit = _parse_limit(query)
             self._json({"audit": runtime.db.list_audit(limit)})
+            return
+
+        if parts == ["api", "deliveries"] and method == "GET":
+            limit = _parse_limit(query)
+            run_id = query.get("run_id", [""])[0] or None
+            status = query.get("status", [""])[0] or None
+            self._json({"deliveries": runtime.db.list_deliveries(limit, run_id, status)})
+            return
+
+        if len(parts) == 4 and parts[:2] == ["api", "deliveries"] and parts[3] == "retry" and method == "POST":
+            if not runtime.db.get_delivery(parts[2]):
+                raise FileNotFoundError()
+            self._json({"delivery": runtime.outbound.retry_delivery(parts[2])}, HTTPStatus.ACCEPTED)
             return
 
         raise FileNotFoundError()
@@ -901,6 +932,8 @@ def _required_permission(method: str, parts: list[str]) -> str:
         return "audit.read"
     if parts[:2] == ["api", "packs"]:
         return "workflows.manage" if method == "POST" else "read"
+    if parts[:2] == ["api", "deliveries"]:
+        return "deliveries.read" if method == "GET" else "workflows.run"
     if method == "GET" or parts in (["api", "me"], ["api", "auth", "logout"]):
         return "read"
     if parts[:2] == ["api", "jobs"] or parts == ["api", "routes", "resolve"]:

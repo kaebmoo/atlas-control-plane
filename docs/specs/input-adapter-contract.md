@@ -16,9 +16,9 @@ every channel is a thin, interchangeable adapter and so a reply can later be rou
 to the originating user. Atlas remains the single place where policy, approval, audit, and
 metering are enforced — independent of the channel.
 
-**Status:** **IA-1 implemented** (envelope + provenance + audit, verified by
-`scripts/check_input_adapter.py`). **OB-1** (the return path that consumes `_meta.reply`) is
-design target, tracked in
+**Status:** **IA-1 and OB-1 implemented.** IA-1 (envelope + provenance + audit) is verified by
+`scripts/check_input_adapter.py`; OB-1 (the signed return path that consumes `_meta.reply`) is
+verified by `scripts/check_outbound.py`. Both are tracked in
 [Input Adapter & Return Path Plan](../plans/input-adapter-return-path-plan.md).
 
 ## 1. The boundary

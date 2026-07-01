@@ -2,8 +2,8 @@
 
 **English** · [ภาษาไทย](api-reference-th.md) · [OpenAPI 3.1](openapi.yaml)
 
-Status: **Current API specification v1.2**<br>
-System baseline: `atlas/app.py` as of 2026-06-29<br>
+Status: **Current API specification v1.3**<br>
+System baseline: `atlas/app.py` as of 2026-07-01<br>
 Default base URL: `http://127.0.0.1:8787`
 
 This document describes the HTTP API implemented by the current Atlas server.
@@ -188,6 +188,7 @@ require `read`.
 | POST | `/api/workflow-runs/{run_id}/pause` | Pause |
 | POST | `/api/workflow-runs/{run_id}/resume` | Resume/recovery retry (`202`) |
 | POST | `/api/workflow-runs/{run_id}/cancel` | Cancel |
+| POST | `/api/workflow-runs/{run_id}/deliver` | Manual (re)send the signed result to `_meta.reply.callback_url` (`202`) |
 | GET | `/api/workflow-runs/{run_id}/artifacts` | Run artifacts |
 | POST | `/api/workflow-runs/{run_id}/files?key=...` | Upload binary file artifact |
 | POST | `/api/artifacts` | Create inline artifact |
@@ -211,6 +212,13 @@ require `read`.
 | GET | `/api/workflow-triggers/{trigger_id}/events` | Trigger event history |
 | GET | `/api/audit?limit=100` | Audit log |
 | GET | `/api/usage?from=&to=&format=json\|csv` | Raw usage ledger (admin/auditor only) |
+
+### Deliveries
+
+| Method | Path | Result |
+| --- | --- | --- |
+| GET | `/api/deliveries?run_id=&status=` | List outbound deliveries (operator/auditor) |
+| POST | `/api/deliveries/{delivery_id}/retry` | One bounded manual (re)attempt (operator, `202`) |
 
 ## 5. Workers and Workspaces
 
@@ -642,9 +650,68 @@ Use `--db /path/to/atlas.sqlite` to override `ATLAS_DB`. Atlas exports raw CDR
 source data only; Fleet/NT systems perform later aggregation, rating, and
 invoicing.
 
-## 14. OpenAPI 3.1
+## 14. Deliveries and the Return Path
 
-[openapi.yaml](openapi.yaml) defines 51 paths and 70 operations, including
+OB-1 subscribes an outbound delivery sender to the same `workflow_run_completed`
+event the engine already emits internally (see
+[Input Adapter Contract §7](input-adapter-contract.md#7-return-path-forward-reference)
+and the
+[Input Adapter & Return Path Plan](../plans/input-adapter-return-path-plan.md)).
+When a run reaches `succeeded` or `failed` and its input carries
+`_meta.reply.mode: "webhook"` with a `callback_url`, Atlas POSTs a signed result
+to that URL — a failure-isolated side effect that never changes the run's own
+outcome.
+
+```bash
+curl -sS -H 'Authorization: Bearer <operator-token>' \
+  "$BASE_URL/api/deliveries?run_id=wfr_xxx"
+curl -sS -X POST -H 'Authorization: Bearer <operator-token>' \
+  "$BASE_URL/api/deliveries/dlv_xxx/retry"
+curl -sS -X POST -H 'Authorization: Bearer <operator-token>' \
+  "$BASE_URL/api/workflow-runs/wfr_xxx/deliver"
+```
+
+The signed body:
+
+```json
+{
+  "delivery_id": "dlv_xxx",
+  "run_id": "wfr_xxx",
+  "state": "succeeded",
+  "correlation_id": "line:U1234:msg-4f2a",
+  "artifacts": [{"key": "reply_letter", "kind": "text", "content": "…"}],
+  "signed_at": "2026-07-01T09:13:11Z"
+}
+```
+
+signed with header `X-Atlas-Signature: sha256=<hex>` — HMAC-SHA256 over
+`ATLAS_SECRET_KEY`, the same primitive as the signed usage export
+([§13](#13-usage-metering-and-export)), computed over the exact bytes POSTed.
+A `callback_url` must resolve to a host covered by `ATLAS_OUTBOUND_ALLOWLIST`
+(comma-separated hostnames or CIDRs; matched by exact hostname, or by every
+resolved address falling inside an allowlisted CIDR). **An empty allowlist
+disables outbound delivery entirely** (secure default); a disallowed or
+private target is recorded `blocked` and never sent. A missing
+`ATLAS_SECRET_KEY` also refuses to send (never unsigned).
+
+`status` is one of `pending`, `delivered`, `failed`, or `blocked`. A failed
+attempt is retried with a short bounded backoff up to
+`ATLAS_OUTBOUND_MAX_ATTEMPTS` (default 5, `ATLAS_OUTBOUND_TIMEOUT` seconds per
+attempt, default 10) before being dead-lettered as `failed`. `delivery_id` is
+stable across every retry of the same delivery so a receiver can dedupe.
+`POST /api/deliveries/{delivery_id}/retry` gives a `failed` or `blocked`
+delivery one more bounded attempt (re-validating the callback against the
+current allowlist); `POST /api/workflow-runs/{run_id}/deliver` (re)sends using
+the run's own `_meta.reply.callback_url` regardless of the original `mode`.
+Both routes require the run to have already completed.
+
+If `_meta.reply` is absent or `mode: "none"`, the adapter instead polls
+`GET /api/workflow-runs/{run_id}` until terminal, then reads
+`GET /api/workflow-runs/{run_id}/artifacts`.
+
+## 15. OpenAPI 3.1
+
+[openapi.yaml](openapi.yaml) defines 58 paths and 77 operations, including
 security schemes, parameters, request bodies, response wrappers, and schema
 references. It can drive Swagger UI, Redoc, code generation, or contract tests.
 
@@ -658,7 +725,7 @@ IDs, cycle guards, manager/human edge coupling, quorum, or live worker/workspace
 references. See the
 [Visual Workflow Builder Specification](workflow-visual-builder-spec-en.md).
 
-## 15. API client checklist
+## 16. API client checklist
 
 - Set timeouts for JSON requests, but do not use a short timeout for SSE.
 - Persist the latest SSE `seq` and reconnect with `after`.
