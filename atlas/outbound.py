@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import http.client
@@ -9,6 +10,7 @@ import socket
 import ssl
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -264,6 +266,40 @@ class OutboundService:
     def __init__(self, db: Database, settings: OutboundSettings):
         self.db = db
         self.settings = settings
+        # Delivery ids with an attempt loop currently running. claim_delivery() dedupes row
+        # CREATION, but two senders (a live completion vs the startup reconcile scan, or a
+        # manual retry) could still both drive the SAME row: the loser's failure would then
+        # overwrite the winner's `delivered`. Every sender lives in this process (no attempt
+        # thread survives a restart — that is what reconcile is for), so an in-process claim
+        # is sufficient; a DB lease would only matter if delivery ever went multi-process.
+        self._inflight: set[str] = set()
+        self._inflight_lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def _claimed(self, delivery_id: str) -> Iterator[bool]:
+        """Yield True iff this caller now exclusively owns attempts for delivery_id."""
+        with self._inflight_lock:
+            if delivery_id in self._inflight:
+                yield False
+                return
+            self._inflight.add(delivery_id)
+        try:
+            yield True
+        finally:
+            with self._inflight_lock:
+                self._inflight.discard(delivery_id)
+
+    def _drive_owned(self, delivery: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
+        """Claim ownership, RE-READ the row, and only drive it if it is still pending — by the
+        time we win the claim the previous owner may already have finished it, and re-sending a
+        terminal row is exactly the delivered->failed regression this guard exists to prevent."""
+        with self._claimed(delivery["id"]) as owned:
+            if not owned:
+                return delivery  # someone else is mid-attempt; they will finish it
+            current = self.db.get_delivery(delivery["id"]) or delivery
+            if current["status"] != "pending":
+                return current
+            return self._run_to_completion(current, run)
 
     def deliver_run_completion(self, run: dict[str, Any]) -> dict[str, Any] | None:
         """Call once, right after a run reaches succeeded/failed (from the run's own background
@@ -291,7 +327,7 @@ class OutboundService:
         )
         if not created:
             return delivery  # another path already owns this run's completion delivery
-        return self._run_to_completion(delivery, run)
+        return self._drive_owned(delivery, run)
 
     def deliver_run(self, run: dict[str, Any]) -> dict[str, Any]:
         """POST /api/workflow-runs/{id}/deliver: one manual, immediate (re)send. `mode` need not
@@ -315,8 +351,13 @@ class OutboundService:
         run = self.db.get_workflow_run(delivery["run_id"])
         if not run:
             raise ValueError(f"delivery {delivery_id} has no workflow run")
-        delivery = self.db.update_delivery(delivery_id, status="pending") or delivery
-        return self._attempt(delivery, run)
+        with self._claimed(delivery_id) as owned:
+            if not owned:
+                # Forcing status back to `pending` under a live attempt loop would stomp the
+                # outcome that loop is about to write; the operator can retry once it settles.
+                raise ValueError(f"delivery {delivery_id} already has an attempt in progress")
+            delivery = self.db.update_delivery(delivery_id, status="pending") or delivery
+            return self._attempt(delivery, run)
 
     def _create_delivery(self, run_id: str, callback_url: str, correlation_id: Any) -> dict[str, Any]:
         return self.db.create_delivery(
@@ -342,7 +383,7 @@ class OutboundService:
                 continue  # a concurrent live attempt may have already moved it
             run = self.db.get_workflow_run(delivery["run_id"])
             if run:
-                self._run_to_completion(delivery, run)
+                self._drive_owned(delivery, run)
         for run_id in self.db.runs_missing_webhook_delivery():
             run = self.db.get_workflow_run(run_id)
             if run:
