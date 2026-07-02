@@ -168,7 +168,8 @@ the outgoing edges; Reject fails the run. For a multi-choice gate add
 **Policy keys** used here:
 
 - `max_jobs` — max worker jobs per run.
-- `max_iterations` — max total node executions (loop guard).
+- `max_iterations` — max worker/manager jobs started per run (loop guard); human gates and
+  joins don't start jobs, so they don't count against it.
 - `max_attempts_per_node` — retries allowed per node.
 - `max_budget_units` — total abstract cost cap (each worker node costs `budget_units`,
   default `1`). This is **not** money or tokens.

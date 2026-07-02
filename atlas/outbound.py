@@ -340,7 +340,13 @@ class OutboundService:
         if not isinstance(callback_url, str) or not callback_url:
             raise ValueError("workflow run has no _meta.reply.callback_url configured")
         delivery = self._create_delivery(run["id"], callback_url, reply.get("correlation_id") if reply else None)
-        return self._attempt(delivery, run)
+        with self._claimed(delivery["id"]) as owned:
+            if not owned:
+                # Startup reconcile scans ALL pending rows, so it can grab this freshly-created
+                # one; if it's already driving it, let it finish rather than double-POST and race
+                # delivered<->failed on the same row.
+                return self.db.get_delivery(delivery["id"]) or delivery
+            return self._attempt(delivery, run)
 
     def retry_delivery(self, delivery_id: str) -> dict[str, Any]:
         """POST /api/deliveries/{id}/retry: one bounded manual attempt, re-validating the

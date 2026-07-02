@@ -6,7 +6,7 @@ import hashlib
 import hmac
 import io
 import json
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -38,11 +38,15 @@ USAGE_CSV_FIELDS = (
 
 
 def normalize_usage_range(from_at: str | None, to_at: str | None) -> tuple[str | None, str | None]:
-    normalized_from = _normalize_boundary(from_at, end=False)
-    normalized_to = _normalize_boundary(to_at, end=True)
-    if normalized_from and normalized_to and _parse_timestamp(normalized_from) > _parse_timestamp(normalized_to):
+    raw_from = _boundary_dt(from_at, end=False)
+    raw_to = _boundary_dt(to_at, end=True)
+    # Order the RAW endpoints, before snapping. A sub-second-wide-but-valid interval
+    # (from=..:00.1Z < to=..:00.9Z) is legitimate and must yield an empty result set — snapping
+    # legitimately inverts it (from ceils to ..:01Z, to floors to ..:00Z), which the query
+    # returns as zero rows; it is NOT a client error.
+    if raw_from and raw_to and raw_from > raw_to:
         raise ValueError("usage from must not be after to")
-    return normalized_from, normalized_to
+    return _snap(raw_from, end=False), _snap(raw_to, end=True)
 
 
 def summarize_usage(events: list[dict[str, Any]]) -> dict[str, int | float]:
@@ -186,7 +190,9 @@ def _signature(payload: dict[str, Any], secret_key: str) -> str:
     return hmac.new(secret_key.encode("utf-8"), encoded, hashlib.sha256).hexdigest()
 
 
-def _normalize_boundary(value: str | None, end: bool) -> str | None:
+def _boundary_dt(value: str | None, end: bool) -> datetime | None:
+    """Parse a usage/audit range endpoint (an ISO-8601 date or timestamp) to a UTC datetime,
+    unsnapped. A bare date maps to the start (from) or end (to) of that day."""
     value = str(value or "").strip()
     if not value:
         return None
@@ -195,20 +201,42 @@ def _normalize_boundary(value: str | None, end: bool) -> str | None:
             day = datetime.fromisoformat(value).date()
         except ValueError as exc:
             raise ValueError("usage range must use an ISO-8601 date or timestamp") from exc
-        boundary = datetime.combine(day, time.max if end else time.min, tzinfo=UTC)
-    else:
-        boundary = _parse_timestamp(value)
-    return boundary.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        return datetime.combine(day, time.max if end else time.min, tzinfo=UTC)
+    return _parse_timestamp(value)  # already normalized to UTC
+
+
+def _snap(boundary: datetime | None, end: bool) -> str | None:
+    """Snap a parsed boundary to a whole second in its inclusive direction and format it ...SSZ.
+    Stored timestamps are second-resolution (now_iso() truncates microseconds) and neither string
+    nor julianday() comparison resolves sub-second boundaries reliably (julianday is a float in
+    days: ~microsecond deltas collapse). So a `to` upper bound floors (keeps the whole-second row
+    it lands on) and a `from` lower bound with any fractional part ceils to the next second (so the
+    preceding whole-second row, strictly before the boundary, is excluded)."""
+    if boundary is None:
+        return None
+    if boundary.microsecond and not end:
+        try:
+            boundary = boundary.replace(microsecond=0) + timedelta(seconds=1)
+        except OverflowError:
+            # `from` is in the last representable second with sub-second precision: the next whole
+            # second overflows datetime, and nothing can satisfy the lower bound. Surface a 400
+            # (ValueError) rather than letting OverflowError escape as a 500.
+            raise ValueError("usage from is past the maximum representable timestamp") from None
+    return boundary.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _parse_timestamp(value: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
     except ValueError as exc:
         raise ValueError("usage range must use an ISO-8601 date or timestamp") from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+    except OverflowError:
+        # An extreme but valid offset (e.g. 0001-...+14:00 or 9999-...-14:00) can push the instant
+        # outside datetime's representable range when converted to UTC. Surface a 400, not a 500.
+        raise ValueError("usage range timestamp is outside the representable range") from None
 
 
 def main(argv: list[str] | None = None) -> None:

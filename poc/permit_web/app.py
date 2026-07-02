@@ -185,6 +185,7 @@ PAGE = """<!doctype html>
 
 <script>
 const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let timer = null, runId = null;
 
 $("#f").addEventListener("submit", async (e) => {
@@ -198,29 +199,29 @@ $("#f").addEventListener("submit", async (e) => {
     runId = j.run_id;
     poll();
     timer = setInterval(poll, 1500);
-  } catch (err) { $("#panel").innerHTML = '<p style="color:#c33">ผิดพลาด: '+err.message+'</p>'; }
+  } catch (err) { $("#panel").innerHTML = '<p style="color:#c33">ผิดพลาด: '+esc(err.message)+'</p>'; }
 });
 
 async function poll() {
   if (!runId) return;
   const r = await fetch("/api/status?run_id="+encodeURIComponent(runId));
   const j = await r.json();
-  if (!r.ok) { $("#panel").innerHTML = '<p style="color:#c33">'+(j.error||"status error")+'</p>'; clearInterval(timer); return; }
+  if (!r.ok) { $("#panel").innerHTML = '<p style="color:#c33">'+esc(j.error||"status error")+'</p>'; clearInterval(timer); return; }
   render(j);
   if (["succeeded","failed","cancelled"].includes(j.state)) clearInterval(timer);
 }
 
 function render(j) {
-  let h = '<p>สถานะ run: <span class="state">'+j.state+'</span> <span class="muted">('+runId+')</span></p>';
+  let h = '<p>สถานะ run: <span class="state">'+esc(j.state)+'</span> <span class="muted">('+esc(runId)+')</span></p>';
   if (j.approval) {
     h += '<div class="step gate"><h3>รออนุมัติจากเจ้าหน้าที่</h3>'
-       + '<p class="muted">'+(j.approval.reason||"")+'</p>'
+       + '<p class="muted">'+esc(j.approval.reason||"")+'</p>'
        + '<button onclick="decide(\\'approve\\')">อนุมัติ</button> '
        + '<button class="reject" onclick="decide(\\'reject\\')">ปฏิเสธ</button></div>';
   }
   for (const a of (j.artifacts||[])) {
-    h += '<div class="step"><h3>'+a.key+' <span class="muted">('+a.kind+')</span></h3><pre>'
-       + (typeof a.content === "string" ? a.content : JSON.stringify(a.content, null, 2)) + '</pre></div>';
+    h += '<div class="step"><h3>'+esc(a.key)+' <span class="muted">('+esc(a.kind)+')</span></h3><pre>'
+       + esc(typeof a.content === "string" ? a.content : JSON.stringify(a.content, null, 2)) + '</pre></div>';
   }
   if (j.state === "succeeded") h += '<p style="color:#2b6">เสร็จสมบูรณ์ — ได้หนังสือแจ้งผลแล้ว</p>';
   if (j.state === "failed") h += '<p style="color:#c33">run ล้มเหลว (เช่น ถูกปฏิเสธที่ human gate)</p>';

@@ -90,6 +90,8 @@ def main(argv: list[str] | None = None) -> None:
         with db.as_actor("atlas-admin-cli"):
             result = db.purge_artifacts(cutoff, upload_dir=upload_dir, dry_run=args.dry_run)
         print(json.dumps(result, ensure_ascii=True, indent=2))
+        if result["failures"]:
+            raise SystemExit(f"retention purge left {len(result['failures'])} file(s) undeleted")
         return
     print(json.dumps({"users": db.list_users()}, ensure_ascii=True, indent=2))
 
