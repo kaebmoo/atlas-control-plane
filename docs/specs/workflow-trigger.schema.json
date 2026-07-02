@@ -33,7 +33,7 @@
               "required": ["interval_minutes"],
               "additionalProperties": false,
               "properties": {
-                "interval_minutes": {"type": "number", "exclusiveMinimum": 0}
+                "interval_minutes": {"type": "number", "minimum": 0.016666666666666666, "description": "Minutes between fires; at least 1 second (1/60). The scheduler runs at 1-second resolution, so a smaller interval would never advance next_fire_at."}
               }
             },
             {

@@ -171,6 +171,27 @@ def main() -> None:
                 {"workflow_definition_id": workflow_id, "name": "Interval", "type": "schedule", "config": {"interval_minutes": 5}},
             )["trigger"]
             assert schedule["next_fire_at"]
+            # An absurd interval overflows timedelta — it must be a clean 400, not an HTTP 500.
+            assert "interval_minutes is too large" in request_error(
+                base_url, "POST", "/api/workflow-triggers",
+                {"workflow_definition_id": workflow_id, "name": "Huge", "type": "schedule", "config": {"interval_minutes": 1e15}},
+            )["error"]
+            # A sub-second interval rounds to next_fire_at == now (never advances) — reject as 400.
+            assert "at least 1 second" in request_error(
+                base_url, "POST", "/api/workflow-triggers",
+                {"workflow_definition_id": workflow_id, "name": "TooSmall", "type": "schedule", "config": {"interval_minutes": 0.001}},
+            )["error"]
+            # NaN (JSON admits it) slips a plain <= 0 check — must be a clean domain 400, not a leak.
+            assert "must be positive" in request_error(
+                base_url, "POST", "/api/workflow-triggers",
+                {"workflow_definition_id": workflow_id, "name": "NaN", "type": "schedule", "config": {"interval_minutes": float("nan")}},
+            )["error"]
+            # The 1-second boundary (1/60 min) is the smallest interval that advances — accepted.
+            boundary_trigger = request(
+                base_url, "POST", "/api/workflow-triggers",
+                {"workflow_definition_id": workflow_id, "name": "OneSecond", "type": "schedule", "config": {"interval_minutes": 1 / 60}},
+            )["trigger"]
+            assert boundary_trigger["next_fire_at"]
             disabled = request(base_url, "PUT", f"/api/workflow-triggers/{schedule['id']}", {"enabled": False})["trigger"]
             assert not disabled["enabled"]
             assert schedule["id"] not in {item["id"] for item in runtime.db.list_workflow_triggers(enabled=True)}
@@ -191,7 +212,7 @@ def main() -> None:
             assert request(base_url, "DELETE", f"/api/workflow-triggers/{trigger['id']}")["deleted"]
             assert request(base_url, "DELETE", f"/api/workflows/{workflow_id}")["deleted"]
 
-            bad = request_error(base_url, "POST", f"/api/workflows/{workflow_id}/validate")
+            bad = request_error(base_url, "POST", f"/api/workflows/{workflow_id}/validate", status=404)
             assert bad["error"] == "not found"
         finally:
             server.shutdown()
@@ -765,12 +786,17 @@ def request_binary(
         return {"body": raw, "json": json.loads(raw), "headers": dict(exc.headers)}
 
 
-def request_error(base_url: str, method: str, path: str, payload: dict | None = None) -> dict:
+def request_error(base_url: str, method: str, path: str, payload: dict | None = None, status: int = 400) -> dict:
+    """Expect the request to fail with exactly `status` (default 400) and return the error body.
+    Asserting the code matters: without it a 500 carrying the same message (e.g. an unhandled
+    exception whose str() matches the expected ValueError text) would satisfy a message-only
+    assertion and hide a server bug."""
     try:
-        return request(base_url, method, path, payload)
+        request(base_url, method, path, payload)
     except urllib.error.HTTPError as exc:
+        assert exc.code == status, f"{method} {path}: expected HTTP {status}, got {exc.code}"
         return json.loads(exc.read().decode("utf-8"))
-    raise AssertionError("expected HTTPError")
+    raise AssertionError(f"{method} {path}: expected HTTP {status}, request succeeded")
 
 
 def request_text(base_url: str, path: str) -> str:

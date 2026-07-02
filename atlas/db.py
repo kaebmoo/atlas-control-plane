@@ -615,6 +615,9 @@ class Database:
     ) -> list[dict[str, Any]]:
         where = []
         params: list[Any] = []
+        # from_at/to_at arrive snapped to whole seconds by normalize_usage_range, matching the
+        # second-resolution stored created_at, so lexicographic comparison on the uniform
+        # ...SSZ ISO format is exact (and dodges julianday()'s sub-millisecond float collapse).
         if from_at:
             where.append("created_at >= ?")
             params.append(from_at)
@@ -646,7 +649,9 @@ class Database:
 
         with self.connect() as conn:
             usage = conn.execute(
-                "SELECT COUNT(*) AS events, COALESCE(SUM(units), 0) AS units FROM usage_events"
+                "SELECT COUNT(*) AS events, "
+                "COALESCE(SUM(CASE WHEN kind = 'workflow_run' THEN units ELSE 0 END), 0) AS budget_units "
+                "FROM usage_events"
             ).fetchone()
             return {
                 "workers": by_column(conn, "workers", "status"),
@@ -657,7 +662,9 @@ class Database:
                 "approvals_pending": count(conn, "SELECT COUNT(*) FROM approvals WHERE state = 'pending'"),
                 "artifacts": count(conn, "SELECT COUNT(*) FROM artifacts"),
                 "usage_events": int(usage["events"]),
-                "usage_units": int(usage["units"]),
+                # units are per-kind incommensurable (job=count, workflow_run=budget_units), so
+                # expose only the workflow-run budget total — matches summarize_usage().budget_units.
+                "usage_units": int(usage["budget_units"]),
                 "schema_version": count(conn, "SELECT COALESCE(MAX(version), 0) FROM schema_version"),
             }
 
@@ -711,11 +718,13 @@ class Database:
     def list_usage_events(self, from_at: str | None = None, to_at: str | None = None) -> list[dict[str, Any]]:
         where = []
         params: list[Any] = []
+        # See list_audit: boundaries are second-snapped to match second-resolution created_at,
+        # so a lexicographic ...SSZ comparison is exact without julianday()'s float rounding.
         if from_at:
-            where.append("julianday(created_at) >= julianday(?)")
+            where.append("created_at >= ?")
             params.append(from_at)
         if to_at:
-            where.append("julianday(created_at) <= julianday(?)")
+            where.append("created_at <= ?")
             params.append(to_at)
         sql = "SELECT * FROM usage_events"
         if where:
@@ -1577,9 +1586,14 @@ class Database:
         terminal state (or has been deleted). Artifacts of live runs are never touched —
         a paused/waiting run may still template `{artifact.<key>}` into a prompt.
         For file_ref artifacts the on-disk bytes under `upload_dir` are removed too, with
-        the same parent-containment check as the download path. Deleting bytes AFTER the
-        row commit means a crash can orphan a file (reclaimed by the next purge pass) but
-        can never leave a row pointing at nothing."""
+        the same parent-containment check as the download path. We unlink the bytes BEFORE
+        dropping the row, per artifact: an unlink that raises leaves the row in place so a
+        later pass retries, rather than committing a delete that orphans the file forever
+        (there is no separate orphan-file sweep to reclaim it). A crash after unlink but
+        before the row delete leaves a row pointing at a missing file — self-healing, since
+        the next pass re-selects it and the download path already reports it as missing.
+        A failed unlink is recorded in result["failures"] (not swallowed) so a persistent
+        permission error surfaces instead of looking like a clean "purged: 0"."""
         terminal = ("succeeded", "failed", "cancelled")
         with self.connect() as conn:
             rows = conn.execute(
@@ -1598,23 +1612,29 @@ class Database:
             "purged": len(candidates),
             "files_deleted": 0,
             "ids": [artifact["id"] for artifact in candidates],
+            "failures": [],
         }
         if dry_run or not candidates:
             return result
+        root = upload_dir.resolve() if upload_dir is not None else None
+        deleted_ids: list[str] = []
         with self._lock, self.connect() as conn:
-            conn.executemany(
-                "DELETE FROM artifacts WHERE id = ?",
-                [(artifact["id"],) for artifact in candidates],
-            )
-        if upload_dir is not None:
-            root = upload_dir.resolve()
             for artifact in candidates:
-                if artifact.get("kind") != "file_ref":
-                    continue
-                target = (root / str(artifact.get("content") or "")).resolve()
-                if target.parent == root and target.is_file():
-                    target.unlink(missing_ok=True)
-                    result["files_deleted"] += 1
+                if root is not None and artifact.get("kind") == "file_ref":
+                    target = (root / str(artifact.get("content") or "")).resolve()
+                    if target.parent == root and target.is_file():
+                        try:
+                            target.unlink()
+                        except OSError as exc:
+                            # Keep the row so the next pass retries; surface the failure so a
+                            # persistent (e.g. permission) error can't masquerade as "purged: 0".
+                            result["failures"].append({"id": artifact["id"], "error": str(exc)})
+                            continue
+                        result["files_deleted"] += 1
+                conn.execute("DELETE FROM artifacts WHERE id = ?", (artifact["id"],))
+                deleted_ids.append(artifact["id"])
+        result["purged"] = len(deleted_ids)
+        result["ids"] = deleted_ids
         self.audit(
             "artifact.purge",
             "artifact",

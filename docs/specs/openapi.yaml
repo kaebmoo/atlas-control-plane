@@ -1931,6 +1931,7 @@ components:
         kind: {enum: [text, json, markdown, file_ref, summary, decision], default: text}
         content: {}
         metadata: {type: object, additionalProperties: true}
+        classification: {enum: [public, internal, confidential, secret]}
       additionalProperties: false
 
     Artifact:

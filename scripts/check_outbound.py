@@ -344,6 +344,42 @@ def main() -> None:
             delivery_i_after = runtime.db.get_delivery(delivery_i["id"])
             assert delivery_i_after and delivery_i_after["status"] == "delivered", delivery_i_after
 
+            # J. Manual deliver_run builds its OWN fresh (random-id) delivery row and drives it
+            #    directly; it must hold the attempt claim for that row so a restart reconcile —
+            #    which scans ALL pending rows, not just deterministic completion ids — can't grab
+            #    it mid-flight and double-send / regress delivered->failed. Poll-mode reply so the
+            #    completion path never auto-delivers: the manual call is the only sender.
+            MockReceiverHandler.race_first_seen.clear()
+            MockReceiverHandler.race_release.clear()
+            race_before = len([item for item in MockReceiverHandler.received if item["path"] == "/reply/race"])
+            created_j = runtime.db.create_workflow_run(
+                {
+                    "workflow_definition_id": definition["id"],
+                    "name": "Manual-deliver poll run",
+                    "state": "succeeded",
+                    "input": {"_meta": {"reply": {"mode": "poll", "callback_url": f"{receiver_base}/reply/race", "correlation_id": "corr-manual"}}},
+                    "started_at": now_iso(),
+                    "finished_at": now_iso(),
+                }
+            )
+            run_j = runtime.db.get_workflow_run(created_j["id"])
+            assert not runtime.db.list_deliveries(run_id=run_j["id"]), "poll-mode run must not auto-deliver"
+            deliver_thread = threading.Thread(target=runtime.outbound.deliver_run, args=(run_j,))
+            deliver_thread.start()
+            assert MockReceiverHandler.race_first_seen.wait(timeout=5), "manual deliver never reached the receiver"
+            # The manual row is pending AND claimed by deliver_run; a racing reconcile must skip it.
+            reconcile_j = threading.Thread(target=runtime.outbound.reconcile)
+            reconcile_j.start()
+            reconcile_j.join(timeout=5)
+            assert not reconcile_j.is_alive(), "reconcile did not return while the manual delivery was owned"
+            MockReceiverHandler.race_release.set()
+            deliver_thread.join(timeout=5)
+            manual_rows = runtime.db.list_deliveries(run_id=run_j["id"])
+            assert len(manual_rows) == 1 and manual_rows[0]["status"] == "delivered", manual_rows
+            assert manual_rows[0]["attempts"] == 1, manual_rows
+            race_after = len([item for item in MockReceiverHandler.received if item["path"] == "/reply/race"])
+            assert race_after - race_before == 1, "manual delivery double-sent under a reconcile race"
+
             # GET /api/deliveries lists everything created above, filterable by run_id/status.
             # (run_a also carries the synthetic blocked_seed/userinfo_seed/query_secret_seed/
             # slowheader_seed deliveries from scenarios B, E, and H.)

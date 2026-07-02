@@ -17,13 +17,19 @@ the drift that matters — a route or subroute vanishing from any of the three d
 from __future__ import annotations
 
 import ast
+import json
 import re
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 DOCS = ROOT / "docs"
+
+from atlas.db import ARTIFACT_CLASSIFICATIONS  # noqa: E402
+from atlas.workflows import next_fire_at_for_trigger  # noqa: E402
 
 
 def _tracked_files() -> set[str]:
@@ -150,9 +156,80 @@ def check_routes() -> list[str]:
     return problems
 
 
+def check_artifact_classification_contract() -> list[str]:
+    """The db artifact-create path accepts a top-level `classification` (validated against
+    ARTIFACT_CLASSIFICATIONS), so the closed ArtifactInput schema must document the same field
+    with the same enum — otherwise a strict generated client rejects a request the server accepts."""
+    spec = (DOCS / "specs" / "openapi.yaml").read_text(encoding="utf-8")
+    block = re.search(r"\n    ArtifactInput:\n(.*?)\n    [A-Za-z]", spec, re.DOTALL)
+    if not block:
+        return ["openapi.yaml: ArtifactInput schema not found"]
+    enum = re.search(r"classification:\s*\{enum:\s*\[([^\]]+)\]\}", block.group(1))
+    if not enum:
+        return ["openapi.yaml: ArtifactInput is missing the `classification` enum the runtime accepts"]
+    documented = {value.strip() for value in enum.group(1).split(",")}
+    if documented != set(ARTIFACT_CLASSIFICATIONS):
+        return [f"openapi.yaml: ArtifactInput.classification enum {sorted(documented)} != runtime {sorted(ARTIFACT_CLASSIFICATIONS)}"]
+    return []
+
+
+def check_usage_range_doc_precision() -> list[str]:
+    """normalize_usage_range snaps from/to to whole seconds, so the usage-response examples in
+    BOTH language references must show whole-second precision — no microsecond-normalized
+    boundaries (`.000000Z` / `.999999Z`) — and stay in EN/TH sync."""
+    problems = []
+    for name in ("api-reference-en.md", "api-reference-th.md"):
+        text = (DOCS / "specs" / name).read_text(encoding="utf-8")
+        if ".000000Z" in text or ".999999Z" in text:
+            problems.append(f"{name}: usage from/to example shows obsolete sub-second precision (runtime snaps to whole seconds)")
+    return problems
+
+
+def check_trigger_interval_schema_parity() -> list[str]:
+    """Bind workflow-trigger.schema.json's documented interval_minutes minimum to the runtime
+    floor: the schema must say 1/60 (the scheduler's 1-second resolution), the runtime must
+    ACCEPT exactly that boundary with a next_fire_at that advances, and must REJECT a value
+    below it. Either side drifting alone fails here."""
+    schema = json.loads((DOCS / "specs" / "workflow-trigger.schema.json").read_text(encoding="utf-8"))
+    config_options = schema.get("$defs", {}).get("schedule", {}).get("properties", {}).get("config", {}).get("oneOf", [])
+    interval = next(
+        (
+            option["properties"]["interval_minutes"]
+            for option in config_options
+            if "interval_minutes" in option.get("properties", {})
+        ),
+        None,
+    )
+    if interval is None:
+        return ["workflow-trigger.schema.json: interval_minutes schema not found"]
+    minimum = interval.get("minimum")
+    if minimum != 1 / 60:
+        return [f"workflow-trigger.schema.json: interval_minutes minimum is {minimum!r}, runtime floor is 1/60"]
+    problems = []
+    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    try:
+        fired = next_fire_at_for_trigger({"type": "schedule", "config": {"interval_minutes": minimum}}, base)
+        if not fired or fired <= "2026-01-01T12:00:00Z":
+            problems.append(f"runtime accepts the schema minimum but next_fire_at does not advance: {fired!r}")
+    except ValueError as exc:
+        problems.append(f"runtime rejects the documented schema minimum {minimum!r}: {exc}")
+    try:
+        next_fire_at_for_trigger({"type": "schedule", "config": {"interval_minutes": minimum * 0.5}}, base)
+        problems.append("runtime accepts an interval below the documented schema minimum")
+    except ValueError:
+        pass
+    return problems
+
+
 def main() -> None:
     tracked = _tracked_files()
-    problems = check_readme_links(tracked) + check_routes()
+    problems = (
+        check_readme_links(tracked)
+        + check_routes()
+        + check_artifact_classification_contract()
+        + check_usage_range_doc_precision()
+        + check_trigger_interval_schema_parity()
+    )
     if problems:
         print("docs check FAILED:")
         for problem in problems:

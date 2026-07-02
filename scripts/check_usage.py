@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 from atlas.app import AtlasHttpServer, AtlasRuntime
 from atlas.config import Config
 from atlas.usage import (
+    normalize_usage_range,
     summarize_usage,
     usage_threshold_alert,
     verify_signed_usage_export_file,
@@ -146,6 +147,66 @@ def main() -> None:
             # the volume alert never touches budget_units (the per-run cost guard)
             assert "budget_units" not in crossed
             assert summarize_usage(ledger)["budget_units"] == 3
+
+            # Range/precision contract — stored created_at is second-resolution, and boundaries
+            # are snapped to whole seconds in their inclusive direction, so for both audit and
+            # usage:
+            #   * an inclusive `to` equal to an event's own timestamp keeps that event;
+            #   * a `from` even ONE MICROSECOND after it drops the event that precedes the
+            #     boundary. The +1us case is the teeth: a julianday()/float comparator collapses
+            #     sub-millisecond deltas and would wrongly keep the row (the bug this locks).
+            def assert_boundaries(name, ts, list_fn, row_id):
+                _, to_exact = normalize_usage_range(None, ts)
+                assert any(r["id"] == row_id for r in list_fn(to_at=to_exact)), f"{name} to_exact {to_exact}"
+                from_exact, _ = normalize_usage_range(ts, None)
+                assert any(r["id"] == row_id for r in list_fn(from_at=from_exact)), f"{name} from_exact {from_exact}"
+                for delta in (".000001Z", ".000500Z", ".900000Z"):  # +1us, +0.5ms, +0.9s
+                    from_after, _ = normalize_usage_range(ts[:-1] + delta, None)
+                    assert all(r["id"] != row_id for r in list_fn(from_at=from_after)), f"{name} from{delta} {from_after}"
+
+            assert_boundaries("usage", run_event["created_at"], runtime.db.list_usage_events, run_event["id"])
+            newest_audit = runtime.db.list_audit(50)[0]
+            assert_boundaries("audit", newest_audit["created_at"], runtime.db.list_audit, newest_audit["id"])
+
+            # A valid sub-second-wide window (from < to, both inside one second) must be accepted
+            # and return zero rows — NOT rejected as reversed after snapping inverts it.
+            second = run_event["created_at"][:-1]
+            narrow_from, narrow_to = normalize_usage_range(second + ".100000Z", second + ".900000Z")
+            assert runtime.db.list_usage_events(from_at=narrow_from, to_at=narrow_to) == [], (narrow_from, narrow_to)
+            assert runtime.db.list_audit(from_at=narrow_from, to_at=narrow_to) == [], (narrow_from, narrow_to)
+            # A genuinely reversed raw range is still a 400 (ValueError), decided pre-snap.
+            try:
+                normalize_usage_range("2100-01-01T00:00:00Z", "2000-01-01T00:00:00Z")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("reversed range must raise ValueError")
+            # Ceil at the datetime maximum must surface as a 400 (ValueError), never an HTTP 500.
+            try:
+                normalize_usage_range("9999-12-31T23:59:59.000001Z", None)
+            except ValueError:
+                pass
+            except OverflowError:
+                raise AssertionError("ceil overflow escaped as OverflowError (HTTP 500) instead of ValueError")
+            else:
+                raise AssertionError("ceil overflow at datetime max must raise ValueError (HTTP 400)")
+
+            # Extreme-but-valid timezone offsets overflow while converting to UTC, BEFORE the snap
+            # guard — both datetime edges, in either slot, must be a 400 (ValueError), never a 500.
+            for edge in ("0001-01-01T00:00:00+14:00", "9999-12-31T23:59:59-14:00"):
+                for from_at, to_at in ((edge, None), (None, edge)):
+                    try:
+                        normalize_usage_range(from_at, to_at)
+                    except ValueError:
+                        pass
+                    except OverflowError:
+                        raise AssertionError(f"offset overflow escaped as OverflowError (HTTP 500): {edge}")
+                    else:
+                        raise AssertionError(f"offset overflow must raise ValueError (HTTP 400): {edge}")
+
+            # metrics usage_units is the workflow-run budget total (3), not job(1)+run(3) mixed (4).
+            snapshot = runtime.db.metrics_snapshot()
+            assert snapshot["usage_units"] == 3 and snapshot["usage_events"] == 2, snapshot
 
             status, usage_json, _ = request_json(base_url, "GET", "/api/usage?format=json", token=tokens["admin"])
             assert status == 200 and usage_json["totals"]["workflow_runs"] == 1

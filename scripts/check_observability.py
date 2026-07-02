@@ -154,6 +154,38 @@ def main() -> None:
                 admin.main(["purge-artifacts", "--older-than-days", "1", "--dry-run"])
             cli_result = json.loads(stdout.getvalue())
             assert cli_result["dry_run"] is True and cli_result["purged"] == 0, cli_result
+
+            # 6) purge must surface a file-deletion failure, not silently report success: inject
+            #    an OSError from unlink() and assert the row + file survive and the failure is
+            #    reported (a permanent permission error must not masquerade as a clean "purged: 0").
+            fail_run = runtime.db.create_workflow_run(
+                {"workflow_definition_id": gate_definition["id"], "name": "purge-fail",
+                 "state": "succeeded", "started_at": backdated, "finished_at": backdated}
+            )
+            fail_file = runtime.upload_dir / "purge-fail.bin"
+            fail_file.write_bytes(b"bytes")
+            fail_artifact = runtime.db.create_artifact(
+                {"run_id": fail_run["id"], "key": "eviction", "kind": "file_ref", "content": "purge-fail.bin"}
+            )
+            with runtime.db._lock, runtime.db.connect() as conn:  # test-only backdate
+                conn.execute("UPDATE artifacts SET created_at = ? WHERE id = ?", (backdated, fail_artifact["id"]))
+            with mock.patch("pathlib.Path.unlink", side_effect=OSError("permission denied")):
+                fail_result = runtime.db.purge_artifacts(cutoff, upload_dir=runtime.upload_dir, dry_run=False)
+            assert fail_result["failures"] and fail_result["failures"][0]["id"] == fail_artifact["id"], fail_result
+            assert fail_result["files_deleted"] == 0 and fail_artifact["id"] not in fail_result["ids"], fail_result
+            assert runtime.db.get_artifact(fail_artifact["id"]), "row must survive a failed unlink (retry next pass)"
+            assert fail_file.is_file(), "file bytes must remain when unlink fails"
+
+            # the CLI wrapper turns that failure into a non-zero exit (row still present to retry).
+            with mock.patch.dict("os.environ", cli_env), \
+                 mock.patch("pathlib.Path.unlink", side_effect=OSError("permission denied")), \
+                 mock.patch("sys.stdout", new_callable=io.StringIO):
+                try:
+                    admin.main(["purge-artifacts", "--older-than-days", "1"])
+                except SystemExit as exc:
+                    assert exc.code, exc
+                else:
+                    raise AssertionError("CLI must exit non-zero when a retention unlink fails")
         finally:
             server.shutdown()
 

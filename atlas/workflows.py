@@ -1544,9 +1544,20 @@ def next_fire_at_for_trigger(trigger: dict[str, Any], base: datetime | None = No
             minutes = float(config["interval_minutes"])
         except (TypeError, ValueError) as exc:
             raise ValueError("schedule interval_minutes must be positive") from exc
-        if minutes <= 0:
+        if minutes != minutes or minutes <= 0:  # NaN != NaN; NaN would slip a plain <= 0 (compares false)
             raise ValueError("schedule interval_minutes must be positive")
-        return _iso_utc(base + timedelta(minutes=minutes))
+        try:
+            fire_at = base + timedelta(minutes=minutes)
+        except OverflowError:
+            # An absurd interval (e.g. 1e15 minutes) overflows timedelta/datetime; reject it as a
+            # 400 rather than letting OverflowError escape the trigger-create path as a 500.
+            raise ValueError("schedule interval_minutes is too large") from None
+        # next_fire_at is stored/compared at 1-second resolution (_iso_utc truncates microseconds).
+        # A sub-second interval leaves next_fire_at == base, so the trigger is perpetually "due" and
+        # fires on the poll cadence rather than the interval — require it to advance a whole second.
+        if fire_at.replace(microsecond=0) <= base:
+            raise ValueError("schedule interval_minutes must be at least 1 second (1/60)")
+        return _iso_utc(fire_at)
 
     daily_time = config.get("daily_time")
     if isinstance(daily_time, str) and re.fullmatch(r"\d{2}:\d{2}", daily_time):
