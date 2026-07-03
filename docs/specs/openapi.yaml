@@ -1582,7 +1582,7 @@ components:
 
     UsageTotals:
       type: object
-      required: [workflow_runs, successful_workflow_runs, jobs, budget_units, wall_seconds, job_wall_seconds]
+      required: [workflow_runs, successful_workflow_runs, jobs, budget_units, wall_seconds, job_wall_seconds, tokens_prompt, tokens_output]
       properties:
         workflow_runs: {type: integer}
         successful_workflow_runs: {type: integer}
@@ -1590,6 +1590,8 @@ components:
         budget_units: {type: integer}
         wall_seconds: {type: number}
         job_wall_seconds: {type: number}
+        tokens_prompt: {type: integer, description: Sum of worker-reported prompt tokens across job events; 0 when no worker reported usage}
+        tokens_output: {type: integer, description: Sum of worker-reported output tokens across job events; 0 when no worker reported usage}
 
     UsageResponse:
       type: object

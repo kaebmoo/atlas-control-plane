@@ -213,6 +213,70 @@ def check_combined_frame_text(db: Database) -> None:
         assert final["state"] == "succeeded", f"expected succeeded, got {final['state']}"
         assert (final.get("assistant_text") or "") == "hello world", f"combined-frame text dropped: {final.get('assistant_text')!r}"
         _await_threads_drained(manager)
+        # This mock is also an old worker (no `usage` SSE event): the job succeeds and its
+        # usage row records NULL token counts, never 0 or garbage (T1a).
+        job_usage = next(e for e in db.list_usage_events() if e.get("job_id") == job["id"])
+        assert job_usage["tokens_prompt"] is None and job_usage["tokens_output"] is None, job_usage
+    finally:
+        mock.shutdown()
+        mock.server_close()
+
+
+class MalformedUsageHandler(BaseHTTPRequestHandler):
+    """Mock worker that emits only malformed `usage` frames (strings, negatives, bools,
+    ints past SQLite's 64-bit range, non-dict, non-JSON) before valid text + [DONE]."""
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def do_GET(self) -> None:
+        body = json.dumps({"ok": True}).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        body = (
+            b'event: usage\ndata: {"prompt_tokens": "many", "completion_tokens": -5}\n\n'
+            b'event: usage\ndata: {"prompt_tokens": true, "cached_input_tokens": 1.5}\n\n'
+            b'event: usage\ndata: {"prompt_tokens": 18446744073709551616, "completion_tokens": 9223372036854775808}\n\n'
+            b'event: usage\ndata: ["not", "a", "dict"]\n\n'
+            b"event: usage\ndata: not-json\n\n"
+            b"event: text\ndata: ok\n\n"
+            b"data: [DONE]\n\n"
+        )
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def check_malformed_usage_tolerated(db: Database) -> None:
+    """Malformed worker usage payloads (strings, negatives, bools, over-64-bit ints, non-dict,
+    non-JSON) must be tolerated: the job succeeds and its usage ledger row EXISTS with NULL
+    token counts — never a crash, never a bogus value, never a dropped row (an over-range int
+    reaching SQLite raises OverflowError and would lose the whole usage event) (T1a)."""
+    mock = ThreadingHTTPServer(("127.0.0.1", 0), MalformedUsageHandler)
+    threading.Thread(target=mock.serve_forever, daemon=True).start()
+    try:
+        host, port = mock.server_address
+        worker = db.upsert_worker({"base_url": f"http://{host}:{port}", "name": "bad-usage"})
+        manager = JobManager(db, request_timeout_seconds=5)
+        job = manager.submit({"prompt": "x", "worker_id": worker["id"]})
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            current = db.get_job(job["id"])
+            if current and current["state"] in {"succeeded", "failed", "cancelled"}:
+                break
+            time.sleep(0.02)
+        final = db.get_job(job["id"])
+        assert final["state"] == "succeeded", f"malformed usage must not fail the job, got {final['state']}"
+        _await_threads_drained(manager)
+        job_usage = next(e for e in db.list_usage_events() if e.get("job_id") == job["id"])
+        assert job_usage["tokens_prompt"] is None and job_usage["tokens_output"] is None, job_usage
     finally:
         mock.shutdown()
         mock.server_close()
@@ -287,6 +351,7 @@ def check_reconcile_cancelled(db: Database) -> None:
 def main() -> None:
     with TemporaryDirectory() as tmp:
         check_combined_frame_text(Database(Path(tmp) / "combined.sqlite"))
+        check_malformed_usage_tolerated(Database(Path(tmp) / "badusage.sqlite"))
         check_stream_deadline_bytedrip(Database(Path(tmp) / "drip.sqlite"))
         check_reconcile_cancelled(Database(Path(tmp) / "reconcancel.sqlite"))
         check_submit_routing_failure_no_orphan(Database(Path(tmp) / "orphan.sqlite"))

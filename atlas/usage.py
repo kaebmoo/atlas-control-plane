@@ -59,6 +59,9 @@ def summarize_usage(events: list[dict[str, Any]]) -> dict[str, int | float]:
         "budget_units": sum(int(event.get("units") or 0) for event in run_events),
         "wall_seconds": round(sum(float(event.get("seconds") or 0) for event in run_events), 6),
         "job_wall_seconds": round(sum(float(event.get("seconds") or 0) for event in job_events), 6),
+        # Additive (T1a): worker-reported token counts, NULL-tolerant for pre-usage workers.
+        "tokens_prompt": sum(int(event.get("tokens_prompt") or 0) for event in job_events),
+        "tokens_output": sum(int(event.get("tokens_output") or 0) for event in job_events),
     }
 
 
