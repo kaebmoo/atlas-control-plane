@@ -31,6 +31,31 @@ def _await_threads_drained(manager: JobManager, timeout: float = 3.0) -> None:
         time.sleep(0.01)
 
 
+def _run_mock_job(db: Database, handler: type[BaseHTTPRequestHandler], name: str, timeout: float = 5.0) -> dict:
+    """Start a loopback mock worker serving `handler`, submit one job, poll until terminal, then
+    drain the job threads (so the usage row is written) and return the final job dict. Callers
+    assert on the outcome. Factors out the identical submit→poll→drain scaffolding shared by the
+    single-job stream checks."""
+    mock = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=mock.serve_forever, daemon=True).start()
+    try:
+        host, port = mock.server_address
+        worker = db.upsert_worker({"base_url": f"http://{host}:{port}", "name": name})
+        manager = JobManager(db, request_timeout_seconds=5)
+        job = manager.submit({"prompt": "x", "worker_id": worker["id"]})
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            current = db.get_job(job["id"])
+            if current and current["state"] in {"succeeded", "failed", "cancelled"}:
+                break
+            time.sleep(0.02)
+        _await_threads_drained(manager)
+        return db.get_job(job["id"])
+    finally:
+        mock.shutdown()
+        mock.server_close()
+
+
 class MockThClawsHandler(BaseHTTPRequestHandler):
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -95,26 +120,9 @@ def check_truncated_stream_fails(db: Database) -> None:
     """A worker stream that ends without a terminal [DONE] frame (disconnect mid-output)
     must mark the job failed, not succeeded — a truncated result must never be handed off
     as complete."""
-    mock = ThreadingHTTPServer(("127.0.0.1", 0), MockThClawsHandler)
-    threading.Thread(target=mock.serve_forever, daemon=True).start()
-    try:
-        host, port = mock.server_address
-        worker = db.upsert_worker({"base_url": f"http://{host}:{port}", "name": "mock-stream"})
-        manager = JobManager(db, request_timeout_seconds=5)
-        job = manager.submit({"prompt": "hello", "worker_id": worker["id"]})
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            current = db.get_job(job["id"])
-            if current and current["state"] in {"succeeded", "failed", "cancelled"}:
-                break
-            time.sleep(0.02)
-        final = db.get_job(job["id"])
-        assert final["state"] == "failed", f"truncated stream must fail, got {final['state']}"
-        assert "DONE" in (final.get("error") or ""), final.get("error")
-        _await_threads_drained(manager)
-    finally:
-        mock.shutdown()
-        mock.server_close()
+    final = _run_mock_job(db, MockThClawsHandler, "mock-stream")
+    assert final["state"] == "failed", f"truncated stream must fail, got {final['state']}"
+    assert "DONE" in (final.get("error") or ""), final.get("error")
 
 
 def check_cancel_before_dispatch(db: Database) -> None:
@@ -193,48 +201,28 @@ class CombinedFrameHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def _assert_null_tokens(db: Database, job_id: str) -> None:
+    """The job's usage ledger row must exist and record NULL token counts (never 0/garbage,
+    never a dropped row) — the shared post-condition for any worker that reports no usable
+    usage (T1a)."""
+    job_usage = next(e for e in db.list_usage_events() if e.get("job_id") == job_id)
+    assert job_usage["tokens_prompt"] is None and job_usage["tokens_output"] is None, job_usage
+
+
 def check_combined_frame_text(db: Database) -> None:
     """A frame carrying BOTH an `id` and `text` must NOT have its text dropped (the `id` is not a
     session id, and there is no early `continue` skipping extract_text)."""
-    mock = ThreadingHTTPServer(("127.0.0.1", 0), CombinedFrameHandler)
-    threading.Thread(target=mock.serve_forever, daemon=True).start()
-    try:
-        host, port = mock.server_address
-        worker = db.upsert_worker({"base_url": f"http://{host}:{port}", "name": "combined"})
-        manager = JobManager(db, request_timeout_seconds=5)
-        job = manager.submit({"prompt": "x", "worker_id": worker["id"]})
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            current = db.get_job(job["id"])
-            if current and current["state"] in {"succeeded", "failed", "cancelled"}:
-                break
-            time.sleep(0.02)
-        final = db.get_job(job["id"])
-        assert final["state"] == "succeeded", f"expected succeeded, got {final['state']}"
-        assert (final.get("assistant_text") or "") == "hello world", f"combined-frame text dropped: {final.get('assistant_text')!r}"
-        _await_threads_drained(manager)
-        # This mock is also an old worker (no `usage` SSE event): the job succeeds and its
-        # usage row records NULL token counts, never 0 or garbage (T1a).
-        job_usage = next(e for e in db.list_usage_events() if e.get("job_id") == job["id"])
-        assert job_usage["tokens_prompt"] is None and job_usage["tokens_output"] is None, job_usage
-    finally:
-        mock.shutdown()
-        mock.server_close()
+    final = _run_mock_job(db, CombinedFrameHandler, "combined")
+    assert final["state"] == "succeeded", f"expected succeeded, got {final['state']}"
+    assert (final.get("assistant_text") or "") == "hello world", f"combined-frame text dropped: {final.get('assistant_text')!r}"
+    # This mock is also an old worker (no `usage` SSE event): NULL token counts, not 0/garbage.
+    _assert_null_tokens(db, final["id"])
 
 
-class MalformedUsageHandler(BaseHTTPRequestHandler):
+class MalformedUsageHandler(CombinedFrameHandler):
     """Mock worker that emits only malformed `usage` frames (strings, negatives, bools,
-    ints past SQLite's 64-bit range, non-dict, non-JSON) before valid text + [DONE]."""
-
-    def log_message(self, _format: str, *_args: object) -> None:
-        return
-
-    def do_GET(self) -> None:
-        body = json.dumps({"ok": True}).encode("utf-8")
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    ints past SQLite's 64-bit range, non-dict, non-JSON) before valid text + [DONE]. Reuses
+    CombinedFrameHandler's /healthz do_GET; only the POST body differs."""
 
     def do_POST(self) -> None:
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
@@ -259,27 +247,9 @@ def check_malformed_usage_tolerated(db: Database) -> None:
     non-JSON) must be tolerated: the job succeeds and its usage ledger row EXISTS with NULL
     token counts — never a crash, never a bogus value, never a dropped row (an over-range int
     reaching SQLite raises OverflowError and would lose the whole usage event) (T1a)."""
-    mock = ThreadingHTTPServer(("127.0.0.1", 0), MalformedUsageHandler)
-    threading.Thread(target=mock.serve_forever, daemon=True).start()
-    try:
-        host, port = mock.server_address
-        worker = db.upsert_worker({"base_url": f"http://{host}:{port}", "name": "bad-usage"})
-        manager = JobManager(db, request_timeout_seconds=5)
-        job = manager.submit({"prompt": "x", "worker_id": worker["id"]})
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            current = db.get_job(job["id"])
-            if current and current["state"] in {"succeeded", "failed", "cancelled"}:
-                break
-            time.sleep(0.02)
-        final = db.get_job(job["id"])
-        assert final["state"] == "succeeded", f"malformed usage must not fail the job, got {final['state']}"
-        _await_threads_drained(manager)
-        job_usage = next(e for e in db.list_usage_events() if e.get("job_id") == job["id"])
-        assert job_usage["tokens_prompt"] is None and job_usage["tokens_output"] is None, job_usage
-    finally:
-        mock.shutdown()
-        mock.server_close()
+    final = _run_mock_job(db, MalformedUsageHandler, "bad-usage")
+    assert final["state"] == "succeeded", f"malformed usage must not fail the job, got {final['state']}"
+    _assert_null_tokens(db, final["id"])
 
 
 class DripHandler(BaseHTTPRequestHandler):
