@@ -529,7 +529,8 @@ Files:
 Work:
 
 - [ ] Client methods incl. bounded 409 retry (small count, fixed delay —
-      collection follows terminal state, so contention should be transient).
+      collection follows worker stream termination, so contention should be
+      transient).
 - [ ] Safe-extractor helper (shared; the single validator any future tar
       ingestion must use).
 - [ ] Job + node `collect_files`; artifacts with metadata: relpath, sha256
