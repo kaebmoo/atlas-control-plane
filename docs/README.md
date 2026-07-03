@@ -94,6 +94,12 @@
 - [Input Adapter & Return Path Plan](plans/input-adapter-return-path-plan.md) — IA-1
   (ingress envelope + provenance→audit) และ OB-1 (signed outbound delivery / ขากลับ),
   DoD + hermetic check ต่อ milestone, additive และคง silo
+- [thClaws API Adoption Plan](plans/thclaws-api-adoption-plan.md) — approved now:
+  T0 worker contract, T1a token capture, T2 structured event UI, T3 async
+  x_callback (แล้วจึง T1b cost estimate, T4 advisory routing); deferred พร้อม
+  unblock ชัดเจน: T5–T6 file collect/push (sync-gated), T7 worker deploy,
+  T8 chat-completions (benchmark-gated); risk register + review deltas + DoD
+  ต่อ milestone
 
 ## Prompt files
 
