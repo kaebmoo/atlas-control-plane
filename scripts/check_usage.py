@@ -34,7 +34,16 @@ class MockThClawsHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         assert self.path == "/agent/run"
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        body = b"event: text\ndata: metered result\n\nevent: done\ndata: [DONE]\n\n"
+        body = (
+            b"event: text\ndata: metered result\n\n"
+            b'event: usage\ndata: {"prompt_tokens": 120, "completion_tokens": 45,'
+            b' "cached_input_tokens": 10, "cache_creation_input_tokens": 5,'
+            b' "reasoning_output_tokens": 7}\n\n'
+            # A later PARTIAL usage frame updates its own key only — it must never
+            # clobber the prompt/completion counts already seen back to NULL.
+            b'event: usage\ndata: {"reasoning_output_tokens": 9}\n\n'
+            b"event: done\ndata: [DONE]\n\n"
+        )
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(body)))
@@ -115,7 +124,15 @@ def main() -> None:
             assert job_event["idempotency_key"] == f"job:{job_event['job_id']}" and job_event["units"] == 1
             assert job_event["run_id"] == run["id"] and job_event["node_key"] == "work"
             assert job_event["model"] == "byok-visibility-model"
-            assert job_event["tokens_prompt"] is None and job_event["tokens_output"] is None
+            # T1a: tokens parsed from the worker's `usage` SSE event, full payload in measures.
+            assert job_event["tokens_prompt"] == 120 and job_event["tokens_output"] == 45
+            measures = job_event["metadata"]["measures"]
+            assert measures["prompt_tokens"] == 120 and measures["completion_tokens"] == 45
+            assert measures["cached_input_tokens"] == 10
+            assert measures["cache_creation_input_tokens"] == 5
+            # 9, not 7: the partial second frame updated this key (per-key last-seen merge)
+            # without clobbering prompt/completion above.
+            assert measures["reasoning_output_tokens"] == 9
             assert job_event["metadata"]["byok_token_counts_billable"] is False
             assert run_event["idempotency_key"] == f"run:{run['id']}"
             assert run_event["units"] == run["counters"]["budget_units_spent"] == 3
@@ -129,6 +146,7 @@ def main() -> None:
             assert totals["successful_workflow_runs"] == 1
             assert totals["jobs"] == run["counters"]["jobs_started"]
             assert totals["budget_units"] == run["counters"]["budget_units_spent"]
+            assert totals["tokens_prompt"] == 120 and totals["tokens_output"] == 45
 
             runtime.jobs._record_job_usage(job_event["job_id"])
             runtime.workflows._record_workflow_usage(run["id"])
@@ -210,6 +228,7 @@ def main() -> None:
 
             status, usage_json, _ = request_json(base_url, "GET", "/api/usage?format=json", token=tokens["admin"])
             assert status == 200 and usage_json["totals"]["workflow_runs"] == 1
+            assert usage_json["totals"]["tokens_prompt"] == 120 and usage_json["totals"]["tokens_output"] == 45
             assert len(usage_json["usage"]) == 2
             ranged = request_json(
                 base_url, "GET", "/api/usage?from=2000-01-01&to=2100-01-01", token=tokens["admin"]

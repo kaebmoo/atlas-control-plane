@@ -648,7 +648,9 @@ The JSON response is:
     "jobs": 1,
     "budget_units": 3,
     "wall_seconds": 4.0,
-    "job_wall_seconds": 3.0
+    "job_wall_seconds": 3.0,
+    "tokens_prompt": 0,
+    "tokens_output": 0
   },
   "from": "2026-06-01T00:00:00Z",
   "to": "2026-06-30T23:59:59Z"
@@ -658,9 +660,12 @@ The JSON response is:
 Atlas emits one idempotent `job` event per terminal job (`units=1`) and one
 `workflow_run` event per terminal run (`units=budget_units_spent`). The headline
 workflow-run count is the number of run events; `metadata.billable` is true only
-for successful runs. Model/token fields are visibility-only under BYOK and stay
-null until thClaws provides them. Metering failures are logged and never change
-job/run outcomes.
+for successful runs. Model/token fields are visibility-only under BYOK
+(`byok_token_counts_billable` stays false): `tokens_prompt`/`tokens_output` are
+captured from the worker's `usage` SSE event (thClaws v0.85.0+) with the full
+usage payload under `metadata.measures`, and stay null for older workers.
+`totals` includes additive `tokens_prompt`/`tokens_output` sums over job events.
+Metering failures are logged and never change job/run outcomes.
 
 CSV uses one row per raw event with columns `id`, `idempotency_key`, `kind`,
 `status`, `units`, `seconds`, `run_id`, `job_id`, `node_key`, `worker_id`,

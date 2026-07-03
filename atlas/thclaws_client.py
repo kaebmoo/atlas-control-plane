@@ -208,6 +208,36 @@ def extract_text(event: SseEvent) -> str | None:
     return None
 
 
+_USAGE_TOKEN_KEYS = (
+    "prompt_tokens",
+    "completion_tokens",
+    "cached_input_tokens",
+    "cache_creation_input_tokens",
+    "reasoning_output_tokens",
+)
+
+
+def extract_usage(event: SseEvent) -> dict[str, int] | None:
+    """Token counts from a worker `usage` SSE event (thClaws >= v0.85.0). Tolerant by design,
+    like extract_session_id: only well-formed non-negative integer counts are kept; anything
+    else (non-usage events, non-dict payloads, missing keys, strings, bools, negatives,
+    ints beyond SQLite's signed 64-bit range) yields None rather than an exception, so a
+    usage frame can never fail a job or drop its usage ledger row."""
+    if event.event != "usage":
+        return None
+    data = event.json_data()
+    if not isinstance(data, dict):
+        return None
+    usage: dict[str, int] = {}
+    for key in _USAGE_TOKEN_KEYS:
+        value = data.get(key)
+        # Upper bound: SQLite stores signed 64-bit integers; a larger JSON int would raise
+        # OverflowError at insert time and drop the job's entire usage ledger row.
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**63 - 1:
+            usage[key] = value
+    return usage or None
+
+
 def extract_session_id(event: SseEvent) -> str | None:
     data = event.json_data()
     if isinstance(data, dict):

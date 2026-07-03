@@ -9,7 +9,7 @@ from typing import Any
 
 from .db import Database, now_iso
 from .router import Router
-from .thclaws_client import ThClawsClient, ThClawsError, extract_session_id, extract_text, parse_event_payload
+from .thclaws_client import ThClawsClient, ThClawsError, extract_session_id, extract_text, extract_usage, parse_event_payload
 from .usage import elapsed_seconds
 
 
@@ -245,6 +245,7 @@ class JobManager:
         done_seen = False
         stream_deadline = time.monotonic() + self.max_stream_seconds
         output_bytes = 0
+        usage: dict[str, int] | None = None
         try:
             for event in client.run_agent_stream(
                 prompt=job["prompt"],
@@ -266,6 +267,12 @@ class JobManager:
                     self.db.append_job_event(job_id, "done", payload)
                     done_seen = True
                     break
+
+                parsed_usage = extract_usage(event)
+                if parsed_usage is not None:
+                    # Merge per key, last-seen wins: a retried turn re-emits final counts,
+                    # but a partial frame must never clobber counts already seen back to NULL.
+                    usage = (usage or {}) | parsed_usage
 
                 session_id = extract_session_id(event)
                 if session_id:
@@ -318,11 +325,11 @@ class JobManager:
             self.db.append_job_event(job_id, "error", {"error": str(exc)})
             self.db.audit("job.failed", "job", job_id, {"error": str(exc)})
         finally:
-            self._record_job_usage(job_id)
+            self._record_job_usage(job_id, usage)
             with self._lock:
                 self._threads.pop(job_id, None)
 
-    def _record_job_usage(self, job_id: str) -> None:
+    def _record_job_usage(self, job_id: str, usage: dict[str, int] | None = None) -> None:
         try:
             job = self.db.get_job(job_id)
             if not job or job.get("state") not in TERMINAL_STATES:
@@ -343,12 +350,16 @@ class JobManager:
                     "started_at": job.get("started_at"),
                     "finished_at": job.get("finished_at"),
                     "model": job.get("model") or None,
+                    "tokens_prompt": usage.get("prompt_tokens") if usage else None,
+                    "tokens_output": usage.get("completion_tokens") if usage else None,
                     "metadata": {
                         "measures": {
                             "workflow_run_count": 0,
                             "job_count": 1,
                             "budget_units": 0,
                             "wall_seconds": seconds,
+                            # Full usage payload (cached/creation/reasoning counts included).
+                            **(usage or {}),
                         },
                         "byok_token_counts_billable": False,
                     },

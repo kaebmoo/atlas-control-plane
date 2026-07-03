@@ -217,25 +217,25 @@ Files:
 
 Work:
 
-- [ ] `extract_usage(event) -> dict | None` (style of `extract_session_id`;
+- [x] `extract_usage(event) -> dict | None` (style of `extract_session_id`;
       tolerate missing keys / non-integer values — return `None`, never raise).
-- [ ] Stream loop captures last-seen usage; `_record_job_usage` passes
+- [x] Stream loop captures last-seen usage; `_record_job_usage` passes
       `tokens_prompt`/`tokens_output` and puts the full payload (cached /
       creation / reasoning counts) under `metadata.measures`.
-- [ ] `summarize_usage` gains additive token totals.
-- [ ] `byok_token_counts_billable: False` semantics untouched — this is
+- [x] `summarize_usage` gains additive token totals.
+- [x] `byok_token_counts_billable: False` semantics untouched — this is
       observability, not a billing rule change.
-- [ ] Update `usage-metering-billing-plan.md`: thClaws emits usage as of
+- [x] Update `usage-metering-billing-plan.md`: thClaws emits usage as of
       v0.85.0; the gap is (was) Atlas-side parsing.
 
 Checks:
 
-- [ ] Mock worker emits `usage` → job's usage row has non-NULL matching
+- [x] Mock worker emits `usage` → job's usage row has non-NULL matching
       tokens.
-- [ ] No usage event (old worker) → NULL tokens, job still succeeds.
-- [ ] Malformed usage payload (strings, negatives, missing keys) → tolerated,
+- [x] No usage event (old worker) → NULL tokens, job still succeeds.
+- [x] Malformed usage payload (strings, negatives, missing keys) → tolerated,
       NULL tokens, no crash.
-- [ ] Mutation test: `extract_usage` returns `{}` always → token-match
+- [x] Mutation test: `extract_usage` returns `{}` always → token-match
       assertion goes red.
 
 ---

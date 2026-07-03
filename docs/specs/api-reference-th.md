@@ -632,7 +632,9 @@ JSON response มีรูปแบบ:
     "jobs": 1,
     "budget_units": 3,
     "wall_seconds": 4.0,
-    "job_wall_seconds": 3.0
+    "job_wall_seconds": 3.0,
+    "tokens_prompt": 0,
+    "tokens_output": 0
   },
   "from": "2026-06-01T00:00:00Z",
   "to": "2026-06-30T23:59:59Z"
@@ -642,8 +644,12 @@ JSON response มีรูปแบบ:
 Atlas สร้าง event แบบ idempotent หนึ่งรายการต่อ terminal job (`units=1`) และ
 หนึ่งรายการต่อ terminal workflow run (`units=budget_units_spent`) จำนวน run event
 คือ headline workflow-run count ส่วน `metadata.billable` เป็น true เฉพาะ run สำเร็จ
-model/token เป็นข้อมูลเพื่อ visibility เท่านั้นภายใต้ BYOK และจะเป็น null จนกว่า
-thClaws ส่งข้อมูลนี้ ความผิดพลาดของ metering ถูก log แต่ไม่เปลี่ยนผลลัพธ์ job/run
+model/token เป็นข้อมูลเพื่อ visibility เท่านั้นภายใต้ BYOK
+(`byok_token_counts_billable` ยังเป็น false): `tokens_prompt`/`tokens_output`
+เก็บจาก `usage` SSE event ของ worker (thClaws v0.85.0 ขึ้นไป) พร้อม payload เต็มใน
+`metadata.measures` และจะเป็น null สำหรับ worker รุ่นเก่า `totals` มียอดรวม
+`tokens_prompt`/`tokens_output` แบบ additive จาก job event ความผิดพลาดของ
+metering ถูก log แต่ไม่เปลี่ยนผลลัพธ์ job/run
 
 CSV มีหนึ่งแถวต่อ raw event และมีคอลัมน์ `id`, `idempotency_key`, `kind`, `status`,
 `units`, `seconds`, `run_id`, `job_id`, `node_key`, `worker_id`, `actor`,
