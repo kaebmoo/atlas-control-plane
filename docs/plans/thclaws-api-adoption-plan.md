@@ -6,7 +6,7 @@ milestone per PR, following the conventions in `AGENTS.md` and the milestone
 format of `docs/plans/workflow-engine-coding-plan.md`.
 
 Survey source: thClaws source at v0.85.0 commit `e481015` (2026-07-03),
-`crates/core/src/api_v1/` + `crates/core/src/server.rs`. Revised after three
+`crates/core/src/api_v1/` + `crates/core/src/server.rs`. Revised after four
 independent review rounds (2026-07-03); validated findings are folded in
 below — see "Review deltas" at the end for what changed and why.
 
@@ -300,24 +300,46 @@ bounded output previews. Observability only — explicitly NOT remote approval
 (no upstream protocol exists).
 
 Current base (verified): `jobs.py` appends non-text frames via
-`append_job_event(job_id, event.event or "message", payload)` — the data is
-already in SQLite. Verified upstream event names (`api_v1/agent.rs`): `text`,
-`thinking`, `tool_use_start`, `tool_use_result`, `tool_use_denied`,
+`append_job_event(job_id, event.event or "message", payload)`. Verified
+upstream event names (`api_v1/agent.rs`): `text`, `thinking`,
+`tool_use_start`, `tool_use_result`, `tool_use_denied`,
 `skill_invoked` / `skill_invoked_result` (a `Skill` tool call is renamed at
 emit time — same payload shape as the tool events), `user_message_injected`,
 `usage`, `result`, `error`, plus the `session` frame. The dashboard must
 still tolerate unknown names.
 
+**Parser blocker (verified, must fix first):** `extract_text()` in
+`thclaws_client.py` matches the keys `text`/`content`/`delta` on ANY event's
+dict payload — so `thinking` (`{"delta": …}`) and `user_message_injected`
+(`{"text": …}`) are currently folded into `assistant_text` and never reach
+`append_job_event` as structured events. The timeline below cannot be built,
+and handoff prompts inherit thinking text, until extraction is restricted to
+assistant-text events.
+
 Files:
 
+- `atlas/thclaws_client.py` (fix `extract_text` event-name scoping)
+- `atlas/jobs.py` (structured-event storage: sanitize + bound before write)
 - `atlas/static/app.js`, `atlas/static/index.html`, `atlas/static/styles.css`
 - `atlas/app.py` (only if an additive events-summary endpoint is warranted;
   prefer reusing the existing job-events API)
-- `scripts/check_ui_ux.py` or new `scripts/check_event_views.py`
+- `scripts/check_jobs.py` (parser regressions),
+  `scripts/check_ui_ux.py` or new `scripts/check_event_views.py`
 - api-reference EN/TH + openapi only if a new endpoint is added
 
 Work:
 
+- [ ] **Fix `extract_text`:** return assistant text only for assistant-text
+      events (named `text`, or the legacy unnamed/`message` frames with the
+      existing dict shapes — preserved for older workers); named structured
+      events (`thinking`, `user_message_injected`, `tool_*`, `skill_*`,
+      `usage`, `result`, `error`) must fall through to
+      `append_job_event`, never into `assistant_text`.
+- [ ] **Sanitize + bound structured payloads before storage:** tool/skill
+      `input`/`output` stored as truncated previews (hard byte cap per event
+      + a per-job structured-event budget mirroring `max_output_bytes`),
+      because tool inputs/outputs can carry secrets and unbounded blobs;
+      full payloads are never persisted to SQLite.
 - [ ] Job view: tool/skill timeline (name, start→result duration,
       ok/error/denied; `skill_invoked*` rendered as skill entries), derived
       client-side from the existing events list.
@@ -330,6 +352,13 @@ Work:
 
 Checks:
 
+- [ ] **Parser regressions:** `thinking` and `user_message_injected` events
+      do NOT appear in `assistant_text`; each is stored as a `job_events`
+      row with its own event name; plain `text` events still accumulate
+      (mutation: revert the `extract_text` scoping → both assertions go red).
+- [ ] Secret-shaped string in a mocked tool output → stored preview is
+      truncated at the cap; the full value is absent from the DB file
+      (byte-scan assertion, same style as `check_byok_helper.py`).
 - [ ] Mock worker emits a scripted tool sequence → timeline renders in order
       with correct statuses (assert on gate-marker substrings + data attrs).
 - [ ] Hostile payload in tool output (script tags, huge string) → escaped and
@@ -353,21 +382,36 @@ shape, currently dead code (no call site), so fixing it is non-breaking.
 
 Design decisions (fixed up front):
 
-- Callback endpoint: `POST /api/worker-callbacks/{job_id}` — additive.
+- Callback endpoint: `POST /api/worker-callbacks/{job_id}` — additive, BUT
+  it must be dispatched **before the generic `/api/*` auth gate**: `do_POST`
+  calls `_is_authorized()` (user/API-token auth) before routing, and a
+  worker callback carries the HMAC `api_key`, not a user token — without an
+  explicit pre-auth carve-out the callback dies with 401 before its handler
+  runs. The carve-out is a dedicated handler with: its own HMAC verification
+  (below), a strict **body-size cap** before reading, and a **system audit
+  actor** (`system:worker-callback`) since no user identity exists on this
+  path. This is a deliberate, documented exception to "all `/api/*` behind
+  `_is_authorized()`" — threat-model entry required.
 - Auth: per-dispatch **short-lived signed token** carried as the `api_key`
   field (HMAC over job_id + expiry with `ATLAS_SECRET_KEY`, same primitive as
   usage export). Constant-time compare; single-use enforced by job-state
   transition idempotency, replay after terminal state is a no-op 200.
+  **Token validity must cover the full remote window**: callback deadline +
+  the worker's retry envelope (3 attempts with backoff) + clock skew margin —
+  a token that expires at the deadline rejects legitimate final retries.
 - `run_id` = Atlas job id = idempotency key. Callback applies result, usage
-  (reuse T1 parsing), session id, and terminal state **idempotently** — a
-  duplicate delivery or a callback racing the SSE path must converge to one
-  terminal state (same discipline as `check_audit_fixes.py` terminal races).
+  (reuse T1a parsing), session id, and terminal state **idempotently** — a
+  duplicate delivery, or a callback racing the **reaper** (the realistic
+  race: stream and callback modes are mutually exclusive per job), must
+  converge to one terminal state (same discipline as
+  `check_audit_fixes.py` terminal races).
 - Async mode is **opt-in per job/node** (`execution: "callback"`), default
   stream — zero behavior change otherwise.
-- Reaper: jobs dispatched async that never call back are failed by a sweep
-  after `ATLAS_CALLBACK_TIMEOUT_SECONDS` (align with existing
-  `max_stream_seconds` semantics); restart recovery includes them
-  (mirror `reconcile_jobs`).
+- Reaper: async jobs that never call back are failed by a sweep after
+  `ATLAS_CALLBACK_TIMEOUT_SECONDS`. **Restart reconciliation must preserve
+  callback-pending jobs**: they are legitimately in-flight on a remote
+  worker, NOT interrupted jobs — `reconcile_jobs` must exempt them from
+  interrupted-job handling and leave them to the reaper's deadline.
 - Requires Atlas to be reachable from the worker (`ATLAS_PUBLIC_BASE_URL`);
   when unset, async mode is rejected at validation time with a clear error.
 
@@ -386,18 +430,29 @@ Work:
 
 - [ ] Client: correct `XCallback` envelope; 202-ACK handling (returns
       `session_id`).
-- [ ] Callback route: signature check, idempotent apply, audit
-      (`job.callback_received`, `job.callback_rejected`).
-- [ ] Reaper + restart reconcile for in-flight async jobs.
+- [ ] Callback route dispatched before `_is_authorized()`: dedicated
+      handler, body-size cap, HMAC verification, system audit actor.
+- [ ] Reaper; `reconcile_jobs` exemption for callback-pending jobs.
+- [ ] Token expiry = deadline + retry envelope + skew margin.
 - [ ] Workflow node opt-in + validation (rejects when base URL unset).
 
 Checks:
 
+- [ ] Callback with a valid HMAC `api_key` and NO user token reaches the
+      handler and succeeds (mutation: route it through the generic
+      `_is_authorized()` gate → check goes red with 401).
+- [ ] Oversized callback body → rejected by the cap before processing.
 - [ ] Mock worker delivers callback → job terminal, usage recorded, audit
-      present; duplicate delivery → single terminal state, 200.
+      rows carry the system actor; duplicate delivery → single terminal
+      state, 200.
 - [ ] Bad/expired signature → 401, job unaffected, audit row.
+- [ ] Token minted at dispatch still validates at deadline + retry window
+      (simulated clock); token past that envelope → 401.
 - [ ] No callback → reaper fails the job at the deadline.
-- [ ] Callback racing SSE completion (simulated) → one terminal state.
+- [ ] **Callback racing the reaper** (simulated) → one terminal state,
+      idempotent convergence.
+- [ ] Atlas restart with a callback-pending job → job survives reconcile as
+      pending (not failed/interrupted), then completes via late callback.
 - [ ] Mutation test: skip signature verification → check goes red.
 
 ---
@@ -762,7 +817,9 @@ Part B — chat-completions for builder previews (benchmark-gated):
 | Risk | Milestone | Mitigation |
 |---|---|---|
 | Sync endpoints unauthenticated on network binds | T4–T6 | hard gate: persistent `workers.sync_mode` enum requires an approved deployment shape (T0); default `disabled`; upstream Bearer ask filed |
-| Callback endpoint as new inbound attack surface | T3 | HMAC short-lived token, idempotent apply, replay = no-op, reaper, threat-model entry |
+| Callback endpoint as new inbound attack surface | T3 | pre-auth carve-out is dedicated + minimal: body cap before read, HMAC verify, system actor, idempotent apply, replay = no-op, reaper, threat-model entry |
+| Thinking/user text polluting handoff prompts | T2 | `extract_text` scoped to assistant-text events; regression checks |
+| Tool payload secrets persisted to SQLite | T2 | bounded sanitized previews only; DB byte-scan check |
 | Hostile/oversized tar from a compromised worker | T5 | strict member filter, byte+count caps, opaque-id store writes only |
 | Destructive write to a target workspace | T6 | additive-only under `incoming/<run_id>/`, no trash/replace ever, per-workflow opt-in + runtime guard |
 | Bundle deploy as a malware vector | T7 | named publisher keys (`key_id`, 0600 sidecar), admin-only RBAC, allowlisted entries, dry-run, full audit |
@@ -852,6 +909,28 @@ Part B — chat-completions for builder previews (benchmark-gated):
    Fleet pattern), with the residual limitation stated: provenance is
    "holder of `key_id`", not a person; asymmetric signing is out of scope
    for stdlib-only core and recorded as a future ask.
+
+### Round 4 (2026-07-03), each verified against source
+
+1. **T2 parser blocker added.** Verified: `extract_text()`'s dict branch
+   matches `text`/`content`/`delta` keys on ANY event, so `thinking.delta`
+   and `user_message_injected.text` currently leak into `assistant_text`
+   instead of landing in `job_events`. T2 now leads with restricting text
+   extraction to assistant-text events (legacy unnamed frames preserved),
+   plus sanitized/bounded storage of tool payloads (per-event cap + per-job
+   structured budget; DB byte-scan check for secret-shaped values) and
+   parser regression checks.
+2. **T3 callback-route blocker added.** Verified: `do_POST` runs
+   `_is_authorized()` before routing, so a worker callback carrying only
+   the HMAC `api_key` would 401 before its handler. T3 now specifies a
+   pre-auth carve-out (dedicated handler: body-size cap, HMAC verify,
+   system audit actor, threat-model entry), token expiry covering deadline
+   + the worker's 3-attempt retry envelope + skew, `reconcile_jobs`
+   exemption preserving callback-pending jobs across restarts, and the
+   race check corrected to callback-vs-reaper (stream and callback modes
+   are mutually exclusive per job, so callback-vs-SSE was untestable).
+3. **T5 wording** ("collection follows terminal state" → "follows worker
+   stream termination") aligned with the round-3 pre-terminal barrier.
 
 ## External confirmations outstanding
 
