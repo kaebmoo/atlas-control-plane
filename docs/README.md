@@ -110,6 +110,10 @@
   prompts สำหรับ implement ตาม sovereign platform plan (M1–M3 พร้อมรัน)
 - [GA Completion — Autonomous Spin Prompts](prompts/ga-completion-spin-prompts.md) —
   driver ที่ไล่ทำ M3→M9 ต่อเนื่องจนจบ, commit เมื่อ gate เขียวจบแต่ละ milestone
+- [thClaws API Adoption Spin Prompts](prompts/thclaws-api-adoption-spin-prompts.md) —
+  driver สำหรับ T0→T1a→T2→T3 (milestone ที่ approved) พร้อม codex review loop
+  ต่อ milestone: implement → mutation-test → gate → lint → codex review
+  --uncommitted → แก้ findings → commit → codex review --commit HEAD
 - [Input Adapter & Return Path — Spin Prompts](prompts/input-adapter-return-path-spin-prompts.md)
   — driver สำหรับ IA-1 → OB-1 (ทำต่อเนื่อง, commit เมื่อ check เขียว)
 
