@@ -6,7 +6,7 @@ milestone per PR, following the conventions in `AGENTS.md` and the milestone
 format of `docs/plans/workflow-engine-coding-plan.md`.
 
 Survey source: thClaws source at v0.85.0 commit `e481015` (2026-07-03),
-`crates/core/src/api_v1/` + `crates/core/src/server.rs`. Revised after four
+`crates/core/src/api_v1/` + `crates/core/src/server.rs`. Revised after five
 independent review rounds (2026-07-03); validated findings are folded in
 below — see "Review deltas" at the end for what changed and why.
 
@@ -31,8 +31,9 @@ benchmark for T8) before implementation starts.
    (`text`, `thinking`, `tool_use_start`, `tool_use_result`,
    `tool_use_denied`, `skill_invoked`, `skill_invoked_result`,
    `user_message_injected`, `usage`, `result`, `error`) — Atlas stores frames
-   but renders only text. Show a tool/skill timeline, denials, and bounded
-   previews in the dashboard and audit surfaces.
+   but renders only text. Show a tool/skill timeline and denials in the
+   dashboard and audit surfaces, persisting **structural metadata only**
+   (never tool `input`/`output` — truncation is not redaction).
 3. **Make long runs survive disconnects.** Adopt `x_callback` (fire-and-forget
    `/agent/run`): the worker keeps running and POSTs the terminal payload to an
    Atlas callback endpoint with retries and an idempotency key, so an Atlas
@@ -335,11 +336,23 @@ Work:
       events (`thinking`, `user_message_injected`, `tool_*`, `skill_*`,
       `usage`, `result`, `error`) must fall through to
       `append_job_event`, never into `assistant_text`.
-- [ ] **Sanitize + bound structured payloads before storage:** tool/skill
-      `input`/`output` stored as truncated previews (hard byte cap per event
-      + a per-job structured-event budget mirroring `max_output_bytes`),
-      because tool inputs/outputs can carry secrets and unbounded blobs;
-      full payloads are never persisted to SQLite.
+- [ ] **Persist structural metadata ONLY for tool/skill events — no
+      payloads, no previews.** Truncation is not redaction: a short token or
+      a secret at the head of a payload survives any cap, and Atlas cannot
+      reliably detect secrets it has never seen (BYOK keys live outside
+      Atlas by design). To keep the "never store tokens or model keys"
+      invariant, `tool_use_start`/`tool_use_result`/`skill_invoked*` events
+      are projected to `{id, name, status, input_bytes, output_bytes,
+      input_sha256, output_sha256}` before `append_job_event` — `input` /
+      `output` are dropped entirely. NOTE this also fixes current behavior:
+      today's `append_job_event(..., payload)` path would persist RAW tool
+      payloads once the parser fix lands, so the projection is what makes
+      the parser fix safe to ship. Hashes still allow correlation with T5's
+      collected artifacts without storing content.
+- [ ] No persistent payload preview in the UI either — the timeline renders
+      from structural metadata; a payload view is deferred until an
+      upstream-safe projection with a defined schema exists (recorded under
+      External confirmations).
 - [ ] Job view: tool/skill timeline (name, start→result duration,
       ok/error/denied; `skill_invoked*` rendered as skill entries), derived
       client-side from the existing events list.
@@ -356,13 +369,15 @@ Checks:
       do NOT appear in `assistant_text`; each is stored as a `job_events`
       row with its own event name; plain `text` events still accumulate
       (mutation: revert the `extract_text` scoping → both assertions go red).
-- [ ] Secret-shaped string in a mocked tool output → stored preview is
-      truncated at the cap; the full value is absent from the DB file
-      (byte-scan assertion, same style as `check_byok_helper.py`).
+- [ ] **Secret literal planted in a mocked tool input AND output → a
+      byte-scan of the SQLite DB file finds zero occurrences** (same style
+      as `check_byok_helper.py`); the stored event rows carry only the
+      structural fields (mutation: persist the payload → check goes red).
 - [ ] Mock worker emits a scripted tool sequence → timeline renders in order
-      with correct statuses (assert on gate-marker substrings + data attrs).
-- [ ] Hostile payload in tool output (script tags, huge string) → escaped and
-      truncated (extend the escape check).
+      with correct statuses from structural metadata alone (assert on
+      gate-marker substrings + data attrs).
+- [ ] Hostile tool/skill NAME (script tags, huge string) → escaped and
+      length-capped in the UI (names are worker-controlled and ARE stored).
 - [ ] Unknown event name → view intact.
 - [ ] Existing gate markers preserved.
 
@@ -819,7 +834,7 @@ Part B — chat-completions for builder previews (benchmark-gated):
 | Sync endpoints unauthenticated on network binds | T4–T6 | hard gate: persistent `workers.sync_mode` enum requires an approved deployment shape (T0); default `disabled`; upstream Bearer ask filed |
 | Callback endpoint as new inbound attack surface | T3 | pre-auth carve-out is dedicated + minimal: body cap before read, HMAC verify, system actor, idempotent apply, replay = no-op, reaper, threat-model entry |
 | Thinking/user text polluting handoff prompts | T2 | `extract_text` scoped to assistant-text events; regression checks |
-| Tool payload secrets persisted to SQLite | T2 | bounded sanitized previews only; DB byte-scan check |
+| Tool payload secrets persisted to SQLite | T2 | structural metadata only (`id`,`name`,`status`,bytes,sha256) — no payloads or previews stored; DB byte-scan check; truncation-is-not-redaction acknowledged |
 | Hostile/oversized tar from a compromised worker | T5 | strict member filter, byte+count caps, opaque-id store writes only |
 | Destructive write to a target workspace | T6 | additive-only under `incoming/<run_id>/`, no trash/replace ever, per-workflow opt-in + runtime guard |
 | Bundle deploy as a malware vector | T7 | named publisher keys (`key_id`, 0600 sidecar), admin-only RBAC, allowlisted entries, dry-run, full audit |
@@ -932,6 +947,22 @@ Part B — chat-completions for builder previews (benchmark-gated):
 3. **T5 wording** ("collection follows terminal state" → "follows worker
    stream termination") aligned with the round-3 pre-terminal barrier.
 
+### Round 5 (2026-07-03)
+
+1. **T2 payload storage removed entirely — previews rejected.** Round 4
+   proposed truncated/sanitized previews of tool `input`/`output`; the
+   reviewer is right that truncation is not redaction (a short token or a
+   secret at the head of the payload survives any cap) and Atlas cannot
+   detect secrets it never knows (BYOK). Tool/skill events are now
+   projected to structural metadata only (`id`, `name`, `status`, byte
+   lengths, SHA-256) before storage; `input`/`output` never reach SQLite;
+   the UI renders the timeline from structural fields with no persistent
+   payload view until an upstream-safe projection schema exists. The DB
+   byte-scan check asserts zero occurrences of a planted secret literal.
+   This also hardens EXISTING behavior: the raw `append_job_event(...,
+   payload)` path would otherwise start persisting full tool payloads the
+   moment the round-4 parser fix lands.
+
 ## External confirmations outstanding
 
 - thClaws: Bearer auth on `/workspace/sync/*` (blocks enabling T5/T6 for
@@ -942,3 +973,6 @@ Part B — chat-completions for builder previews (benchmark-gated):
   best-effort.
 - thClaws: a replace/prune deploy mode (current deploy merges live + bundle;
   files are never removed) — prerequisite for a true rollback in T7.
+- thClaws: a secret-safe tool-payload projection (redacted-at-source event
+  payloads with a defined schema) — prerequisite for any persistent payload
+  preview in T2's timeline.
