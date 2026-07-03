@@ -296,9 +296,11 @@ Checks:
 ## Milestone T2: Structured event surfaces
 
 Goal: render the structured SSE events Atlas already stores as `job_events`
-into operator-usable views: a per-job tool timeline, denial visibility, and
-bounded output previews. Observability only — explicitly NOT remote approval
-(no upstream protocol exists).
+into operator-usable views: a per-job tool timeline and denial visibility,
+built from **structural metadata only** — tool `input`/`output` are never
+persisted and there is no payload preview, persistent or otherwise.
+Observability only — explicitly NOT remote approval (no upstream protocol
+exists).
 
 Current base (verified): `jobs.py` appends non-text frames via
 `append_job_event(job_id, event.event or "message", payload)`. Verified
@@ -320,7 +322,8 @@ assistant-text events.
 Files:
 
 - `atlas/thclaws_client.py` (fix `extract_text` event-name scoping)
-- `atlas/jobs.py` (structured-event storage: sanitize + bound before write)
+- `atlas/jobs.py` (structured-event storage: project tool/skill events to
+  structural metadata before write — payloads never stored)
 - `atlas/static/app.js`, `atlas/static/index.html`, `atlas/static/styles.css`
 - `atlas/app.py` (only if an additive events-summary endpoint is warranted;
   prefer reusing the existing job-events API)
@@ -356,8 +359,11 @@ Work:
 - [ ] Job view: tool/skill timeline (name, start→result duration,
       ok/error/denied; `skill_invoked*` rendered as skill entries), derived
       client-side from the existing events list.
-- [ ] Bounded, HTML-escaped previews of tool inputs/outputs (hard char cap;
-      escape-untrusted-fields discipline from `check_permit_poc.py` applies).
+- [ ] UI shows the structural-metadata timeline ONLY (name, status,
+      durations, byte sizes, hashes) — no payload preview of any kind; the
+      escape-untrusted-fields discipline from `check_permit_poc.py` applies
+      to the stored fields that ARE rendered (tool/skill names, error
+      strings).
 - [ ] Denials (`tool_use_denied`) and errors surfaced with distinct styling;
       per-job counters (tools run / denied / failed).
 - [ ] Run view: per-node counter rollup.
@@ -932,9 +938,9 @@ Part B — chat-completions for builder previews (benchmark-gated):
    and `user_message_injected.text` currently leak into `assistant_text`
    instead of landing in `job_events`. T2 now leads with restricting text
    extraction to assistant-text events (legacy unnamed frames preserved),
-   plus sanitized/bounded storage of tool payloads (per-event cap + per-job
-   structured budget; DB byte-scan check for secret-shaped values) and
-   parser regression checks.
+   plus — as proposed in this round — sanitized/bounded storage of tool
+   payloads (SUPERSEDED by Round 5: no payload storage at all) and parser
+   regression checks.
 2. **T3 callback-route blocker added.** Verified: `do_POST` runs
    `_is_authorized()` before routing, so a worker callback carrying only
    the HMAC `api_key` would 401 before its handler. T3 now specifies a
