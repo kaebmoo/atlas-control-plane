@@ -6,7 +6,7 @@ milestone per PR, following the conventions in `AGENTS.md` and the milestone
 format of `docs/plans/workflow-engine-coding-plan.md`.
 
 Survey source: thClaws source at v0.85.0 commit `e481015` (2026-07-03),
-`crates/core/src/api_v1/` + `crates/core/src/server.rs`. Revised after two
+`crates/core/src/api_v1/` + `crates/core/src/server.rs`. Revised after three
 independent review rounds (2026-07-03); validated findings are folded in
 below — see "Review deltas" at the end for what changed and why.
 
@@ -475,8 +475,24 @@ writes to the worker here.
 
 NOT `GET /workspace/sync/pull` — pull tars the entire workspace; export is
 the selective surface. Export returns **409 while an agent turn is active**,
-so collection runs strictly after the job's terminal state, with bounded
-409-retries.
+with bounded 409-retries after the worker stream terminates.
+
+**Collection is a pre-terminal barrier, not a post-success hook.** The
+terminal `succeeded` state is what triggers `_maybe_start_handoff` and
+workflow-node progression — anything published after it races the downstream
+consumer. So the job lifecycle becomes: worker stream `[DONE]` → collection
+resolves (`collected` / `collection_failed` / `collection_skipped`) → THEN
+`state=succeeded` is written and handoff/workflow proceed. Downstream nodes
+(and T6 pushes) therefore always observe a settled artifact set. Guarantees:
+
+- Collection outcome never changes the job outcome — `succeeded` is written
+  regardless; only its *timing* waits for collection to resolve.
+- Bounded: `ATLAS_COLLECT_DEADLINE_SECONDS` caps the barrier (deadline →
+  `collection_failed`, job proceeds to `succeeded`); a hung export can never
+  hold a job non-terminal indefinitely.
+- Restart during the barrier: the job is an interrupted job — the existing
+  explicit-recovery rule applies (never auto-retried without operator
+  authorization); collection is not silently re-attempted.
 
 Design decisions (fixed up front):
 
@@ -487,8 +503,9 @@ Design decisions (fixed up front):
   calls (zero behavior change).
 - **Bounds.** `ATLAS_SYNC_MAX_BYTES` (default 64 MiB) and
   `ATLAS_SYNC_MAX_FILES` (default 200), enforced while streaming; over-limit
-  aborts collection, job outcome unaffected (post-success, failure-isolated —
-  same discipline as usage metering).
+  aborts collection, job outcome unaffected (failure-isolated — same
+  discipline as usage metering — but resolved BEFORE the terminal state, per
+  the barrier above).
 - **Tar safety (class fix).** One shared stdlib `tarfile` extractor with a
   strict member filter: reject absolute paths, `..`, symlinks/hardlinks,
   devices; per-file and total caps; write only into the opaque-id upload
@@ -500,7 +517,8 @@ Files:
 
 - `atlas/thclaws_client.py` (`sync_manifest()`, `sync_export()` — deadline +
   byte-cap on the response, `iter_sse`-style discipline; 409 retry policy)
-- `atlas/jobs.py` (post-success collection hook)
+- `atlas/jobs.py` (pre-terminal collection barrier in `_run_job`, between
+  `[DONE]` and the `succeeded` write)
 - `atlas/workflows.py` (node `collect_files`; validator; artifacts keyed
   `files.<node_key>.<relpath>`)
 - `atlas/app.py` (job create gains optional `collect_files` — additive)
@@ -525,6 +543,12 @@ Checks:
 
 - [ ] Mock worker export → artifacts with correct sha256; downloaded bytes
       byte-identical.
+- [ ] **Barrier ordering:** with `collect_files` + a handoff configured, the
+      downstream job is created only AFTER artifacts exist (mock records
+      event order); slow export (short of the deadline) still precedes
+      `succeeded`.
+- [ ] Collection deadline exceeded → `collection_failed`, job still reaches
+      `succeeded`, handoff proceeds.
 - [ ] Hostile tar members (`../x`, absolute, symlink) rejected; nothing
       written outside the upload store.
 - [ ] Caps abort collection; job stays `succeeded`; failure audited.
@@ -603,8 +627,9 @@ Checks:
 
 Goal: admin pushes a `.thclaws/` bundle (skills, MCP config, AGENTS.md,
 settings) to selected workers with diff-aware transfer, per-worker outcomes,
-audited SSE progress, and optional restart — with provenance, dry-run, and a
-rollback reference. Deliberately near the end of the roadmap: highest blast
+audited SSE progress, and optional restart — with named-key provenance,
+dry-run, and a previous-bundle re-deploy reference (explicitly NOT a
+rollback; see below). Deliberately near the end of the roadmap: highest blast
 radius, admin-only.
 
 Current base (verified): `/v1/deploy/manifest` returns `{missing:[…]}` for a
@@ -616,18 +641,29 @@ sessions/memory, responds with SSE `extracted → reloaded → done`;
 Design decisions:
 
 - **Admin-only**; new permission `workers.deploy`.
-- **Provenance, not just integrity.** A bundle must be signed by its
-  publisher **before** upload, using the existing pack-signing CLI primitive
-  (`python3 -m atlas.packs sign` pattern, `ATLAS_SECRET_KEY` or a dedicated
-  publisher key). Atlas verifies on upload and records
-  bundle sha256 + signer + uploading actor. Atlas signing its own uploads
-  proves nothing about origin — that shortcut is explicitly rejected.
+- **Provenance = named publisher keys, honestly scoped.** A bundle must be
+  signed by its publisher **before** upload. A single shared
+  `ATLAS_SECRET_KEY` HMAC cannot identify a signer (every holder signs
+  identically), so: per-publisher named HMAC keys — the signature envelope
+  carries a `key_id`, Atlas resolves it from `ATLAS_BUNDLE_PUBLISHER_KEYS`
+  (0600 sidecar file, same pattern as the Fleet token sidecar; never in the
+  DB) and records bundle sha256 + `key_id` + uploading actor. Documented
+  limitation: symmetric HMAC provenance means "signed by a holder of
+  `key_id`", not a person — non-repudiable publisher identity needs
+  asymmetric signatures, which stdlib-only Atlas core cannot do; recorded as
+  a future ops/upstream ask, not faked. Atlas signing its own uploads proves
+  nothing about origin — that shortcut remains rejected.
 - **Dry-run first.** A deploy action's first phase is manifest-diff preview
   (which files the worker is missing); the operator confirms before bytes
   ship. Restart is a separate explicit confirmation.
-- **Rollback reference.** `worker_deploys` rows keep the previous deploy's
-  bundle sha256 per worker, so "roll back" = deploy the prior recorded bundle
-  (bundles retained in the upload store).
+- **Re-deploy of a previous bundle is NOT a rollback.** Verified upstream
+  (`deploy.rs`): the deploy scratch dir is seeded from the LIVE `.thclaws/`
+  tree and the bundle diff is extracted on top — deploy is a **merge**, so
+  files added by a newer bundle survive re-deploying an older one. Atlas
+  therefore offers "re-deploy previous recorded bundle" (previous sha256 kept
+  per worker in `worker_deploys`, bundles retained in the upload store) and
+  labels it exactly that in the UI and audit — never "rollback". A true
+  replace/prune deploy mode is an upstream ask (External confirmations).
 - Multi-worker deploys run sequentially with per-worker outcome; no
   partial-batch rollback (workers are independent).
 
@@ -648,11 +684,12 @@ Files:
 Work:
 
 - [ ] Client methods incl. SSE progress with deadline.
-- [ ] Bundle validation: publisher signature verified on upload; allowlisted
+- [ ] Bundle validation: publisher signature verified on upload against the
+      named key from the sidecar (`key_id` resolution); allowlisted
       top-level entries only (mirror thClaws's own rule); size caps.
 - [ ] Two-phase API + RBAC + audit
       (`worker.deploy.previewed/started/succeeded/failed`, `worker.restarted`).
-- [ ] Rollback-by-reference flow.
+- [ ] Re-deploy-previous-bundle flow (labeled as such, never "rollback").
 
 Checks:
 
@@ -662,7 +699,11 @@ Checks:
 - [ ] Unsigned or tampered bundle → rejected at upload, before any worker
       call.
 - [ ] Operator role → 403; audit rows present; no bundle bytes in DB/logs.
-- [ ] Rollback deploys the recorded previous sha256.
+- [ ] Re-deploy-previous ships the recorded previous sha256 and is labeled
+      "re-deploy" in UI markers and audit rows (mutation: label it
+      "rollback" → check goes red).
+- [ ] Signature envelope with unknown `key_id` → rejected; audit records the
+      attempted key id, never key material.
 - [ ] Mutation test: skip signature verification → check goes red.
 
 ---
@@ -723,7 +764,9 @@ Part B — chat-completions for builder previews (benchmark-gated):
 | Callback endpoint as new inbound attack surface | T3 | HMAC short-lived token, idempotent apply, replay = no-op, reaper, threat-model entry |
 | Hostile/oversized tar from a compromised worker | T5 | strict member filter, byte+count caps, opaque-id store writes only |
 | Destructive write to a target workspace | T6 | additive-only under `incoming/<run_id>/`, no trash/replace ever, per-workflow opt-in + runtime guard |
-| Bundle deploy as a malware vector | T7 | publisher-signed bundles (provenance), admin-only RBAC, allowlisted entries, dry-run, full audit |
+| Bundle deploy as a malware vector | T7 | named publisher keys (`key_id`, 0600 sidecar), admin-only RBAC, allowlisted entries, dry-run, full audit |
+| "Rollback" implying file removal it can't do | T7 | verified merge semantics; feature named "re-deploy previous bundle"; replace/prune mode filed upstream |
+| Collection racing downstream handoff | T5 | pre-terminal barrier: collection resolves before `succeeded` is written; deadline-bounded |
 | Token metering misread as billing change | T1a/T1b | `byok_token_counts_billable` untouched; cost labeled `estimate: true` |
 | Stale pricing silently repricing history | T1b | pricing snapshot persisted per event at record time; summaries never read the live cache |
 | Routing regressions from advisory signals | T4 | tie-break-only weighting + fixture-stability assertions |
@@ -787,6 +830,28 @@ Part B — chat-completions for builder previews (benchmark-gated):
    when preconditions met); T5–T8 marked DEFERRED with explicit unblock
    conditions.
 
+### Round 3 (2026-07-03), each verified against source
+
+1. **T5 collection moved to a pre-terminal barrier.** Round-2 text said
+   collection runs "after the job's terminal state" — that races the
+   downstream: `jobs.py::_run_job` writes `succeeded` and immediately calls
+   `_maybe_start_handoff`, and the workflow runner advances on the terminal
+   state. Collection now resolves between `[DONE]` and the `succeeded`
+   write, deadline-bounded (`ATLAS_COLLECT_DEADLINE_SECONDS`), outcome
+   still failure-isolated; barrier-ordering and deadline checks added.
+2. **T7 "rollback" renamed and re-scoped.** Verified in upstream
+   `deploy.rs`: the deploy scratch is seeded from the live `.thclaws/` tree
+   and the bundle is extracted on top — deploy is a merge; re-deploying an
+   older bundle does not remove files a newer bundle added. The feature is
+   now "re-deploy previous bundle" (UI + audit labels asserted by check);
+   a replace/prune deploy mode is filed as an upstream ask.
+3. **T7 provenance made honest.** A single shared `ATLAS_SECRET_KEY` HMAC
+   cannot distinguish signers. Switched to named per-publisher HMAC keys
+   (`key_id` in the signature envelope, keys in a 0600 sidecar per the
+   Fleet pattern), with the residual limitation stated: provenance is
+   "holder of `key_id`", not a person; asymmetric signing is out of scope
+   for stdlib-only core and recorded as a future ask.
+
 ## External confirmations outstanding
 
 - thClaws: Bearer auth on `/workspace/sync/*` (blocks enabling T5/T6 for
@@ -795,3 +860,5 @@ Part B — chat-completions for builder previews (benchmark-gated):
 - thClaws: protocol/schema version field in `/v1/agent/info`.
 - thClaws: remote cancel endpoint — not planned upstream; Atlas cancel stays
   best-effort.
+- thClaws: a replace/prune deploy mode (current deploy merges live + bundle;
+  files are never removed) — prerequisite for a true rollback in T7.
