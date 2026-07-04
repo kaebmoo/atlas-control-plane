@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import urllib.error
@@ -91,6 +92,7 @@ class ThClawsClient:
         max_tokens: int | None = None,
         x_callback: str | None = None,
         stream_deadline: float | None = None,
+        max_total_bytes: int | None = None,
     ) -> Iterator[SseEvent]:
         payload: dict[str, Any] = {
             "prompt": prompt,
@@ -111,7 +113,7 @@ class ThClawsClient:
 
         response = self._request("POST", "/agent/run", payload=payload, timeout=None)
         try:
-            yield from iter_sse(response, stream_deadline=stream_deadline)
+            yield from iter_sse(response, stream_deadline=stream_deadline, max_total_bytes=max_total_bytes)
         finally:
             response.close()
 
@@ -120,16 +122,24 @@ def iter_sse(
     response: urllib.response.addinfourl,
     max_event_bytes: int = 32 * 1024 * 1024,
     stream_deadline: float | None = None,
+    max_total_bytes: int | None = None,
 ) -> Iterator[SseEvent]:
     """Parse SSE frames from a CHUNKED read (not line iteration). Line iteration blocks in
     readline() until a newline, so a worker dripping bytes with no newline — or only `: ping`
     heartbeats — would pin the thread forever, evading a per-line/per-event deadline check.
     Reading bounded chunks and checking the deadline per chunk bounds both: a drip delivers
     data (chunk returns, deadline checked), a total stall hits the socket timeout (caught as a
-    deadline tick). The socket timeout comes from the client's request_timeout."""
+    deadline tick). The socket timeout comes from the client's request_timeout.
+
+    `max_total_bytes` caps the CUMULATIVE raw bytes read across the whole stream. Enforced here,
+    at the byte source, it bounds EVERY wire byte — data, `event:`/`data:` framing and its
+    whitespace padding, comment/heartbeat lines, and data-less frames that never yield an event —
+    so a semi-trusted worker can't push traffic past ATLAS_MAX_JOB_OUTPUT_BYTES no matter how it
+    hides the volume. The per-event `max_event_bytes` cap still bounds a single unterminated frame."""
     event = "message"
     data_lines: list[str] = []
     buffered = 0
+    total = 0  # cumulative raw bytes read from the worker across the whole stream
     pending = b""
     read = getattr(response, "read1", None) or response.read
 
@@ -146,6 +156,11 @@ def iter_sse(
             continue
         if not chunk:
             break  # EOF
+        total += len(chunk)
+        if max_total_bytes is not None and total > max_total_bytes:
+            # Every wire byte counts here (comments, padding, framing, data-less frames), so no
+            # frame shape can smuggle volume past the caller's total-output cap.
+            raise ThClawsError(f"worker output exceeded {max_total_bytes} bytes")
         buffered += len(chunk)
         if buffered > max_event_bytes:
             # A single event that never hits its blank-line terminator would otherwise
@@ -182,14 +197,29 @@ def parse_event_payload(event: SseEvent) -> dict[str, Any]:
     return payload
 
 
+# Event names whose payload carries assistant-visible text. Everything else — thinking, tool_*,
+# skill_*, user_message_injected, usage, result, error, session, and any unknown named event —
+# is a structured frame that falls through to append_job_event, never into assistant_text. The
+# scoping matters because a `thinking` frame is {"delta": …} and `user_message_injected` is
+# {"text": …}: those key shapes are indistinguishable from assistant text, so only the event
+# NAME can separate them. "message" (and the unnamed default, normalized to "message") is the
+# legacy assistant-text frame older workers stream without an event name; "delta"/"content" are
+# legacy OpenAI-compat text-frame names kept for backward compatibility (thinking /
+# user_message_injected use different names, so they stay excluded).
+_ASSISTANT_TEXT_EVENTS = {"text", "message", "delta", "content"}
+# Bare-string frames are assistant text only under these explicit text names (unchanged from the
+# pre-T2 parser); an unnamed `message` bare string still falls through to append_job_event.
+_BARE_STRING_TEXT_EVENTS = {"text", "delta", "content"}
+
+
 def extract_text(event: SseEvent) -> str | None:
     if event.data == "[DONE]":
         return None
     data = event.json_data()
-    if event.event in {"text", "delta", "content"} and isinstance(data, str):
-        return data
     if isinstance(data, str):
-        return data if event.event == "text" else None
+        return data if event.event in _BARE_STRING_TEXT_EVENTS else None
+    if (event.event or "message") not in _ASSISTANT_TEXT_EVENTS:
+        return None
     if isinstance(data, dict):
         for key in ("text", "content", "delta"):
             value = data.get(key)
@@ -206,6 +236,82 @@ def extract_text(event: SseEvent) -> str | None:
             if isinstance(delta, dict) and isinstance(delta.get("content"), str):
                 return delta["content"]
     return None
+
+
+# Tool/skill events carry `input`/`output` that can hold secrets or BYOK keys Atlas can never
+# reliably detect (they live outside Atlas by design). These are projected to structural
+# metadata ONLY before storage — the raw payload never reaches SQLite. A Skill call is a tool
+# call renamed at emit time, so skill_* shares the tool payload shape.
+_TOOL_SKILL_EVENTS = {
+    "tool_use_start",
+    "tool_use_result",
+    "tool_use_denied",
+    "skill_invoked",
+    "skill_invoked_result",
+}
+
+
+def _canonical_bytes(value: Any) -> bytes:
+    """Deterministic byte encoding of a JSON value for size/hash — never stored, only measured."""
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _tool_status(event_type: str, payload: dict[str, Any]) -> str:
+    if event_type == "tool_use_denied":
+        return "denied"
+    # Honor the worker's own status first — thClaws results carry {"status": "error"|"ok"}, so
+    # deriving from absent is_error/error keys would misclassify real failures as ok. Length-cap
+    # it: status is enum-like but worker-controlled. Fall back to the is_error/error heuristic,
+    # then a type-derived default. Kept tolerant until T0 pins the exact contract.
+    status = payload.get("status")
+    if isinstance(status, str) and status:
+        return status[:32]
+    if event_type in {"tool_use_result", "skill_invoked_result"}:
+        return "error" if (payload.get("is_error") or payload.get("error")) else "ok"
+    return "started"
+
+
+def project_structured_event(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Project a tool/skill event to structural metadata ONLY —
+    {id, name, status, input_bytes, output_bytes, input_sha256, output_sha256}. Whitelist by
+    construction (a fresh dict of allowed keys), so `input`/`output` and any other field are
+    dropped entirely: the "never store tokens or model keys" invariant holds even for secrets
+    Atlas has never seen. Hashes still let T5 correlate collected artifacts without content.
+    Non-tool/skill events pass through unchanged."""
+    if event_type not in _TOOL_SKILL_EVENTS:
+        return payload
+    projected: dict[str, Any] = {
+        "id": payload.get("id"),
+        "name": payload.get("name"),
+        "status": _tool_status(event_type, payload),
+    }
+    for field in ("input", "output"):
+        value = payload.get(field)
+        if value is not None:
+            raw = _canonical_bytes(value)
+            projected[f"{field}_bytes"] = len(raw)
+            projected[f"{field}_sha256"] = hashlib.sha256(raw).hexdigest()
+    return projected
+
+
+# The only keys a projected tool/skill row may carry. A stored row with ANYTHING else is a
+# legacy raw row (input/output/error/event/…) and must be re-projected before it leaves the
+# server; a row whose keys are all structural is already projected and passes through untouched.
+_TOOL_STRUCTURAL_KEYS = {"id", "name", "status", "input_bytes", "output_bytes", "input_sha256", "output_sha256"}
+
+
+def redact_tool_payload_for_read(event_type: str, payload: Any) -> Any:
+    """Sanitize a STORED job_event payload before it leaves the server. Rows written before the
+    write-time projection (legacy DBs) can still hold ANY raw tool/skill field — `input`,
+    `output`, `error`, the echoed `event` name, etc.; project them on read so no raw payload
+    ever reaches a client, keeping the no-payload-preview invariant even for old data. A row
+    whose keys are all structural is already projected and passes through unchanged (so the
+    already-computed byte/hash metadata is never dropped); non-tool events pass through too."""
+    if event_type in _TOOL_SKILL_EVENTS and isinstance(payload, dict) and not set(payload).issubset(_TOOL_STRUCTURAL_KEYS):
+        return project_structured_event(event_type, payload)
+    return payload
 
 
 _USAGE_TOKEN_KEYS = (

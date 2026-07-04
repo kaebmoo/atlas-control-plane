@@ -348,7 +348,26 @@ data: {"text":"hello","seq":4,"created_at":"..."}
 
 Common events are `route`, `session`, `state`, `text`, `error`, `done`,
 `cancel_requested`, `handoff_configured`, `handoff_started`, `handoff_skipped`,
-`handoff_error`, `message`, and `close`.
+`handoff_error`, `message`, and `close`. Workers also emit structured events —
+`thinking`, `user_message_injected`, `usage`, `result`, and the tool/skill
+events `tool_use_start`, `tool_use_result`, `tool_use_denied`, `skill_invoked`,
+`skill_invoked_result`. Unknown event names may appear (worker-defined) and are
+safe to ignore.
+
+Tool and skill events carry **structural metadata only** — never the tool
+`input`/`output` payload (which can hold secrets Atlas cannot detect). Their
+`data` is projected to `{id, name, status, input_bytes, output_bytes,
+input_sha256, output_sha256}` (byte/hash fields present only when that side had
+content). `status` is commonly `started`, `ok`, `error`, or `denied`, but a
+worker may report any other value — treat it as an open string. This projection
+is applied on read too, so events replayed from older databases never expose a
+raw payload:
+
+```text
+id: 7
+event: tool_use_result
+data: {"id":"t1","name":"Bash","status":"ok","output_bytes":20,"output_sha256":"…","seq":7,"created_at":"…"}
+```
 
 Use `after=<last_seq>` to resume/replay. When the job is terminal and no events
 remain, the server sends `close` and closes the connection.

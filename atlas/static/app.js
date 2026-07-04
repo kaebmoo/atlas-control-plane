@@ -1311,8 +1311,6 @@ async function submitJob() {
   showView("jobs");
 }
 
-const STREAM_EVENT_NAMES = ["route", "session", "state", "error", "done", "cancel_requested", "handoff_configured", "handoff_started", "handoff_skipped", "handoff_error", "message", "close"];
-
 function openJobStream(jobId) {
   state.selectedJobId = jobId;
   state.streamText = "";
@@ -1326,21 +1324,26 @@ function openJobStream(jobId) {
   updateStreamHeader();
   $("#streamOutput").textContent = "";
   $("#eventList").innerHTML = "";
+  renderToolTimeline();
   renderJobs();
 
   let sawClose = false;
+  const safeJson = (data) => { try { return JSON.parse(data); } catch { return { data }; } };
   const dispatch = (name, data) => {
     if (name === "text") {
-      const payload = JSON.parse(data);
+      const payload = safeJson(data);
       state.streamText += payload.text || "";
       $("#streamOutput").textContent = state.streamText;
       $("#streamOutput").scrollTop = $("#streamOutput").scrollHeight;
     } else if (name === "close") {
       sawClose = true;
-      appendEvent("close", JSON.parse(data));
+      appendEvent("close", safeJson(data));
       loadAll().catch((error) => toast(error.message));
-    } else if (STREAM_EVENT_NAMES.includes(name)) {
-      appendEvent(name, JSON.parse(data));
+    } else {
+      // Every other frame — known structured events (tool_*/skill_*/thinking/…) AND unknown
+      // future names — becomes a generic event entry; buildToolTimeline() picks out the
+      // tool/skill ones. An unknown name must never crash the view, so parse defensively.
+      appendEvent(name, safeJson(data));
     }
   };
 
@@ -1389,6 +1392,106 @@ function appendEvent(type, payload) {
       <pre class="event-payload">${escapeHtml(JSON.stringify(entry.payload, null, 2))}</pre>
     </article>
   `).join("");
+  renderToolTimeline();
+}
+
+const TOOL_START_KIND = { tool_use_start: "tool", skill_invoked: "skill" };
+const TOOL_END_EVENTS = new Set(["tool_use_result", "skill_invoked_result", "tool_use_denied"]);
+
+// Pure: fold a job's structured events into an ordered tool/skill call timeline built from
+// STRUCTURAL METADATA ONLY (name, status, byte sizes, hashes — never payloads, which Atlas does
+// not store). Pairs *_start / *_invoked with their *_result / *_denied by id. Exposed separately
+// from rendering so it is unit-testable without a DOM; unknown event types are simply ignored.
+function buildToolTimeline(events) {
+  const ordered = (events || [])
+    .filter((entry) => TOOL_START_KIND[entry.type] || TOOL_END_EVENTS.has(entry.type))
+    .slice()
+    .sort((a, b) => ((a.payload || {}).seq || 0) - ((b.payload || {}).seq || 0));
+  const calls = [];
+  const byId = new Map();
+  for (const entry of ordered) {
+    const p = entry.payload || {};
+    const id = p.id != null ? String(p.id) : null;
+    if (TOOL_START_KIND[entry.type]) {
+      const call = {
+        id, kind: TOOL_START_KIND[entry.type], name: p.name != null ? String(p.name) : "",
+        status: p.status || "started", started_at: p.created_at || null, finished_at: null,
+        duration_ms: null, input_bytes: p.input_bytes ?? null, output_bytes: null,
+        input_sha256: p.input_sha256 || null, output_sha256: null,
+      };
+      calls.push(call);
+      if (id) byId.set(id, call);
+      continue;
+    }
+    // result / denied: attach to its start by id, or stand alone if the start was never seen.
+    let call = id && byId.has(id) ? byId.get(id) : null;
+    if (!call) {
+      call = { id, kind: entry.type.startsWith("skill") ? "skill" : "tool", name: p.name != null ? String(p.name) : "",
+        status: null, started_at: null, finished_at: null, duration_ms: null,
+        input_bytes: null, output_bytes: null, input_sha256: null, output_sha256: null };
+      calls.push(call);
+    }
+    call.status = p.status || (entry.type === "tool_use_denied" ? "denied" : "ok");
+    call.finished_at = p.created_at || call.finished_at;
+    call.output_bytes = p.output_bytes ?? call.output_bytes;
+    call.output_sha256 = p.output_sha256 || call.output_sha256;
+    if (call.started_at && call.finished_at) {
+      const ms = Date.parse(call.finished_at) - Date.parse(call.started_at);
+      call.duration_ms = Number.isFinite(ms) && ms >= 0 ? ms : null;
+    }
+  }
+  return calls;
+}
+
+function toolCounters(calls) {
+  return {
+    run: calls.length,
+    denied: calls.filter((call) => call.status === "denied").length,
+    failed: calls.filter((call) => call.status === "error").length,
+  };
+}
+
+function toolDotClass(status) {
+  return status === "ok" ? "ok" : status === "denied" ? "denied" : status === "error" ? "err" : "run";
+}
+
+function renderToolTimeline() {
+  const calls = buildToolTimeline(state.events);
+  const counts = toolCounters(calls);
+  const countersNode = document.getElementById("toolCounters");
+  if (countersNode) {
+    countersNode.innerHTML = `
+      <span class="tl-count">เครื่องมือ · tools <b>${counts.run}</b></span>
+      <span class="tl-count denied">ปฏิเสธ · denied <b>${counts.denied}</b></span>
+      <span class="tl-count err">ล้มเหลว · failed <b>${counts.failed}</b></span>`;
+  }
+  const listNode = document.getElementById("toolTimelineList");
+  if (!listNode) return;
+  if (!calls.length) {
+    listNode.innerHTML = `<div class="empty">ยังไม่มีการเรียกเครื่องมือ</div>`;
+    return;
+  }
+  listNode.innerHTML = calls.map((call) => {
+    // Tool/skill NAME is worker-controlled: escape it AND length-cap it (defence in depth).
+    const name = escapeHtml((call.name || "(unnamed)").slice(0, 80));
+    const status = call.status || "started";
+    const bytes = [
+      call.input_bytes != null ? `in ${call.input_bytes}B` : "",
+      call.output_bytes != null ? `out ${call.output_bytes}B` : "",
+    ].filter(Boolean).join(" · ");
+    const dur = call.duration_ms != null ? `${call.duration_ms} ms` : (status === "started" ? "running…" : "");
+    const hash = call.output_sha256 || call.input_sha256;
+    // sub is built from structural fields only (kind, numbers, hex hash) — no worker text.
+    const sub = [call.kind, dur, bytes, hash ? `sha ${hash.slice(0, 12)}` : ""].filter(Boolean).join(" · ");
+    return `
+      <div class="tl-item" data-tool-status="${escapeHtml(status)}" data-tool-kind="${escapeHtml(call.kind)}">
+        <span class="tl-dot ${toolDotClass(status)}"></span>
+        <div class="grow">
+          <div class="ttl">${name} <span class="tl-badge ${toolDotClass(status)}">${escapeHtml(status)}</span></div>
+          <div class="sub">${escapeHtml(sub)}</div>
+        </div>
+      </div>`;
+  }).join("");
 }
 
 function updateStreamHeader() {

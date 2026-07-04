@@ -9,7 +9,15 @@ from typing import Any
 
 from .db import Database, now_iso
 from .router import Router
-from .thclaws_client import ThClawsClient, ThClawsError, extract_session_id, extract_text, extract_usage, parse_event_payload
+from .thclaws_client import (
+    ThClawsClient,
+    ThClawsError,
+    extract_session_id,
+    extract_text,
+    extract_usage,
+    parse_event_payload,
+    project_structured_event,
+)
 from .usage import elapsed_seconds
 
 
@@ -244,9 +252,11 @@ class JobManager:
         client = ThClawsClient(worker["base_url"], worker.get("token"), timeout=self.request_timeout_seconds)
         done_seen = False
         stream_deadline = time.monotonic() + self.max_stream_seconds
-        output_bytes = 0
         usage: dict[str, int] | None = None
         try:
+            # max_total_bytes bounds the CUMULATIVE raw worker output in iter_sse, at the byte
+            # source — so every wire byte counts (data, framing/whitespace padding, comment and
+            # data-less frames), and no frame shape can push traffic past the configured cap.
             for event in client.run_agent_stream(
                 prompt=job["prompt"],
                 workspace_dir=workspace.get("workspace_dir") if workspace else None,
@@ -254,6 +264,7 @@ class JobManager:
                 model=job.get("model") or None,
                 session_id=job.get("thclaws_session_id") or None,
                 stream_deadline=stream_deadline,
+                max_total_bytes=self.max_output_bytes,
             ):
                 if self.db.is_cancel_requested(job_id):
                     raise _JobCancelled()
@@ -293,12 +304,17 @@ class JobManager:
 
                 text = extract_text(event)
                 if text:
-                    output_bytes += len(text.encode("utf-8"))
-                    if output_bytes > self.max_output_bytes:
-                        raise ThClawsError(f"worker output exceeded {self.max_output_bytes} bytes")
                     self.db.append_job_text(job_id, text)
-                elif not session_id:
-                    self.db.append_job_event(job_id, event.event or "message", payload)
+                elif event.event != "session":
+                    # Structured/generic frame (tool_*/skill_*/thinking/unknown), possibly ALSO
+                    # carrying a session id — store it regardless (gating on `not session_id`
+                    # would silently drop, e.g., a tool_use_result that also carries session_id,
+                    # and lose it from the timeline). Only the dedicated `session` frame — already
+                    # stored above — is skipped. Tool & skill events are projected to structural
+                    # metadata BEFORE storage so raw tool input/output (possible secrets/BYOK
+                    # keys) never reach SQLite; other events pass through. Bytes already counted.
+                    event_type = event.event or "message"
+                    self.db.append_job_event(job_id, event_type, project_structured_event(event_type, payload))
 
             if self.db.is_cancel_requested(job_id):
                 raise _JobCancelled()
