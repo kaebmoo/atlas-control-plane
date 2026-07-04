@@ -556,9 +556,14 @@
               </div>
               <div class="tabs" role="tablist">
                 <button class="tab is-active" type="button" data-job-tab="stream">สตรีมสด · Live stream</button>
+                <button class="tab" type="button" data-job-tab="timeline">ไทม์ไลน์ · Timeline</button>
                 <button class="tab" type="button" data-job-tab="events">เหตุการณ์ · Events</button>
               </div>
               <pre id="streamOutput" class="stream-output" data-job-pane="stream"></pre>
+              <div id="toolTimeline" class="event-pane timeline-pane" data-job-pane="timeline" hidden>
+                <div class="tl-counters" id="toolCounters"></div>
+                <div class="mon-timeline" id="toolTimelineList"><div class="empty">ยังไม่มีการเรียกเครื่องมือ</div></div>
+              </div>
               <div id="eventList" class="event-pane" data-job-pane="events" hidden></div>
             </div>
           </div>

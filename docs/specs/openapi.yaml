@@ -536,6 +536,18 @@ paths:
       tags: [Jobs]
       operationId: streamJobEvents
       summary: Replay and follow job events over Server-Sent Events
+      description: |
+        SSE frames whose `event` is one of `route`, `session`, `state`, `text`,
+        `message`, `error`, `done`, `cancel_requested`, `handoff_*`, `close`, or
+        a worker structured event (`thinking`, `user_message_injected`, `usage`,
+        `result`, `tool_use_start`, `tool_use_result`, `tool_use_denied`,
+        `skill_invoked`, `skill_invoked_result`); unknown worker-defined names may
+        also appear. Tool/skill events carry structural metadata only — their
+        `data` is projected to `{id, name, status, input_bytes, output_bytes,
+        input_sha256, output_sha256}`. `status` is commonly `started`, `ok`,
+        `error`, or `denied`, but a worker may report any other value (treat it
+        as an open string). The raw tool `input`/`output` is never emitted,
+        including on replay of older databases.
       responses:
         '200':
           description: SSE frames with id, event, and JSON data

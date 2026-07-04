@@ -24,6 +24,7 @@ from .jobs import JobManager, TERMINAL_STATES
 from .outbound import OutboundService, OutboundSettings
 from .packs import export_pack, import_pack, list_available_packs
 from .router import Router
+from .thclaws_client import redact_tool_payload_for_read
 from .usage import audit_csv, normalize_usage_range, summarize_usage, usage_csv
 from .workflow_templates import workflow_templates
 from .workflows import (
@@ -868,7 +869,10 @@ class AtlasHandler(BaseHTTPRequestHandler):
             rows = runtime.db.get_job_events_after(job_id, last_seq, limit=100)
             for row in rows:
                 last_seq = int(row["seq"])
-                payload = dict(row.get("payload") or {})
+                # Redact on read: legacy rows written before T2's write-time projection can still
+                # hold raw tool/skill input/output; project them here so no raw payload ever
+                # leaves the server (dashboard Events pane or any API consumer).
+                payload = redact_tool_payload_for_read(row["event_type"], dict(row.get("payload") or {}))
                 payload.setdefault("seq", last_seq)
                 payload.setdefault("created_at", row.get("created_at"))
                 self._write_sse(row["event_type"], payload, last_seq)

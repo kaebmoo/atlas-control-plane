@@ -342,7 +342,25 @@ data: {"text":"hello","seq":4,"created_at":"..."}
 
 Event ที่พบบ่อย: `route`, `session`, `state`, `text`, `error`, `done`,
 `cancel_requested`, `handoff_configured`, `handoff_started`, `handoff_skipped`,
-`handoff_error`, `message`, `close`
+`handoff_error`, `message`, `close` นอกจากนี้ worker ยังส่ง structured event —
+`thinking`, `user_message_injected`, `usage`, `result` และ event ของ tool/skill
+คือ `tool_use_start`, `tool_use_result`, `tool_use_denied`, `skill_invoked`,
+`skill_invoked_result` อาจพบชื่อ event ที่ไม่รู้จัก (worker กำหนดเอง) ซึ่ง
+ข้ามได้อย่างปลอดภัย
+
+Event ของ tool/skill มีเฉพาะ **structural metadata** เท่านั้น — ไม่เคยมี payload
+`input`/`output` ของ tool (ซึ่งอาจมี secret ที่ Atlas ตรวจไม่ได้) โดย `data` ถูก
+project เป็น `{id, name, status, input_bytes, output_bytes, input_sha256,
+output_sha256}` (ฟิลด์ byte/hash มีเมื่อฝั่งนั้นมีเนื้อหา) ส่วน `status` ปกติเป็น
+`started`, `ok`, `error` หรือ `denied` แต่ worker อาจส่งค่าอื่นได้ — ให้ถือเป็น
+open string การ project นี้ทำตอน read ด้วย ดังนั้น event ที่ replay จาก database
+เก่าก็ไม่เผย raw payload:
+
+```text
+id: 7
+event: tool_use_result
+data: {"id":"t1","name":"Bash","status":"ok","output_bytes":20,"output_sha256":"…","seq":7,"created_at":"…"}
+```
 
 ใช้ `after=<last_seq>` เพื่อ resume/replay เมื่อ job terminal และไม่มี event ค้าง server ส่ง
 `close` แล้วปิด connection

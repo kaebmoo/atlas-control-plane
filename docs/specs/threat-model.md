@@ -33,7 +33,7 @@ trigger that re-opens it.
 | **HTTP API callers** | Authenticated + RBAC | per-user **API token = SHA-256 of a 256-bit random token** (high-entropy, so no KDF needed); **passwords = PBKDF2-HMAC-SHA256, 600k iters**; role→permission map; `?token=` only on SSE streams; secrets never returned |
 | **Loopback / `ATLAS_LOOPBACK_NO_AUTH`** | Full admin (dev only) | off by default; documented admin bypass |
 | **Operators (CLI / BYOK / fleet)** | **Trusted** | `python -m atlas.byok`, `atlas.admin`, fleet provisioning are operator-run; no untrusted HTTP path reaches them. Fleet secret writes hold a **cross-process `flock`** across the read-modify-write (concurrent-safe). The **BYOK env-file write has no cross-process lock** (atomic temp+replace only — a crash can't truncate, but two concurrent writers can lose an update) → run `atlas.byok` **serially** per env file. |
-| **thClaws workers** | **Semi-trusted** | SSE output is bounded — chunked-read **stream deadline** (`ATLAS_MAX_STREAM_SECONDS`), **output cap** (`ATLAS_MAX_JOB_OUTPUT_BYTES`), per-event buffer cap; tokens encrypted at rest; `base_url` scheme restricted to http(s) |
+| **thClaws workers** | **Semi-trusted** | SSE output is bounded — chunked-read **stream deadline** (`ATLAS_MAX_STREAM_SECONDS`), **output cap** (`ATLAS_MAX_JOB_OUTPUT_BYTES`), per-event buffer cap; tokens encrypted at rest; `base_url` scheme restricted to http(s); **tool/skill event payloads are never persisted** — `input`/`output` are projected to structural metadata (`{id, name, status, *_bytes, *_sha256}`) before storage, since a payload can carry a BYOK key Atlas cannot detect (truncation is not redaction) |
 | **Pack files** | Semi-trusted | validated through the shared engine validators; signature optional, enforceable via `ATLAS_REQUIRE_SIGNED_PACKS` |
 
 **Production pack-signing decision:** code default is `ATLAS_REQUIRE_SIGNED_PACKS=false` (unsigned
@@ -91,6 +91,8 @@ Author self-check evidence:
 | Secrets never returned | `_public_worker` pops `token` (`app.py:935`); applied on every GET `/api/workers` path | match |
 | `ATLAS_LOOPBACK_NO_AUTH` off by default | `config.py:40` (`_bool_env(..., False)`) | match |
 | Worker SSE bounded (deadline / output cap / per-event cap) | `jobs.py:35-36,237-281` (3600s / 16 MiB); `iter_sse` chunked + 32 MiB cap (`thclaws_client.py:116`) | match |
+| Tool/skill payloads never persisted (structural metadata only) | `project_structured_event` (`thclaws_client.py`) whitelists `{id,name,status,*_bytes,*_sha256}`; applied before `append_job_event` (`jobs.py`); **read path also redacts** legacy raw rows via `redact_tool_payload_for_read` in `_stream_job_events` (`app.py`); byte-scan tests (write + legacy read) in `check_jobs.py` | match |
+| Total worker output bounded (raw wire bytes) | `iter_sse(max_total_bytes=…)` caps CUMULATIVE bytes read at the source (`thclaws_client.py`), so data, framing/whitespace padding, comment and data-less frames all count; `JobManager` passes `max_output_bytes`; per-event 32 MiB cap + stream deadline still apply; flood tests (tool payload / event name / terminal / whitespace-padded / comment) in `check_jobs.py` | match |
 | Worker tokens encrypted at rest | `db.py:1569-1624` encrypt-then-MAC (HMAC-CTR, random nonce, domain-separated keys) | match |
 | `base_url` scheme http(s)-only | `db.py:1493-1496` (raises `ValueError` otherwise) | match |
 | Packs via shared validators; signing optional | `packs.py:14` imports `validate_workflow_references`; `verify_pack_signature` + `require_signed_packs` (`config.py:45`) | match |

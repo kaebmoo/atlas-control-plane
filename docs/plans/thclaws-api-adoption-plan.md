@@ -333,13 +333,13 @@ Files:
 
 Work:
 
-- [ ] **Fix `extract_text`:** return assistant text only for assistant-text
+- [x] **Fix `extract_text`:** return assistant text only for assistant-text
       events (named `text`, or the legacy unnamed/`message` frames with the
       existing dict shapes — preserved for older workers); named structured
       events (`thinking`, `user_message_injected`, `tool_*`, `skill_*`,
       `usage`, `result`, `error`) must fall through to
       `append_job_event`, never into `assistant_text`.
-- [ ] **Persist structural metadata ONLY for tool/skill events — no
+- [x] **Persist structural metadata ONLY for tool/skill events — no
       payloads, no previews.** Truncation is not redaction: a short token or
       a secret at the head of a payload survives any cap, and Atlas cannot
       reliably detect secrets it has never seen (BYOK keys live outside
@@ -352,40 +352,45 @@ Work:
       payloads once the parser fix lands, so the projection is what makes
       the parser fix safe to ship. Hashes still allow correlation with T5's
       collected artifacts without storing content.
-- [ ] No persistent payload preview in the UI either — the timeline renders
+- [x] No persistent payload preview in the UI either — the timeline renders
       from structural metadata; a payload view is deferred until an
       upstream-safe projection with a defined schema exists (recorded under
       External confirmations).
-- [ ] Job view: tool/skill timeline (name, start→result duration,
+- [x] Job view: tool/skill timeline (name, start→result duration,
       ok/error/denied; `skill_invoked*` rendered as skill entries), derived
       client-side from the existing events list.
-- [ ] UI shows the structural-metadata timeline ONLY (name, status,
+- [x] UI shows the structural-metadata timeline ONLY (name, status,
       durations, byte sizes, hashes) — no payload preview of any kind; the
       escape-untrusted-fields discipline from `check_permit_poc.py` applies
       to the stored fields that ARE rendered (tool/skill names, error
       strings).
-- [ ] Denials (`tool_use_denied`) and errors surfaced with distinct styling;
+- [x] Denials (`tool_use_denied`) and errors surfaced with distinct styling;
       per-job counters (tools run / denied / failed).
-- [ ] Run view: per-node counter rollup.
-- [ ] Unknown event names render as generic entries — never crash the view.
+- [ ] Run view: per-node counter rollup. **DEFERRED** — the monitor view's
+      `renderNodeChips` builds from `run.counters` only; a per-node tool/skill
+      rollup needs per-node event aggregation that no current API provides
+      (the timeline is per selected job via the existing events SSE) and no
+      mandatory T2 check covers it. Deferred to a follow-up with a bulk
+      per-node events summary; the per-job counters above ship now.
+- [x] Unknown event names render as generic entries — never crash the view.
 
 Checks:
 
-- [ ] **Parser regressions:** `thinking` and `user_message_injected` events
+- [x] **Parser regressions:** `thinking` and `user_message_injected` events
       do NOT appear in `assistant_text`; each is stored as a `job_events`
       row with its own event name; plain `text` events still accumulate
       (mutation: revert the `extract_text` scoping → both assertions go red).
-- [ ] **Secret literal planted in a mocked tool input AND output → a
+- [x] **Secret literal planted in a mocked tool input AND output → a
       byte-scan of the SQLite DB file finds zero occurrences** (same style
       as `check_byok_helper.py`); the stored event rows carry only the
       structural fields (mutation: persist the payload → check goes red).
-- [ ] Mock worker emits a scripted tool sequence → timeline renders in order
+- [x] Mock worker emits a scripted tool sequence → timeline renders in order
       with correct statuses from structural metadata alone (assert on
       gate-marker substrings + data attrs).
-- [ ] Hostile tool/skill NAME (script tags, huge string) → escaped and
+- [x] Hostile tool/skill NAME (script tags, huge string) → escaped and
       length-capped in the UI (names are worker-controlled and ARE stored).
-- [ ] Unknown event name → view intact.
-- [ ] Existing gate markers preserved.
+- [x] Unknown event name → view intact.
+- [x] Existing gate markers preserved.
 
 ---
 

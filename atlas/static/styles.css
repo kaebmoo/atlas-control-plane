@@ -669,6 +669,17 @@ a.workflow-run-item:hover { border-color: var(--nt-yellow-500); background: var(
 .tl-dot.err { background: var(--nt-danger); }
 .tl-item .ttl { font-size: 17.5px; font-weight: var(--fw-medium); }
 .tl-item .sub { font-size: 15px; color: var(--text-muted); margin-top: 1px; }
+.tl-dot.denied { background: var(--nt-warning); }
+/* Job tool/skill timeline (T2): structural-metadata entries + per-job counters. */
+.tl-counters { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+.tl-count { display: inline-flex; gap: 6px; align-items: center; padding: 5px 12px; border-radius: 999px; font-size: 14.5px; font-weight: var(--fw-medium); background: var(--nt-surface-3); color: var(--nt-grey-600); }
+.tl-count.denied { background: var(--nt-warning-bg); color: #9a5b00; }
+.tl-count.err { background: var(--nt-danger-bg); color: var(--nt-danger); }
+.tl-badge { font-size: 12.5px; font-weight: var(--fw-semibold); padding: 1px 8px; border-radius: 999px; text-transform: capitalize; background: var(--nt-surface-3); color: var(--nt-grey-600); vertical-align: middle; }
+.tl-badge.ok { background: var(--nt-success-bg); color: var(--nt-success); }
+.tl-badge.run { background: var(--nt-yellow-100); color: #9a5b00; }
+.tl-badge.err { background: var(--nt-danger-bg); color: var(--nt-danger); }
+.tl-badge.denied { background: var(--nt-warning-bg); color: #9a5b00; }
 .mon-more > summary { cursor: pointer; list-style: none; font-weight: var(--fw-semibold); font-size: 18px; color: var(--text-body); }
 .mon-more > summary::-webkit-details-marker { display: none; }
 .mon-more > summary::before { content: "▸"; color: var(--nt-yellow-600); margin-right: 8px; display: inline-block; transition: transform var(--dur-fast); }
