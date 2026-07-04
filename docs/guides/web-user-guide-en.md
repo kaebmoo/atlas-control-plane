@@ -169,9 +169,14 @@ show `handoff armed`, `handoff ->`, `child of`, or `handoff error` as applicable
 The Jobs list shows worker, state, workspace, timestamp, short ID, handoff
 relationships, and prompt. Select a card to open it.
 
-**Live stream** replays and follows worker output. **Events** shows route,
-session, state, error, completion, cancellation, handoff, message, and close
-events.
+**Live stream** replays and follows worker output. **Timeline** shows a per-job
+tool and skill call timeline — each call's name, status (started/ok/error/denied),
+duration, and byte sizes, with per-job counters (tools run / denied / failed).
+It is built from **structural metadata only**: tool inputs and outputs are never
+stored or shown (only their byte size and SHA-256), so a payload can never leak a
+secret. **Events** shows the raw event log — route, session, state, error,
+completion, cancellation, handoff, message, close, and the worker's structured
+events (`thinking`, `tool_use_*`, `skill_*`, `usage`, and any others).
 
 **Cancel** is available while a job is active. Cancellation is best effort at
 the Atlas layer: the job first becomes `cancel_requested`, and the worker may

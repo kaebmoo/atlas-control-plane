@@ -184,9 +184,13 @@ flowchart TD
 รายการด้านซ้ายแสดง worker, state, workspace, เวลา, ID แบบย่อ, ความสัมพันธ์ handoff
 และ prompt กดการ์ดใดก็ได้เพื่อเปิดรายละเอียดด้านขวา
 
-ส่วน **Live stream** แสดง output ที่ส่งมาจาก worker แบบต่อเนื่อง ส่วน **Events** แสดง
-เหตุการณ์ เช่น `route`, `session`, `state`, `error`, `done`, `handoff_started`
-และ `close`
+ส่วน **Live stream** แสดง output ที่ส่งมาจาก worker แบบต่อเนื่อง ส่วน **Timeline**
+แสดงไทม์ไลน์การเรียก tool และ skill ต่อ job — ชื่อ, สถานะ (started/ok/error/denied),
+ระยะเวลา และขนาดเป็น byte พร้อมตัวนับต่อ job (tools ที่รัน / ถูกปฏิเสธ / ล้มเหลว)
+สร้างจาก **structural metadata เท่านั้น**: input/output ของ tool ไม่ถูกเก็บหรือแสดง
+(มีแค่ขนาด byte และ SHA-256) จึงไม่มีทาง leak secret ผ่าน payload ส่วน **Events** แสดง
+log เหตุการณ์ดิบ เช่น `route`, `session`, `state`, `error`, `done`, `handoff_started`,
+`close` และ structured event ของ worker (`thinking`, `tool_use_*`, `skill_*`, `usage` ฯลฯ)
 
 ปุ่ม **Cancel** ใช้ได้กับ job ที่ยังไม่จบ การยกเลิกเป็น best effort ที่ชั้น Atlas:
 สถานะจะเปลี่ยนเป็น `cancel_requested` ก่อน และ worker อาจทำ side effect ไปแล้ว
