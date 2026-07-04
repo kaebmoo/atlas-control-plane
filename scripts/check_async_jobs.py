@@ -541,6 +541,42 @@ def check_restart_preserves_callback_pending(tmp: Path) -> None:
         mock.server_close()
 
 
+def check_restart_reconciles_jobs_beyond_history_window(tmp: Path) -> None:
+    """Restart recovery must inspect every non-terminal job, even when 10,000 newer
+    terminal rows would fill the dashboard history query."""
+    db = Database(tmp / "restart-history.sqlite")
+    worker = db.upsert_worker({"base_url": "http://127.0.0.1:9", "name": "history-worker"})
+    orphan = db.create_job({
+        "worker_id": worker["id"],
+        "prompt": "crashed before callback deadline",
+        "state": "queued",
+        "execution": "callback",
+    })
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET created_at = '2000-01-01T00:00:00Z', updated_at = created_at WHERE id = ?",
+            (orphan["id"],),
+        )
+        conn.executemany(
+            "INSERT INTO jobs(id, worker_id, state, prompt, created_at, updated_at) "
+            "VALUES (?, ?, 'succeeded', 'history', '2099-01-01T00:00:00Z', '2099-01-01T00:00:00Z')",
+            ((f"job_history_{index:05d}", worker["id"]) for index in range(10_000)),
+        )
+        plan = " ".join(
+            str(dict(row)) for row in conn.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM jobs "
+                "WHERE state NOT IN ('succeeded', 'failed', 'cancelled')"
+            ).fetchall()
+        )
+
+    assert "idx_jobs_non_terminal" in plan, f"restart recovery query must use the live-job index: {plan}"
+
+    JobManager(db).reconcile_jobs()
+
+    recovered = db.get_job(orphan["id"])
+    assert recovered["state"] == "failed", f"old orphan was skipped by restart recovery: {recovered}"
+
+
 def check_dispatch_failure_terminal(tmp: Path) -> None:
     """A callback job whose dispatch POST never reaches the worker must go terminal 'failed'
     WITH a usage ledger row — the dispatch thread records usage only when it terminal-izes the
@@ -2153,6 +2189,7 @@ def main() -> None:
         check_reaper_honors_retry_grace(tmp)
         check_callback_vs_reaper_race(tmp)
         check_restart_preserves_callback_pending(tmp)
+        check_restart_reconciles_jobs_beyond_history_window(tmp)
         check_dispatch_failure_terminal(tmp)
         check_dispatch_error_redacts_token(tmp)
         check_cancel_races_callback_terminal_write(tmp)

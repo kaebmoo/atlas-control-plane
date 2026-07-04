@@ -554,6 +554,15 @@ def _migration_007_callback_due_index(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_008_non_terminal_jobs_index(conn: sqlite3.Connection) -> None:
+    # Restart recovery must inspect every live job regardless of history size. Keep that
+    # sweep proportional to live work rather than all terminal history.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_non_terminal ON jobs(id) "
+        "WHERE state NOT IN ('succeeded', 'failed', 'cancelled')"
+    )
+
+
 # Ordered, append-only migration steps. A step is either a SQL string (run via
 # executescript) or a callable(conn). The 1-based index is the schema version.
 # Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
@@ -569,6 +578,7 @@ MIGRATIONS: list[str | Any] = [
     _migration_005_deliveries,
     _migration_006_async_jobs,
     _migration_007_callback_due_index,
+    _migration_008_non_terminal_jobs_index,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -2362,6 +2372,13 @@ class Database:
                 LIMIT ?
                 """,
                 (limit,),
+            ).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
+
+    def list_non_terminal_jobs(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE state NOT IN ('succeeded', 'failed', 'cancelled')"
             ).fetchall()
         return [row_to_dict(row) or {} for row in rows]
 
