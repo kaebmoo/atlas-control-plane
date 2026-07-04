@@ -44,7 +44,8 @@
           "items": {"$ref": "#/$defs/artifactKey"}
         },
         "output_format": {"const": "json"},
-        "budget_units": {"type": "integer", "minimum": 1}
+        "budget_units": {"type": "integer", "minimum": 1},
+        "execution": {"enum": ["stream", "callback"]}
       }
     },
     "managerNode": {
@@ -67,7 +68,8 @@
           "items": {"$ref": "#/$defs/nonEmptyString"},
           "uniqueItems": true
         },
-        "budget_units": {"type": "integer", "minimum": 1}
+        "budget_units": {"type": "integer", "minimum": 1},
+        "execution": {"enum": ["stream", "callback"]}
       }
     },
     "joinNode": {

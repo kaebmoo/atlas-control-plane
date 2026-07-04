@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .db import Database, now_iso
+from .jobs import CALLBACK_RETRY_ENVELOPE_SECONDS, JOB_EXECUTION_MODES
 from .outbound import OutboundService, resolve_outbound_target
 from .router import Router
 from .usage import elapsed_seconds
@@ -17,6 +18,25 @@ from .usage import elapsed_seconds
 
 _FIELD_RE = re.compile(r"{([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)}")
 _JOB_TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
+# Extra wait the runner grants a callback job PAST its deadline+grace, to let the reaper's
+# sweep actually terminal-ize it before the runner gives up (so the runner observes the
+# terminal state rather than cancelling a job the reaper is about to fail).
+_CALLBACK_WAIT_SWEEP_MARGIN_SECONDS = 120
+
+
+def _callback_wait_extra_seconds(callback_deadline_at: str, grace_seconds: float, now_epoch: float) -> float | None:
+    """Seconds from now the workflow runner must keep waiting on a callback job: the time left
+    until its deadline PLUS the grace (the reaper's retry-envelope window). Returns None when
+    the deadline is unparseable or already past (nothing to extend). Pure/injectable so the
+    grace term is unit-testable without minute-scale real time."""
+    try:
+        deadline_epoch = datetime.strptime(callback_deadline_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
+    except (ValueError, TypeError):
+        return None
+    remaining = deadline_epoch - now_epoch
+    if remaining <= 0:
+        return None
+    return remaining + grace_seconds
 # Input Adapter Contract (docs/specs/input-adapter-contract.md) §3: the reserved `_meta` key
 # inside run input. Every field is optional; only a malformed shape / unknown channel / an
 # undeliverable callback_url rejects the run (fail closed) — a bare payload with no `_meta` is
@@ -163,6 +183,11 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
                 raise ValueError(f"workflow human_gate node {node_id} choice ids must be unique")
         if "budget_units" in node and (not isinstance(node["budget_units"], int) or node["budget_units"] <= 0):
             raise ValueError(f"workflow node {node_id} budget_units must be a positive integer")
+        if node["type"] in {"worker", "manager"} and "execution" in node and (
+            not isinstance(node["execution"], str) or node["execution"] not in JOB_EXECUTION_MODES
+        ):
+            # isinstance first: an unhashable value would TypeError out of the set probe (500).
+            raise ValueError(f"workflow node {node_id} execution must be one of {sorted(JOB_EXECUTION_MODES)}")
 
     start = graph.get("start")
     if not isinstance(start, str) or not start.strip():
@@ -368,10 +393,27 @@ class WorkflowRunner:
             raise ValueError("workflow input must be an object")
         validate_run_input_envelope(input, self.outbound_allowlist)
         validate_workflow_graph(graph, policy)
+        self._validate_callback_nodes_supported(graph)
         run = self._create_run(graph, policy, input, workflow_definition_id, definition.get("name") or "Workflow run")
         _audit_input_provenance(self.db, run["id"], input)
         self._start_background(run["id"], graph, policy, input)
         return self.db.get_workflow_run(run["id"]) or run
+
+    def _validate_callback_nodes_supported(self, graph: dict[str, Any]) -> None:
+        """Reject a run whose graph opts into execution:'callback' when the deployment cannot
+        deliver callbacks (no public base URL / signing key) — at START time, so the caller
+        gets the promised synchronous 400 instead of a run that 202s and fails later inside
+        the background node submission."""
+        nodes = graph.get("nodes") or []
+        if not any(isinstance(node, dict) and node.get("execution") == "callback" for node in nodes):
+            return
+        base_url = getattr(self.job_service, "public_base_url", None)
+        secret_key = getattr(self.job_service, "secret_key", None)
+        if not base_url or not secret_key:
+            raise ValueError(
+                "workflow uses execution 'callback' nodes but async execution is not configured"
+                " (ATLAS_PUBLIC_BASE_URL and ATLAS_SECRET_KEY are required)"
+            )
 
     def _run_graph_policy(self, run: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         """Resolve the graph+policy a run must execute. Prefer the snapshot captured at run
@@ -456,15 +498,35 @@ class WorkflowRunner:
                 for runtime_node in runtime_nodes:
                     node = node_map.get(runtime_node["node_key"], {})
                     if runtime_node["state"] == "running" and node.get("type") in {"worker", "manager"}:
+                        # T3: a node whose job is callback-pending is NOT lost work — the job
+                        # keeps running on the remote worker and its terminal state lands on
+                        # the job row (reconcile_jobs exempts it; the reaper bounds it). The
+                        # RUN still follows the standing explicit-recovery rule (no engine
+                        # re-attach; retry always submits a NEW job), so the recovery entry
+                        # carries the flag and the operator guidance says to check the job's
+                        # outcome before authorizing a duplicate-risk retry.
+                        pending_job = self.db.get_job(runtime_node["job_id"]) if runtime_node.get("job_id") else None
+                        callback_pending = bool(
+                            pending_job
+                            and (pending_job.get("execution") or "stream") == "callback"
+                            and pending_job.get("callback_deadline_at")
+                            and pending_job.get("state") not in _JOB_TERMINAL_STATES
+                        )
                         interrupted.append(
                             {
                                 "workflow_node_id": runtime_node["id"],
                                 "node_key": runtime_node["node_key"],
                                 "job_id": runtime_node.get("job_id"),
                                 "attempt": runtime_node.get("attempt"),
+                                "callback_pending": callback_pending,
                             }
                         )
-                        self.db.update_workflow_node(runtime_node["id"], state="interrupted", error="Atlas restarted during worker execution")
+                        node_error = (
+                            "Atlas restarted; the node's callback job is still running on the remote worker"
+                            if callback_pending
+                            else "Atlas restarted during worker execution"
+                        )
+                        self.db.update_workflow_node(runtime_node["id"], state="interrupted", error=node_error)
                 for node_key in run.get("current_nodes") or []:
                     node = node_map.get(node_key, {})
                     if node_key in completed or node.get("type") not in {"worker", "manager"}:
@@ -496,6 +558,12 @@ class WorkflowRunner:
         reason: str = "Atlas restarted while worker work may have been in progress",
     ) -> None:
         warning = "Retry may duplicate external worker side effects; verify the interrupted job before authorizing."
+        if any(item.get("callback_pending") for item in interrupted):
+            warning += (
+                " One or more node jobs run in callback mode and are STILL executing remotely: their terminal"
+                " result will land on the job row (or the reaper fails them at their deadline). Check the job's"
+                " outcome first — authorizing retry always submits a NEW job and duplicates that work."
+            )
         counters = run.get("counters") or {}
         counters["recovery"] = {"interrupted": interrupted, "reason": reason, "warning": warning}
         self.db.update_workflow_run(run["id"], state="recovery_required", counters=counters, error=reason)
@@ -1286,7 +1354,7 @@ class WorkflowRunner:
                 if action and action["instructions"].strip():
                     prompt = f"{action['instructions'].strip()}\n\n{prompt}".strip()
         payload: dict[str, Any] = {"prompt": prompt}
-        for key in ("worker_id", "workspace_id", "workspace_key", "company", "model", "tags", "role"):
+        for key in ("worker_id", "workspace_id", "workspace_key", "company", "model", "tags", "role", "execution"):
             if node.get(key):
                 payload[key] = node[key]
         for key in ("allowed_worker_ids", "allowed_workspace_ids"):
@@ -1303,6 +1371,7 @@ class WorkflowRunner:
 
     def _wait_for_job(self, job_id: str, run_id: str | None = None, deadline_at: datetime | None = None) -> dict[str, Any]:
         wait_deadline = time.monotonic() + self.max_wait_seconds
+        callback_extension_applied = False
         while True:
             if run_id:
                 run = self.db.get_workflow_run(run_id)
@@ -1315,6 +1384,21 @@ class WorkflowRunner:
             job = self.db.get_job(job_id)
             if job and job["state"] in _JOB_TERMINAL_STATES:
                 return job
+            if not callback_extension_applied and job and (job.get("execution") or "stream") == "callback" and job.get("callback_deadline_at"):
+                # A callback job legitimately runs until ITS deadline AND the reaper's grace
+                # (the retry envelope during which the token stays valid and a late retry can
+                # still deliver). The runner must wait at least that long — otherwise it cancels
+                # a healthy remote job whose valid retry is still in flight. Extend the wait to
+                # the deadline + the SAME grace the reaper uses (from the job service, one source
+                # of truth) + a sweep margin, so the runner never gives up before the reaper
+                # would. The policy max_minutes guard above still wins (the operator's explicit
+                # cap). Checked in-loop because the dispatch thread writes the deadline
+                # concurrently with this wait starting.
+                callback_extension_applied = True
+                reap_grace = getattr(self.job_service, "callback_reap_grace_seconds", CALLBACK_RETRY_ENVELOPE_SECONDS)
+                extra = _callback_wait_extra_seconds(job["callback_deadline_at"], reap_grace + _CALLBACK_WAIT_SWEEP_MARGIN_SECONDS, time.time())
+                if extra is not None:
+                    wait_deadline = max(wait_deadline, time.monotonic() + extra)
             if time.monotonic() >= wait_deadline:
                 # The job is still running remotely; cancel it before bailing so the worker
                 # isn't left executing for a result no run will ever consume (matches the

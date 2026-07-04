@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -9,8 +11,29 @@ from dataclasses import dataclass
 from typing import Any, Iterator
 
 
+# URLError reasons that PROVE the request never reached the worker: the kernel refused the
+# connection (no listener) or the name never resolved. Everything else — timeout, reset,
+# remote disconnect — can occur AFTER the request was delivered, so it stays ambiguous.
+_NOT_ACCEPTED_REASONS = (ConnectionRefusedError, socket.gaierror)
+# Cap on an HTTP ERROR body read in _request: an error response is a short message, so a
+# larger body from a semi-trusted worker is a memory/thread-pin vector, not real content.
+_ERROR_BODY_MAX_BYTES = 64 * 1024
+# Wall-clock bound on that read: a byte cap alone doesn't stop a slow-drip body (each byte
+# resets the socket timeout), so read in chunks and stop at this deadline too.
+_ERROR_BODY_READ_DEADLINE_SECONDS = 10.0
+
+
 class ThClawsError(RuntimeError):
-    pass
+    """Worker call failure, classified for callers that must know whether the request might
+    still be executing (T3 callback dispatch). http_status is set ONLY when the worker itself
+    answered with an HTTP error — a definitive rejection. request_not_accepted is True only
+    when the request provably never reached the worker (connection refused / DNS failure).
+    Neither set means AMBIGUOUS: the request may have been accepted and still be running."""
+
+    def __init__(self, message: str, http_status: int | None = None, request_not_accepted: bool = False):
+        super().__init__(message)
+        self.http_status = http_status
+        self.request_not_accepted = request_not_accepted
 
 
 @dataclass(frozen=True)
@@ -43,10 +66,17 @@ class ThClawsClient:
         try:
             return urllib.request.urlopen(request, timeout=self.timeout if timeout is None else timeout)  # nosec B310
         except urllib.error.HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="replace")
-            raise ThClawsError(f"thClaws HTTP {exc.code}: {details}") from exc
+            # BOUND the error-body read in BOTH bytes and time: a semi-trusted worker answering
+            # an error with a huge or slow-dripped body would otherwise let an unbounded read
+            # exhaust memory or pin the thread (each byte resets the socket timeout). Best-effort
+            # (already in an error path) — read chunks under a deadline, truncate, never raise here.
+            details = _read_error_body(exc)
+            raise ThClawsError(f"thClaws HTTP {exc.code}: {details}", http_status=exc.code) from exc
         except urllib.error.URLError as exc:
-            raise ThClawsError(f"thClaws connection error: {exc.reason}") from exc
+            raise ThClawsError(
+                f"thClaws connection error: {exc.reason}",
+                request_not_accepted=isinstance(exc.reason, _NOT_ACCEPTED_REASONS),
+            ) from exc
 
     def get_json(self, path: str) -> Any:
         with self._request("GET", path) as response:
@@ -90,14 +120,114 @@ class ThClawsClient:
         model: str | None = None,
         session_id: str | None = None,
         max_tokens: int | None = None,
-        x_callback: str | None = None,
         stream_deadline: float | None = None,
         max_total_bytes: int | None = None,
     ) -> Iterator[SseEvent]:
-        payload: dict[str, Any] = {
-            "prompt": prompt,
-            "stream": True,
-        }
+        payload = self._agent_run_payload(
+            prompt=prompt,
+            workspace_dir=workspace_dir,
+            system=system,
+            model=model,
+            session_id=session_id,
+            max_tokens=max_tokens,
+        )
+        payload["stream"] = True
+        response = self._request("POST", "/agent/run", payload=payload, timeout=None)
+        try:
+            yield from iter_sse(response, stream_deadline=stream_deadline, max_total_bytes=max_total_bytes)
+        finally:
+            response.close()
+
+    def run_agent_async(
+        self,
+        *,
+        prompt: str,
+        callback_url: str,
+        callback_api_key: str,
+        run_id: str,
+        workspace_dir: str | None = None,
+        system: str | None = None,
+        model: str | None = None,
+        session_id: str | None = None,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        """Fire-and-forget dispatch via thClaws's `x_callback` extension. The envelope is an
+        OBJECT — {url, api_key, run_id} (idempotency_key defaults to run_id upstream, and Atlas
+        uses run_id = job id = idempotency key, so it is never sent). thClaws 202-ACKs
+        immediately with {run_id, session_id, status:"accepted", ...} and later POSTs the
+        terminal payload to callback_url (Bearer api_key; 3 attempts at ~0/10/60s backoff,
+        gives up on any non-429 4xx)."""
+        payload = self._agent_run_payload(
+            prompt=prompt,
+            workspace_dir=workspace_dir,
+            system=system,
+            model=model,
+            session_id=session_id,
+            max_tokens=max_tokens,
+        )
+        payload["x_callback"] = {"url": callback_url, "api_key": callback_api_key, "run_id": run_id}
+        # Cap the socket timeout at the ACK read deadline: a single blocking read otherwise
+        # runs up to self.timeout, so a request_timeout above the deadline would let a silent
+        # worker pin this dispatch thread past the promised wall-clock bound. min() keeps a
+        # short request_timeout short and a long one bounded by the deadline.
+        dispatch_timeout = min(self.timeout, _ACK_READ_DEADLINE_SECONDS)
+        try:
+            with self._request("POST", "/agent/run", payload=payload, timeout=dispatch_timeout) as response:
+                status_code = response.getcode() or 0
+                if status_code != 202:
+                    # The x_callback contract's ONLY acceptance signal is a 202 ACK. Any other
+                    # 2xx (an incompatible worker running the request synchronously, a proxy
+                    # answering 200) proves no async run+callback was scheduled — definitive,
+                    # so the caller fails fast instead of parking the job until the reaper.
+                    raise ThClawsError(
+                        f"x_callback dispatch expected a 202 ACK, got HTTP {status_code}",
+                        request_not_accepted=True,
+                    )
+                # The ACK is a tiny JSON object; a semi-trusted worker must not be able to pin
+                # this dispatch thread (slow drip) or exhaust memory (giant 2xx body) — the
+                # stream path is bounded by iter_sse, so bound this read too.
+                body = _read_bounded(response, _ACK_MAX_BYTES, time.monotonic() + _ACK_READ_DEADLINE_SECONDS).decode(
+                    "utf-8", errors="replace"
+                )
+        except ThClawsError:
+            raise
+        except (OSError, http.client.HTTPException) as exc:
+            # A failure while READING the 202 ACK — a socket timeout/reset (OSError) OR a
+            # protocol error like IncompleteRead / BadStatusLine (HTTPException, NOT an
+            # OSError). Both happen AFTER the request was delivered and (for the read case)
+            # after the 202 was seen, so this is the AMBIGUOUS shape (neither http_status nor
+            # request_not_accepted): the run may be executing. A plain ThClawsError routes the
+            # caller to keep the job callback-pending, not fail it.
+            raise ThClawsError(f"thClaws connection error while reading the x_callback ACK: {exc}") from exc
+        # Post-202 problems stay AMBIGUOUS (plain ThClawsError): the status code already said
+        # the run was accepted, so a malformed/mismatched ACK body must not undo that — the
+        # caller keeps the job callback-pending and the callback or reaper resolves it.
+        try:
+            ack = json.loads(body or "{}")
+        except json.JSONDecodeError as exc:
+            raise ThClawsError(f"Invalid x_callback ACK from /agent/run: {body[:200]}") from exc
+        if not isinstance(ack, dict):
+            raise ThClawsError(f"x_callback ACK must be a JSON object, got: {body[:200]}")
+        if ack.get("status") != "accepted" or ack.get("run_id") != run_id:
+            # A genuine thClaws ACK always echoes status:"accepted" and OUR run_id; anything
+            # else is a non-conforming intermediary and must not be recorded as a clean
+            # dispatch (no session binding from an untrusted echo).
+            raise ThClawsError(
+                f"x_callback ACK mismatch: status={ack.get('status')!r}, run_id={ack.get('run_id')!r}"
+            )
+        return ack
+
+    @staticmethod
+    def _agent_run_payload(
+        *,
+        prompt: str,
+        workspace_dir: str | None,
+        system: str | None,
+        model: str | None,
+        session_id: str | None,
+        max_tokens: int | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"prompt": prompt}
         if workspace_dir:
             payload["workspace_dir"] = workspace_dir
         if system:
@@ -108,14 +238,95 @@ class ThClawsClient:
             payload["session_id"] = session_id
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
-        if x_callback:
-            payload["x_callback"] = x_callback
+        return payload
 
-        response = self._request("POST", "/agent/run", payload=payload, timeout=None)
+
+# x_callback ACK bounds: the ACK is ~200 bytes of JSON, so 64 KiB is ample headroom, and the
+# wall-clock deadline stops a slow-drip body from pinning the dispatch thread (the per-recv
+# socket timeout resets on every byte, so it bounds stalls, not total duration).
+_ACK_MAX_BYTES = 64 * 1024
+_ACK_READ_DEADLINE_SECONDS = 60.0
+
+
+def _response_socket(response: Any) -> Any:
+    """Best-effort reach for the underlying socket of a urllib response so a per-read timeout
+    can be set. Guarded: returns None if the (CPython) attribute path isn't present, in which
+    case callers fall back to the inherited socket timeout — finite, just looser."""
+    try:
+        return response.fp.fp.raw._sock
+    except AttributeError:
+        return None
+
+
+def _bound_recv(response_socket: Any, remaining: float) -> None:
+    """Cap the next recv at the remaining wall-clock budget: without this, ONE blocking read
+    inherits the request timeout (up to 60s on callback dispatch) and can overrun a tighter
+    read deadline. No-op if the socket wasn't reachable."""
+    if response_socket is not None:
         try:
-            yield from iter_sse(response, stream_deadline=stream_deadline, max_total_bytes=max_total_bytes)
-        finally:
-            response.close()
+            response_socket.settimeout(max(0.05, remaining))
+        except OSError:
+            pass
+
+
+def _read_error_body(response: Any) -> str:
+    """Best-effort read of an HTTP error body, bounded in bytes AND wall-clock time. Each read
+    tick is capped at the remaining deadline (so a withheld body can't overrun it by a whole
+    socket timeout), stops at the byte cap or the deadline, and NEVER raises — we are already
+    handling an error and only want a short, safe diagnostic string. Marks truncation."""
+    deadline = time.monotonic() + _ERROR_BODY_READ_DEADLINE_SECONDS
+    read = getattr(response, "read1", None) or response.read
+    sock = _response_socket(response)
+    chunks = bytearray()
+    truncated = False
+    while len(chunks) <= _ERROR_BODY_MAX_BYTES:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            truncated = True
+            break
+        _bound_recv(sock, remaining)
+        try:
+            chunk = read(min(8192, _ERROR_BODY_MAX_BYTES + 1 - len(chunks)))
+        except (TimeoutError, OSError, http.client.HTTPException):
+            # http.client.IncompleteRead (a truncated chunked body) is an HTTPException, NOT an
+            # OSError — it must not escape this best-effort reader (docstring promises it never
+            # raises), or it would propagate out of _request past the intended classification.
+            truncated = True
+            break
+        if not chunk:
+            break
+        chunks += chunk
+    if len(chunks) > _ERROR_BODY_MAX_BYTES:
+        chunks = chunks[:_ERROR_BODY_MAX_BYTES]
+        truncated = True
+    text = bytes(chunks).decode("utf-8", errors="replace")
+    return text + "…[truncated]" if truncated else text
+
+
+def _read_bounded(response: urllib.response.addinfourl, max_bytes: int, deadline: float) -> bytes:
+    """Read an HTTP body with BOTH a byte cap and a wall-clock deadline (chunked, like
+    iter_sse). Exceeding either raises a plain ThClawsError — deliberately ambiguous for the
+    T3 dispatch (the 2xx status means the worker accepted the run; a garbage ACK body does not
+    undo that)."""
+    chunks = bytearray()
+    read = getattr(response, "read1", None) or response.read
+    sock = _response_socket(response)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ThClawsError("response body read exceeded its deadline")
+        # Cap the recv at the remaining deadline so a single withheld read can't overrun it by
+        # a whole (larger) request timeout.
+        _bound_recv(sock, remaining)
+        try:
+            chunk = read(8192)
+        except TimeoutError:
+            continue  # per-recv stall: just a tick to re-check the deadline
+        if not chunk:
+            return bytes(chunks)
+        chunks += chunk
+        if len(chunks) > max_bytes:
+            raise ThClawsError(f"response body exceeded {max_bytes} bytes")
 
 
 def iter_sse(

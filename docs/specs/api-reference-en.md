@@ -145,6 +145,7 @@ Every error uses one JSON shape:
 | GET | `/api/jobs/{job_id}` | Job detail |
 | POST | `/api/jobs/{job_id}/cancel` | Best-effort cancellation |
 | GET | `/api/jobs/{job_id}/events?after=0` | Replay/follow SSE |
+| POST | `/api/worker-callbacks/{job_id}` | Worker-only terminal delivery for `execution: "callback"` jobs (signed callback token, not user auth) |
 
 ### Workflow definitions and AI builder
 
@@ -312,6 +313,52 @@ curl -sS -X POST "$BASE_URL/api/jobs" \
 
 The API returns `202` with a `queued` job. Job states are `queued`, `running`,
 `cancel_requested`, `succeeded`, `failed`, and `cancelled`.
+
+### Async execution (`execution: "callback"`)
+
+Long-running jobs can run fire-and-forget by adding `execution: "callback"` to
+the job request (default is `"stream"`, byte-identical to today; workflow
+worker and manager nodes accept the same optional `execution` field):
+
+```json
+{"prompt": "Summarize this repo", "worker_id": "wrk_reporter", "execution": "callback"}
+```
+
+The worker 202-ACKs and keeps running independently of Atlas's connection; the
+job stays `running` with `callback_deadline_at` set. When the run finishes, the
+worker POSTs the terminal payload to `POST /api/worker-callbacks/{job_id}`,
+authorized by a per-dispatch signed token Atlas minted into the callback
+envelope — **not** a user API token (this is the one documented pre-auth
+exception; see `docs/specs/threat-model.md`). Atlas applies the result
+idempotently: terminal state, `summary` → `assistant_text`, token usage into the
+metering ledger, and a structural `callback_result` event (tool **names** and
+counters only — tool input/output is never stored). Duplicate deliveries and a
+delivery racing the reaper converge to one terminal state (`200` with
+`applied: false` on the losing side). Audit rows on this path use the
+`system:worker-callback` actor.
+
+Requirements and bounds:
+
+- `ATLAS_PUBLIC_BASE_URL` (the URL workers can reach Atlas on) and
+  `ATLAS_SECRET_KEY` must be set, or the request is rejected with `400` — the
+  same applies to starting a workflow run whose graph contains callback nodes
+  (rejected synchronously, no run is created).
+- A job that never calls back is failed by a reaper after
+  `ATLAS_CALLBACK_TIMEOUT_SECONDS` (default 3600). The callback token stays
+  valid past that deadline long enough to cover the worker's retry envelope
+  (3 attempts at ~0/10/60 s) plus clock-skew margin.
+- Callback bodies are capped (4 MiB) before reading; bad or expired tokens get
+  `401` and leave the job untouched (audited as `job.callback_rejected` when
+  the job id is real, rate-limited per job — junk requests write nothing
+  durable). A payload whose `run_id` is missing or not exactly the URL's job id
+  is rejected with `400`.
+- Atlas restarts preserve callback-pending **jobs** — they are running
+  remotely, not interrupted — and a late callback after the restart still
+  completes them. A **workflow run** whose node dispatched a callback job still
+  follows the standard explicit-recovery rule after a restart: the run parks as
+  `recovery_required`, the recovery entry is flagged `callback_pending`, and
+  the remote job's terminal result lands on the job row. Check that outcome
+  before authorizing retry — retry always submits a new job.
 
 ### Handoff
 

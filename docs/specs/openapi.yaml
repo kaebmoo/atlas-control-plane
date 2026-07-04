@@ -556,6 +556,58 @@ paths:
               schema: {type: string}
         default: {$ref: '#/components/responses/Error'}
 
+  /api/worker-callbacks/{job_id}:
+    parameters:
+      - {$ref: '#/components/parameters/JobId'}
+    post:
+      tags: [Jobs]
+      operationId: applyWorkerCallback
+      summary: Terminal result delivery for an execution:"callback" job (worker-only)
+      security:
+        - callbackToken: []
+      description: |
+        NOT a user endpoint. thClaws delivers the terminal payload of an
+        `execution: "callback"` job here, authorized by the per-dispatch signed
+        token Atlas minted into the `x_callback.api_key` field (sent back as the
+        Bearer value) — user API tokens are neither required nor accepted. The
+        route is dispatched before the generic API auth gate as a deliberate,
+        documented exception (see docs/specs/threat-model.md): the dedicated
+        handler enforces a body-size cap before reading, constant-time HMAC
+        verification bound to this job id and an expiry covering the callback
+        deadline plus the worker's retry envelope, and audits as the
+        `system:worker-callback` actor. Application is idempotent — a duplicate
+        delivery, or a delivery racing the deadline reaper, converges to one
+        terminal state and answers `200` with `applied: false` so the worker
+        stops retrying. Tool payloads are never stored: only tool NAMES and
+        counters from the terminal payload are kept (same projection rule as
+        streamed tool events).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/WorkerCallbackPayload'}
+      responses:
+        '200':
+          description: Applied (or already terminal — replay is a no-op)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  applied: {type: boolean}
+                  state: {enum: [succeeded, failed, cancelled]}
+        '401':
+          description: Missing, malformed, cross-job, or expired callback token
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '413':
+          description: Body exceeds the callback size cap (rejected before reading)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        default: {$ref: '#/components/responses/Error'}
+
   /api/workflows:
     get:
       tags: [Workflows]
@@ -1503,6 +1555,16 @@ components:
       in: query
       name: token
       description: Primarily used by browser EventSource, which cannot set Authorization headers
+    callbackToken:
+      type: http
+      scheme: bearer
+      description: |
+        Worker-only, per-dispatch signed token (HMAC-SHA256 over the job id and an
+        expiry, keyed by ATLAS_SECRET_KEY). Atlas mints it into the x_callback
+        api_key at dispatch; thClaws sends it back as the Bearer value when
+        delivering the terminal payload. Single-use in effect (job-state
+        idempotency), never stored or logged, and only valid for
+        POST /api/worker-callbacks/{job_id} on the job it was minted for.
 
   parameters:
     Limit100:
@@ -1785,6 +1847,16 @@ components:
         allowed_worker_ids: {type: array, items: {type: string}}
         allowed_workspace_ids: {type: array, items: {type: string}}
         handoff: {$ref: '#/components/schemas/HandoffInput'}
+        execution:
+          enum: [stream, callback]
+          default: stream
+          description: |
+            "callback" runs the job fire-and-forget: the worker 202-ACKs, runs
+            independently of Atlas's connection, and POSTs the terminal payload
+            to /api/worker-callbacks/{job_id}. Requires ATLAS_PUBLIC_BASE_URL and
+            ATLAS_SECRET_KEY on the server, else the request is rejected with 400.
+            Jobs that never call back are failed by a reaper after
+            ATLAS_CALLBACK_TIMEOUT_SECONDS.
       additionalProperties: true
 
     Job:
@@ -1809,10 +1881,53 @@ components:
         handoff_prompt: {type: string}
         handoff_job_id: {type: [string, 'null']}
         handoff_error: {type: [string, 'null']}
+        execution: {enum: [stream, callback]}
+        callback_deadline_at:
+          type: [string, 'null']
+          format: date-time
+          description: For execution:"callback" jobs, when the reaper fails a job that never called back; null on stream jobs
         created_at: {type: string, format: date-time}
         started_at: {type: [string, 'null'], format: date-time}
         finished_at: {type: [string, 'null'], format: date-time}
         updated_at: {type: string, format: date-time}
+      additionalProperties: true
+
+    WorkerCallbackPayload:
+      type: object
+      description: |
+        thClaws's terminal CallbackPayload wire shape (stable upstream; additive
+        fields possible). Atlas applies it tolerantly: status maps to the job
+        state ("succeeded"/"cancelled" as-is, anything else fails the job with
+        error.message), summary becomes assistant_text, usage token counts feed
+        the metering ledger (same tolerant rules as the streamed usage event),
+        and tool NAMES/counters are kept as a structural callback_result job
+        event — tool input/output never exists in this shape and is never stored.
+      required: [run_id, status]
+      properties:
+        run_id: {type: string, description: Equals the Atlas job id}
+        status: {enum: [succeeded, failed, cancelled]}
+        finish_reason: {type: string, description: stop | length | tool_calls | error}
+        model: {type: string}
+        summary: {type: string, description: Final assistant text; may be empty}
+        usage:
+          type: object
+          properties:
+            prompt_tokens: {type: integer, minimum: 0}
+            completion_tokens: {type: integer, minimum: 0}
+            total_tokens: {type: integer, minimum: 0}
+            cached_input_tokens: {type: integer, minimum: 0}
+            cache_creation_input_tokens: {type: integer, minimum: 0}
+            reasoning_output_tokens: {type: integer, minimum: 0}
+        tool_calls: {type: array, items: {type: string}, description: Names of executed tools}
+        tool_denials: {type: array, items: {type: string}}
+        iterations: {type: integer, minimum: 0}
+        error:
+          type: [object, 'null']
+          properties:
+            code: {type: string}
+            message: {type: string}
+        started_at: {type: string, format: date-time}
+        completed_at: {type: string, format: date-time}
       additionalProperties: true
 
     WorkflowDefinition:

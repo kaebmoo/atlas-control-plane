@@ -84,6 +84,20 @@ A flowchart of this is in the
 Cancellation is best effort: a job becomes `cancel_requested` first, and the
 worker may already have produced side effects.
 
+Jobs run in one of two execution modes. The default, `stream`, holds an SSE
+connection to the worker for the whole run. Opt-in `execution: "callback"` (per
+job, or per workflow worker node) dispatches fire-and-forget: the job stays
+`running` while the worker executes independently of Atlas's connection, and
+the worker later delivers the terminal result to a signed callback endpoint. A
+callback job that never reports back is failed by a reaper after
+`ATLAS_CALLBACK_TIMEOUT_SECONDS`. An Atlas restart does **not** fail
+callback-pending jobs — they are still running remotely and finish via their
+late callback (or the reaper) — unlike stream jobs, whose connection dies with
+the restart. Workflow runs are unchanged: a run interrupted mid-node still
+parks as `recovery_required` (the recovery entry marks the node's job
+`callback_pending`, and its result still lands on the job row).
+Details: [API reference §6](specs/api-reference-en.md).
+
 ---
 
 ## 4. Workflow run states

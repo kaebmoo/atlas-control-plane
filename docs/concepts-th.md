@@ -82,6 +82,19 @@ Atlas เก็บใน SQLite
 การยกเลิกเป็น best effort: job จะเป็น `cancel_requested` ก่อน และ worker อาจทำ
 side effect ไปแล้ว
 
+Job รันได้สองโหมด โหมด default คือ `stream` ซึ่งถือ SSE connection กับ worker
+ตลอดการรัน ส่วนโหมด opt-in `execution: "callback"` (ตั้งได้ต่อ job หรือ ต่อ
+worker node ใน workflow) เป็นแบบ fire-and-forget: job ค้างสถานะ `running`
+ระหว่างที่ worker ทำงานโดยไม่ผูกกับ connection ของ Atlas แล้ว worker ค่อยส่งผลลัพธ์
+terminal กลับมาที่ callback endpoint ที่มี signed token กำกับ ถ้า callback
+ไม่กลับมา reaper จะตัด job เป็น failed หลัง `ATLAS_CALLBACK_TIMEOUT_SECONDS`
+การ restart Atlas จะ**ไม่**ล้ม job ที่รอ callback — งานยังรันอยู่บน worker จริง
+และปิดได้ด้วย callback ที่มาช้า (หรือ reaper) — ต่างจาก job แบบ stream ที่
+connection ขาดไปพร้อม restart ส่วน workflow run พฤติกรรมเดิมไม่เปลี่ยน: run
+ที่โดน restart กลาง node ยังพักที่ `recovery_required` (recovery entry จะติดธง
+`callback_pending` ให้ และผลของ job ยังมาลงที่ job row ตามปกติ)
+รายละเอียด: [API reference §6](specs/api-reference-th.md)
+
 ---
 
 ## 4. สถานะ workflow run

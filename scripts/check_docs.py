@@ -76,10 +76,13 @@ def _doc_route_sigs(text: str) -> set[tuple[str, ...]]:
 
 
 def _app_route_sigs() -> set[tuple[str, ...]]:
-    """Extract exact route signatures from the hand-rolled router in _handle_api, with path
-    params as positional '{}' markers (so collection vs detail vs subroute stay distinct)."""
+    """Extract exact route signatures from the hand-rolled router, with path params as
+    positional '{}' markers (so collection vs detail vs subroute stay distinct). The scan
+    starts at _dispatch — not _handle_api — because pre-auth carve-outs (T3's
+    /api/worker-callbacks/{job_id}) are routed there, before the generic auth gate, and must
+    be documented like any other route."""
     src = (ROOT / "atlas" / "app.py").read_text(encoding="utf-8")
-    start = src.index("def _handle_api(")
+    start = src.index("def _dispatch(")
     end = src.index("def _handle_static(", start) if "def _handle_static(" in src[start:] else len(src)
     body = src[start:end]
 
@@ -126,6 +129,7 @@ def _app_route_sigs() -> set[tuple[str, ...]]:
         ("api", "workflow-runs", "{}", "pause"),        # action = parts[3]; if action == "..."
         ("api", "workflow-runs", "{}", "resume"),
         ("api", "workflow-runs", "{}", "cancel"),
+        ("api", "worker-callbacks", "{}"),              # pre-auth carve-out in _dispatch (T3)
     }
     missing = sorted(expected - sigs)
     assert not missing, f"route extractor regressed; did not discover: {['/' + '/'.join(s) for s in missing]}"
