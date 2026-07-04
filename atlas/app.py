@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from . import __version__
 from .config import Config
 from .db import ARTIFACT_KINDS, Database, new_id, now_iso
-from .jobs import JobManager, TERMINAL_STATES
+from .jobs import JobManager, TERMINAL_STATES, verify_callback_token
 from .outbound import OutboundService, OutboundSettings
 from .packs import export_pack, import_pack, list_available_packs
 from .router import Router
@@ -51,6 +51,22 @@ _WORKFLOW_POLICY_DEFAULTS = {
     "max_minutes": 30,
     "stop_on_first_failure": True,
 }
+# Cap applied to a worker-callback body BEFORE any byte is read (the route is pre-auth, so an
+# unauthenticated peer must never make Atlas buffer an unbounded body). Covers the terminal
+# payload's summary text with ample headroom.
+_CALLBACK_MAX_BODY_BYTES = 4 * 1024 * 1024
+# Minimum spacing between durable job.callback_rejected audit rows for the SAME job.
+_CALLBACK_REJECT_AUDIT_WINDOW_SECONDS = 60.0
+# Reading the callback body is bounded in TIME as well as size: a token-holding worker that
+# declares a Content-Length and then drips/withholds bytes must not pin handler threads
+# indefinitely (per-recv socket timeout catches total silence; the wall-clock deadline
+# catches a slow drip that resets the per-recv timer).
+_CALLBACK_BODY_RECV_TIMEOUT_SECONDS = 10.0
+_CALLBACK_BODY_READ_DEADLINE_SECONDS = 60.0
+# Concurrent callback-body reads are slot-bounded: one valid, reusable token must not let a
+# worker open unbounded parallel connections that each pin a handler thread for the whole
+# read deadline. Legit deliveries beyond the bound get 503, which thClaws RETRIES (5xx).
+_CALLBACK_READ_SLOTS = 8
 ROLE_PERMISSIONS = {
     "admin": frozenset({"read", "audit.read", "jobs.run", "workflows.run", "approvals.decide", "workflows.manage", "workers.poll", "resources.manage", "admin", "deliveries.read"}),
     "operator": frozenset({"read", "jobs.run", "workflows.run", "approvals.decide", "workflows.manage", "workers.poll", "resources.manage", "deliveries.read"}),
@@ -77,7 +93,13 @@ class AtlasRuntime:
         self.db = Database(config.db_path, secret_key=config.secret_key)
         self.upload_dir = (config.upload_dir or config.db_path.parent / "uploads").resolve()
         self.upload_dir.mkdir(parents=True, exist_ok=True)
-        self.jobs = JobManager(self.db, config.request_timeout_seconds)
+        self.jobs = JobManager(
+            self.db,
+            config.request_timeout_seconds,
+            public_base_url=config.public_base_url,
+            secret_key=config.secret_key,
+            callback_timeout_seconds=config.callback_timeout_seconds,
+        )
         self.router = Router(self.db)
         self.outbound = OutboundService(
             self.db,
@@ -96,6 +118,18 @@ class AtlasRuntime:
         # then reconcile workflow runs (which re-arm interrupted nodes).
         self.jobs.reconcile_jobs()
         self.workflows.reconcile_runs()
+        # T3: callback-pending jobs survive reconcile (they run remotely); the reaper owns
+        # their deadline, so it must restart with the runtime.
+        self.jobs.start_callback_reaper()
+        # Rate limiter for rejected-callback audit rows (see _handle_worker_callback): at most
+        # one durable row per job per window, so even a peer holding a REAL job id cannot grow
+        # the DB/WAL without bound. In-memory is fine — this bounds durable writes, and a
+        # restart resetting the window only permits one extra row. The lock makes the
+        # check-and-reserve atomic: concurrent rejections for one job must not all observe the
+        # stale timestamp and each write a row.
+        self.callback_reject_audited_at: dict[str, float] = {}
+        self.callback_reject_audit_lock = threading.Lock()
+        self.callback_read_slots = threading.BoundedSemaphore(_CALLBACK_READ_SLOTS)
         # OB-1 restart recovery: no delivery-attempt thread survives a restart either. Off the
         # main thread since a large backlog of stuck/missing deliveries could otherwise block
         # server startup for as long as their retry loops take.
@@ -182,6 +216,15 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 parts = [part for part in path.split("/") if part]
                 if method == "POST" and parts == ["api", "auth", "login"]:
                     self._handle_api(method, path, parse_qs(parsed.query))
+                    return
+                if method == "POST" and len(parts) == 3 and parts[:2] == ["api", "worker-callbacks"]:
+                    # Deliberate, documented pre-auth carve-out (docs/specs/threat-model.md):
+                    # a thClaws terminal callback carries the per-dispatch HMAC api_key, not a
+                    # user token, so routing it through _is_authorized() would 401 it before
+                    # its handler. The dedicated handler enforces its own boundary: body-size
+                    # cap before reading, constant-time HMAC verification bound to this job id,
+                    # idempotent apply, and the `system:worker-callback` audit actor.
+                    self._handle_worker_callback(parts[2])
                     return
                 if not self._is_authorized():
                     self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
@@ -890,6 +933,130 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.wfile.write(f"event: {event}\n".encode("utf-8"))
         self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
         self.wfile.flush()
+
+    def _handle_worker_callback(self, job_id: str) -> None:
+        """Dedicated pre-auth handler for POST /api/worker-callbacks/{job_id} (T3). Its own
+        trust boundary, checked in this order: (1) body-size cap from Content-Length BEFORE any
+        byte is read; (2) constant-time verification of the per-dispatch signed token (the
+        Bearer value thClaws sends is the x_callback api_key Atlas minted — bound to this job
+        id + expiry, so neither cross-job replay nor post-expiry delivery verifies); only then
+        (3) body read + idempotent apply under the system audit actor. Non-2xx responses here
+        are terminal for the worker (thClaws abandons delivery on any non-429 4xx), which is
+        exactly right: an unverifiable delivery must not be retried into the void."""
+        runtime = self.server.runtime
+        # Close the connection on this whole path. Every rejection below happens BEFORE the
+        # declared body is consumed, so on an HTTP/1.1 keep-alive connection (e.g. a reverse
+        # proxy reusing a backend socket) the unread body bytes would otherwise be parsed as
+        # the next request and desync the connection. thClaws opens a fresh connection per
+        # delivery, so closing after each callback costs nothing.
+        self.close_connection = True
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            raise ValueError("Content-Length is required")
+        length = int(raw_length)  # non-integer -> ValueError -> 400
+        if length <= 0:
+            raise ValueError("callback body is required")
+        if length > _CALLBACK_MAX_BODY_BYTES:
+            # Rejecting WITHOUT reading leaves the body unread on the socket; close the
+            # connection so those bytes can never be parsed as a follow-up request.
+            self.close_connection = True
+            self._json({"error": "callback body too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return
+        authorization = self.headers.get("Authorization") or ""
+        token = authorization[7:] if authorization.startswith("Bearer ") else ""
+        secret_key = runtime.config.secret_key
+        # Fail closed when no signing key is configured (submit already rejects async jobs
+        # then, so nothing legitimate can arrive here).
+        if not secret_key or not token or not verify_callback_token(job_id, token, secret_key):
+            self.close_connection = True  # body unread here too — see the 413 branch
+            # Durable audit ONLY when the job id is real (junk ids from unauthenticated
+            # peers must not write anything), AND at most once per job per window — a
+            # compromised worker legitimately KNOWS real job ids, so per-request rows would
+            # still let it grow the DB/WAL without bound. First rejection per job stays a
+            # recorded security signal; repeats within the window are dropped. The window
+            # slot is check-and-reserved under a lock, so concurrent rejections cannot all
+            # observe the stale timestamp and each write a row.
+            if runtime.db.get_job(job_id):
+                now = time.monotonic()
+                with runtime.callback_reject_audit_lock:
+                    last_audit = runtime.callback_reject_audited_at.get(job_id)
+                    audit_allowed = last_audit is None or now - last_audit >= _CALLBACK_REJECT_AUDIT_WINDOW_SECONDS
+                    if audit_allowed and len(runtime.callback_reject_audited_at) >= 1024 and job_id not in runtime.callback_reject_audited_at:
+                        # Evict EXPIRED windows only — clearing everything would let a worker
+                        # rotating >1024 real job ids reset every window and write without
+                        # bound. If the cache is saturated with in-window entries, fail
+                        # CLOSED (skip the row): durable writes stay bounded at 1024/window.
+                        cutoff = now - _CALLBACK_REJECT_AUDIT_WINDOW_SECONDS
+                        for stale_key in [key for key, stamped in runtime.callback_reject_audited_at.items() if stamped < cutoff]:
+                            del runtime.callback_reject_audited_at[stale_key]
+                        if len(runtime.callback_reject_audited_at) >= 1024:
+                            audit_allowed = False
+                    if audit_allowed:
+                        runtime.callback_reject_audited_at[job_id] = now
+                if audit_allowed:
+                    runtime.db.audit(
+                        "job.callback_rejected", "job", job_id,
+                        {"reason": "invalid_or_expired_token"}, actor="system:worker-callback",
+                    )
+            self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+            return
+        job = runtime.db.get_job(job_id)
+        if not job:
+            raise FileNotFoundError()
+        if not runtime.callback_read_slots.acquire(blocking=False):
+            # All slots busy: bounded thread usage beats availability here. 503 is a retryable
+            # signal for thClaws (only non-429 4xx aborts delivery).
+            self.close_connection = True
+            self._json({"error": "callback delivery is busy; retry"}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        # Hold the slot through the WHOLE of read + parse + apply, not just the read: the
+        # JSON decode, token scans, event projection, and DB work are the heavy part, and a
+        # token-holding worker replaying many 4 MiB bodies concurrently would otherwise blow
+        # past the 8-slot bound the moment each released after its read. Slot count bounds
+        # concurrent processing end-to-end.
+        try:
+            raw_body = self._read_callback_body(length)
+            if raw_body is None:
+                return  # timed out mid-read; response already sent, connection closing
+            payload = json.loads(raw_body.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("callback body must be a JSON object")
+            with runtime.db.as_actor("system:worker-callback"):
+                # Pass the verified token so a worker error message reflecting it is redacted
+                # before any terminal field (jobs.error / event / audit) is persisted.
+                result = runtime.jobs.apply_worker_callback(job_id, payload, token=token)
+            self._json(result)
+        finally:
+            runtime.callback_read_slots.release()
+
+    def _read_callback_body(self, length: int) -> bytes | None:
+        """Read exactly `length` callback-body bytes with BOTH a per-recv socket timeout and a
+        wall-clock deadline. A token-holding worker that drips one byte per recv-timeout window
+        would otherwise pin this handler thread forever (each byte resets the socket timer);
+        the deadline bounds the whole read. Returns None after answering a RETRYABLE 503 on
+        timeout — pre-auth threads must always be reclaimable, and thClaws abandons delivery on
+        any non-429 4xx, so a 408 would turn a transient network stall into permanent result
+        loss (the job would sit until the reaper fails it). 503 keeps the worker retrying."""
+        self.connection.settimeout(_CALLBACK_BODY_RECV_TIMEOUT_SECONDS)
+        deadline = time.monotonic() + _CALLBACK_BODY_READ_DEADLINE_SECONDS
+        chunks = bytearray()
+        # read1 (one underlying recv per call), NOT read(n): BufferedReader.read(n) loops
+        # internally until n bytes arrive, so a drip would keep it inside ONE call and this
+        # loop's deadline check would never run (same discipline as iter_sse's chunked read).
+        read = getattr(self.rfile, "read1", None) or self.rfile.read
+        try:
+            while len(chunks) < length:
+                if time.monotonic() > deadline:
+                    raise TimeoutError("callback body read exceeded its deadline")
+                chunk = read(min(65536, length - len(chunks)))
+                if not chunk:
+                    raise ValueError("callback body is incomplete")
+                chunks += chunk
+        except (TimeoutError, OSError):
+            self.close_connection = True
+            self._json({"error": "callback body read timed out; retry"}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return None
+        return bytes(chunks)
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0") or "0")

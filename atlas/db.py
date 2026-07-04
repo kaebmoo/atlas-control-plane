@@ -245,6 +245,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   handoff_prompt TEXT NOT NULL DEFAULT '',
   handoff_job_id TEXT,
   handoff_error TEXT,
+  execution TEXT NOT NULL DEFAULT 'stream',
+  callback_deadline_at TEXT,
   created_at TEXT NOT NULL,
   started_at TEXT,
   finished_at TEXT,
@@ -523,6 +525,35 @@ def _migration_005_deliveries(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_006_async_jobs(conn: sqlite3.Connection) -> None:
+    # T3 async execution via x_callback: which dispatch mode a job uses ('stream' | 'callback')
+    # and, for callback jobs, when the reaper fails a job that never called back. NULL deadline
+    # on legacy rows -> plain stream jobs, untouched by the reaper and by reconcile's exemption.
+    _add_missing_columns(
+        conn,
+        "jobs",
+        {
+            "execution": "TEXT NOT NULL DEFAULT 'stream'",
+            "callback_deadline_at": "TEXT",
+        },
+    )
+
+
+def _migration_007_callback_due_index(conn: sqlite3.Connection) -> None:
+    # T3 reaper support: partial index so the every-few-seconds due-callback sweep is an index
+    # lookup over PENDING callbacks only. Deliberately NOT in the base SCHEMA: on a legacy
+    # pre-schema_version DB the base schema re-runs as step 1 against the old jobs table,
+    # before step 6 adds the callback columns, and index DDL referencing them would crash the
+    # whole migration. Only this step — ordered after 006 — may create it. The predicate
+    # includes the state filter so terminal jobs LEAVE the index on their terminal UPDATE:
+    # the index holds live callbacks, not all history.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_callback_due ON jobs(callback_deadline_at) "
+        "WHERE execution = 'callback' AND callback_deadline_at IS NOT NULL "
+        "AND state NOT IN ('succeeded', 'failed', 'cancelled')"
+    )
+
+
 # Ordered, append-only migration steps. A step is either a SQL string (run via
 # executescript) or a callable(conn). The 1-based index is the schema version.
 # Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
@@ -536,6 +567,8 @@ MIGRATIONS: list[str | Any] = [
     _migration_003_approval_columns,
     _migration_004_workflow_run_snapshot,
     _migration_005_deliveries,
+    _migration_006_async_jobs,
+    _migration_007_callback_due_index,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -668,7 +701,10 @@ class Database:
                 "schema_version": count(conn, "SELECT COALESCE(MAX(version), 0) FROM schema_version"),
             }
 
-    def emit_usage_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _insert_usage_event(self, conn: sqlite3.Connection, payload: dict[str, Any]) -> str:
+        """Validate + INSERT OR IGNORE one usage event on an EXISTING connection, so callers
+        can make the write part of a larger transaction (apply_job_terminal_result). Returns
+        the idempotency key."""
         idempotency_key = str(payload.get("idempotency_key") or "").strip()
         kind = str(payload.get("kind") or "").strip()
         if not idempotency_key:
@@ -678,37 +714,41 @@ class Database:
         event_id = str(payload.get("id") or new_id("usg"))
         created_at = str(payload.get("created_at") or now_iso())
         actor = str(payload.get("actor") or _AUDIT_ACTOR.get())
-        with self._lock, self.connect() as conn:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO usage_events(
-                  id, idempotency_key, run_id, job_id, node_key, worker_id,
-                  actor, kind, status, units, seconds, started_at, finished_at,
-                  model, tokens_prompt, tokens_output, created_at, metadata
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event_id,
-                    idempotency_key,
-                    payload.get("run_id"),
-                    payload.get("job_id"),
-                    payload.get("node_key"),
-                    payload.get("worker_id"),
-                    actor,
-                    kind,
-                    payload.get("status"),
-                    max(0, int(payload.get("units", 1) or 0)),  # never let a negative units deflate the billed total
-                    payload.get("seconds"),
-                    payload.get("started_at"),
-                    payload.get("finished_at"),
-                    payload.get("model"),
-                    payload.get("tokens_prompt"),
-                    payload.get("tokens_output"),
-                    created_at,
-                    encode_json(payload.get("metadata") or {}),
-                ),
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO usage_events(
+              id, idempotency_key, run_id, job_id, node_key, worker_id,
+              actor, kind, status, units, seconds, started_at, finished_at,
+              model, tokens_prompt, tokens_output, created_at, metadata
             )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                idempotency_key,
+                payload.get("run_id"),
+                payload.get("job_id"),
+                payload.get("node_key"),
+                payload.get("worker_id"),
+                actor,
+                kind,
+                payload.get("status"),
+                max(0, int(payload.get("units", 1) or 0)),  # never let a negative units deflate the billed total
+                payload.get("seconds"),
+                payload.get("started_at"),
+                payload.get("finished_at"),
+                payload.get("model"),
+                payload.get("tokens_prompt"),
+                payload.get("tokens_output"),
+                created_at,
+                encode_json(payload.get("metadata") or {}),
+            ),
+        )
+        return idempotency_key
+
+    def emit_usage_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock, self.connect() as conn:
+            idempotency_key = self._insert_usage_event(conn, payload)
             row = conn.execute(
                 "SELECT * FROM usage_events WHERE idempotency_key = ?",
                 (idempotency_key,),
@@ -1150,6 +1190,19 @@ class Database:
         assignments = _set_clause(fields)
         with self._lock, self.connect() as conn:
             conn.execute(f"UPDATE workflow_nodes SET {assignments} WHERE id = ?", list(fields.values()) + [node_id])  # nosec B608
+            if fields.get("job_id"):
+                # This is THE node→job link moment. A fast job (T3 callback, or an instant
+                # stream worker) can terminal-ize and write its idempotent usage row BEFORE
+                # this link exists, leaving run_id/node_key NULL forever — so repair that
+                # attribution here, in the same transaction as the link. Jobs finishing
+                # AFTER the link resolve context normally; between the two, every ordering
+                # is covered. Only NULL attribution is touched — amounts never change.
+                node = conn.execute("SELECT run_id, node_key FROM workflow_nodes WHERE id = ?", (node_id,)).fetchone()
+                if node:
+                    conn.execute(
+                        "UPDATE usage_events SET run_id = ?, node_key = ? WHERE job_id = ? AND run_id IS NULL",
+                        (node["run_id"], node["node_key"], fields["job_id"]),
+                    )
 
     def append_workflow_edge(self, run_id: str, from_node: str, to_node: str, condition_result: Any = None) -> dict[str, Any]:
         edge_id = new_id("wfe")
@@ -2086,9 +2139,9 @@ class Database:
                   id, conversation_id, worker_id, workspace_id, parent_job_id, state,
                   prompt, model, route_reason, thclaws_session_id,
                   handoff_worker_id, handoff_workspace_id, handoff_prompt,
-                  created_at, updated_at
+                  execution, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -2104,6 +2157,7 @@ class Database:
                     payload.get("handoff_worker_id"),
                     payload.get("handoff_workspace_id"),
                     payload.get("handoff_prompt") or "",
+                    payload.get("execution") or "stream",
                     now,
                     now,
                 ),
@@ -2157,6 +2211,114 @@ class Database:
                 (now, now, job_id),
             )
         return cursor.rowcount > 0
+
+    def apply_job_terminal_result(
+        self,
+        job_id: str,
+        state: str,
+        *,
+        finished_at: str | None = None,
+        error: str | None = None,
+        summary: str | None = None,
+        events: list[tuple[str, Any]] | None = None,
+        state_reason: str | None = None,
+        audit_details: dict[str, Any] | None = None,
+        usage_payload: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Atomically transition a non-terminal job to a terminal state AND persist everything
+        derived from that result — assistant text, job events, the audit row, the usage ledger
+        row — in ONE transaction. Either the terminal state and all derived rows commit
+        together, or none do: a crash or write failure mid-apply leaves the job non-terminal,
+        so a worker's RETRY (or the reaper) re-applies the result instead of it being lost
+        forever behind an already-terminal job (T3 callback apply). Returns the terminal state
+        actually written iff THIS call performed the transition, else None (the caller lost
+        the race: duplicate delivery, callback-vs-reaper — same winner/loser discipline as
+        try_start_job / mark_cancel_requested). A cancel_requested flag is honored INSIDE the
+        same UPDATE: a cancel that committed after the caller's read but before this write
+        atomically wins as 'cancelled' (NULL error) — callers must use the RETURNED state."""
+        if state not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError(f"apply_job_terminal_result requires a terminal state, got: {state}")
+        now = finished_at or now_iso()
+        actor = _AUDIT_ACTOR.get()
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE jobs SET "
+                "state = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE ? END, "
+                "error = CASE WHEN cancel_requested = 1 THEN NULL ELSE ? END, "
+                "finished_at = ?, updated_at = ? "
+                "WHERE id = ? AND state NOT IN ('succeeded', 'failed', 'cancelled')",
+                (state, error, now, now, job_id),
+            )
+            if not cursor.rowcount:
+                return None
+            row = conn.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            final = str(row["state"])
+            if final != "failed":
+                error = None
+            seq_row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM job_events WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            seq = int(seq_row["next_seq"])
+
+            def _event(event_type: str, payload: Any, text: str | None = None) -> None:
+                nonlocal seq
+                conn.execute(
+                    "INSERT INTO job_events(job_id, seq, event_type, payload, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (job_id, seq, event_type, encode_json(payload or {}), text, now),
+                )
+                seq += 1
+
+            if summary:
+                conn.execute(
+                    "UPDATE jobs SET assistant_text = assistant_text || ?, updated_at = ? WHERE id = ?",
+                    (summary, now, job_id),
+                )
+                _event("text", {"text": summary}, text=summary)
+            for event_type, payload in events or []:
+                _event(event_type, payload)
+            _event("state", {"state": final, **({"reason": state_reason} if state_reason else {})})
+            if error:
+                _event("error", {"error": error})
+            details = {**(audit_details or {}), **({"error": error} if error else {})}
+            conn.execute(
+                "INSERT INTO audit_log(action, actor, resource_type, resource_id, details, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (f"job.{final}", actor, "job", job_id, encode_json(details), now),
+            )
+            if usage_payload is not None:
+                merged = {**usage_payload, "status": final}
+                if merged.get("run_id") is None:
+                    # Workflow attribution derived IN-transaction: the caller's pre-read can
+                    # race the runner's node→job link (which also takes self._lock, so the two
+                    # writers are fully serialized) — either the link committed first and this
+                    # lookup finds it, or it commits later and its own link-time repair fixes
+                    # the row. Between the two, every interleaving is covered.
+                    context = conn.execute(
+                        "SELECT run_id, node_key FROM workflow_nodes WHERE job_id = ? ORDER BY created_at DESC LIMIT 1",
+                        (job_id,),
+                    ).fetchone()
+                    if context:
+                        merged["run_id"] = context["run_id"]
+                        merged["node_key"] = context["node_key"]
+                self._insert_usage_event(conn, merged)
+        return final
+
+    def list_due_callback_jobs(self, now: str) -> list[dict[str, Any]]:
+        """Non-terminal callback-mode jobs whose deadline has passed — the reaper's work list.
+        Deadline comparison is lexicographic on the uniform second-resolution ISO format
+        (same convention as list_audit). Jobs without a deadline (stream jobs, or a callback
+        job that never reached dispatch) are never returned."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM jobs
+                WHERE execution = 'callback'
+                  AND callback_deadline_at IS NOT NULL
+                  AND callback_deadline_at <= ?
+                  AND state NOT IN ('succeeded', 'failed', 'cancelled')
+                """,
+                (now,),
+            ).fetchall()
+        return [row_to_dict(row) or {} for row in rows]
 
     def append_job_event(self, job_id: str, event_type: str, payload: Any = None, text: str | None = None) -> dict[str, Any]:
         with self._lock, self.connect() as conn:

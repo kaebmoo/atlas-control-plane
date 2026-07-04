@@ -33,6 +33,10 @@ class Config:
     outbound_allowlist: tuple[str, ...] = ()
     outbound_max_attempts: int = 5
     outbound_timeout_seconds: float = 10.0
+    # T3 async execution: the externally reachable Atlas base URL workers deliver callbacks to.
+    # Unset -> execution:"callback" is rejected at submit validation time.
+    public_base_url: str | None = None
+    callback_timeout_seconds: float = 3600.0
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -54,6 +58,8 @@ class Config:
             outbound_allowlist=_csv_env("ATLAS_OUTBOUND_ALLOWLIST"),
             outbound_max_attempts=int(os.getenv("ATLAS_OUTBOUND_MAX_ATTEMPTS", "5")),
             outbound_timeout_seconds=float(os.getenv("ATLAS_OUTBOUND_TIMEOUT", "10")),
+            public_base_url=(os.getenv("ATLAS_PUBLIC_BASE_URL") or "").rstrip("/") or None,
+            callback_timeout_seconds=float(os.getenv("ATLAS_CALLBACK_TIMEOUT_SECONDS", "3600")),
         )
 
     @property

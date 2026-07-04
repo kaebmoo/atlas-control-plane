@@ -454,32 +454,60 @@ Files:
 
 Work:
 
-- [ ] Client: correct `XCallback` envelope; 202-ACK handling (returns
+- [x] Client: correct `XCallback` envelope; 202-ACK handling (returns
       `session_id`).
-- [ ] Callback route dispatched before `_is_authorized()`: dedicated
+- [x] Callback route dispatched before `_is_authorized()`: dedicated
       handler, body-size cap, HMAC verification, system audit actor.
-- [ ] Reaper; `reconcile_jobs` exemption for callback-pending jobs.
-- [ ] Token expiry = deadline + retry envelope + skew margin.
-- [ ] Workflow node opt-in + validation (rejects when base URL unset).
+- [x] Reaper; `reconcile_jobs` exemption for callback-pending jobs.
+- [x] Token expiry = deadline + retry envelope + skew margin.
+- [x] Workflow node opt-in + validation (rejects when base URL unset).
+      Workflow-run restart semantics stay on the standing explicit-recovery
+      rule (no engine re-attach in T3): the recovery entry flags
+      `callback_pending` node jobs and the operator warning says to check the
+      job outcome first, since retry always submits a NEW job.
 
 Checks:
 
-- [ ] Callback with a valid HMAC `api_key` and NO user token reaches the
+- [x] Callback with a valid HMAC `api_key` and NO user token reaches the
       handler and succeeds (mutation: route it through the generic
       `_is_authorized()` gate → check goes red with 401).
-- [ ] Oversized callback body → rejected by the cap before processing.
-- [ ] Mock worker delivers callback → job terminal, usage recorded, audit
+- [x] Oversized callback body → rejected by the cap before processing.
+- [x] Mock worker delivers callback → job terminal, usage recorded, audit
       rows carry the system actor; duplicate delivery → single terminal
       state, 200.
-- [ ] Bad/expired signature → 401, job unaffected, audit row.
-- [ ] Token minted at dispatch still validates at deadline + retry window
+- [x] Bad/expired signature → 401, job unaffected, audit row.
+- [x] Token minted at dispatch still validates at deadline + retry window
       (simulated clock); token past that envelope → 401.
-- [ ] No callback → reaper fails the job at the deadline.
-- [ ] **Callback racing the reaper** (simulated) → one terminal state,
+- [x] No callback → reaper fails the job at the deadline.
+- [x] **Callback racing the reaper** (simulated) → one terminal state,
       idempotent convergence.
-- [ ] Atlas restart with a callback-pending job → job survives reconcile as
+- [x] Atlas restart with a callback-pending job → job survives reconcile as
       pending (not failed/interrupted), then completes via late callback.
-- [ ] Mutation test: skip signature verification → check goes red.
+- [x] Mutation test: skip signature verification → check goes red.
+      (Review-round additions, all in `scripts/check_async_jobs.py`: token
+      never stored — DB/WAL byte-scan incl. dispatch-error echo redaction;
+      cancel racing the terminal write converges to `cancelled` atomically;
+      ambiguous failures — ACK loss, 5xx, oversized ACK — keep the job
+      callback-pending while a definitive 4xx/refused-connect rejection still
+      fails it; the whole apply (terminal state + text + events + audit +
+      usage) is ONE transaction, so a mid-apply crash preserves the worker's
+      retry as recovery; rejected-callback audit rows only for real job ids
+      (unauthenticated DoS bound); workflow runs with callback nodes are
+      rejected at start when async is unconfigured; falsey/unhashable/null
+      `execution` values → clean 400; only a conforming 202 ACK counts as a
+      dispatch (non-202 fails fast, mismatched ACK stays pending); delivered
+      `run_id` must match the URL's job; rejected-callback audits are
+      rate-limited per job (lock-serialized, race-proof, fail-closed at the
+      cache cap); the inbound body read is time-bounded (per-recv timeout +
+      wall-clock deadline) and slot-bounded across connections (503 overflow,
+      retryable); usage
+      attribution is derived inside the terminal transaction AND repaired at
+      the node→job link (every interleaving covered); the reaper sweep uses a
+      partial index over PENDING callbacks only (migration 007 — deliberately
+      not in the base SCHEMA, which re-runs against legacy tables that lack
+      the columns); the runner wait extends to a callback
+      job's own deadline; workflow-run recovery flags `callback_pending`
+      node jobs.)
 
 ---
 

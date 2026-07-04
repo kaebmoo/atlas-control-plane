@@ -102,6 +102,8 @@ Leave it off (`false`) to stay completely silent, as in dev.
 | `ATLAS_REQUEST_TIMEOUT` | `30` | Worker request timeout (seconds, per recv). |
 | `ATLAS_MAX_STREAM_SECONDS` | `3600` | Overall wall-clock bound on a single worker stream; a slow/dripping worker is cut at this deadline. |
 | `ATLAS_MAX_JOB_OUTPUT_BYTES` | `16777216` | Cap on a single job's accumulated assistant output. |
+| `ATLAS_PUBLIC_BASE_URL` | — | Externally reachable Atlas base URL (e.g. `https://atlas.example.com`) that thClaws workers deliver `execution: "callback"` results to. Unset ⇒ async jobs are rejected at submit with 400; stream jobs are unaffected. |
+| `ATLAS_CALLBACK_TIMEOUT_SECONDS` | `3600` | Deadline for an `execution: "callback"` job to deliver its terminal callback. The callback token — and the reaper's grace — extend ~5 min (the worker's retry envelope) past it, so the reaper fails the job only after the deadline plus that grace, never cutting off a still-valid retry. |
 | `ATLAS_REQUIRE_SIGNED_PACKS` | `false` | **Set `true` in production (SHALL).** When `true`, `POST /api/packs/import` rejects unsigned packs. Running prod with `false` is an accepted risk owned by Pornthep Nivatyakul (see `specs/threat-model.md`). |
 | `ATLAS_BACKUP_KEY` | — | Optional. When set, `scripts/backup.sh` writes AES-256-CBC `.enc` backups and removes the plaintext copies (see [backup-restore.md](backup-restore.md)). |
 
