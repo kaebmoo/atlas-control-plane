@@ -304,9 +304,7 @@ class JobManager:
         the DB is orphaned — its thread is gone but the row says it is in flight. Fail those
         jobs so callers see a terminal state and usage is recorded, instead of a job wedged
         'running' forever. Idempotent: only touches non-terminal jobs with no live thread."""
-        for job in self.db.list_jobs(limit=10000):
-            if job["state"] in TERMINAL_STATES:
-                continue
+        for job in self.db.list_non_terminal_jobs():
             if (job.get("execution") or "stream") == "callback" and job.get("callback_deadline_at"):
                 # Callback-pending jobs are legitimately in flight on a REMOTE worker — the
                 # dispatch thread exiting is their normal shape, not an interruption. Leave
