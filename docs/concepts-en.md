@@ -454,7 +454,10 @@ double counting across retry and restart recovery.
 - Workflow-run event count is the headline consumption measure.
 - Job count, `budget_units`, run/job wall seconds, and status remain raw measures.
 - `metadata.billable` is true only for successful workflow runs.
-- Model/token fields are visibility-only under BYOK and are not billed.
+- Per-job `tokens_prompt`/`tokens_output` are captured from the worker's `usage`
+  event (thClaws v0.85.0+) and summed into the period totals; they stay NULL for
+  workers that report no usage. Model/token fields are visibility-only under BYOK
+  and are not billed (`byok_token_counts_billable` stays false).
 - Metering errors are logged after outcomes are persisted and never change them.
 - Atlas exports raw JSON/CSV or signed offline JSON; Fleet/NT systems aggregate,
   rate, and invoice later.
