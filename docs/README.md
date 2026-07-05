@@ -69,6 +69,8 @@
   (`atlas.byok`); Atlas core stores no model key
 - [Managed Inference Gateway (readiness)](specs/managed-inference.md) — multi-provider
   gateway-worker + token/GPU-hour metering design (worker/gateway layer, not core)
+- [thClaws Worker Protocol Contract](specs/thclaws-worker-contract.md) — tested
+  endpoint/auth matrix, SSE events, sync busy semantics, and per-worker sync gate
 - [Threat Model & Deployment Assumptions](specs/threat-model.md) — trust boundaries, accepted
   residual risks (owner + re-open trigger), and the definition-of-done stop criterion
 - [Low-findings backlog](specs/backlog.md) — Low items that do not block sign-off (DoD #7),
@@ -150,6 +152,7 @@ docs/
 │   ├── openapi.yaml
 │   ├── pack-format.md
 │   ├── input-adapter-contract.md
+│   ├── thclaws-worker-contract.md
 │   ├── workflow-visual-builder-spec-th.md
 │   ├── workflow-visual-builder-spec-en.md
 │   ├── workflow-definition.schema.json
