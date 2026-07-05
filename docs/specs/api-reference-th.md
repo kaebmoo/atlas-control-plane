@@ -352,6 +352,37 @@ token usage เข้า metering ledger และเก็บ event `callback_r
   entry ติดธง `callback_pending` และผลลัพธ์ terminal ของ job ที่รันอยู่จะมาลงที่
   job row — ให้ตรวจผลนั้นก่อน authorize retry เพราะ retry จะ submit job ใหม่เสมอ
 
+### การเก็บไฟล์ (`collect_files`, T5)
+
+job (หรือ worker/manager node ใน workflow) สามารถเก็บไฟล์ผลลัพธ์จริงจาก worker
+หลังงานเสร็จได้ แทนที่จะส่งต่อเฉพาะข้อความ assistant โดยระบุรายการ path แบบ
+relative อย่างชัดเจน:
+
+```json
+{"prompt": "เขียนรายงาน", "worker_id": "wrk_reporter", "collect_files": ["reports/out.md", "data/summary.csv"]}
+```
+
+หลัง stream ของ worker จบ Atlas จะดึงเฉพาะ path เหล่านั้นผ่าน
+`POST /workspace/sync/export` (gzip tar เฉพาะไฟล์ที่ระบุ) ตรวจผ่านตัวกรอง tar ที่
+เข้มงวด (ปฏิเสธ absolute path, การไต่ `..`, symlink และ member ที่ไม่ใช่ไฟล์ปกติ
+บังคับเพดาน `ATLAS_SYNC_MAX_FILES` / `ATLAS_SYNC_MAX_BYTES` ระหว่าง stream ซึ่งกัน
+decompression bomb ด้วย) แล้วเก็บแต่ละไฟล์เป็น artifact แบบ `file_ref` ที่ดาวน์โหลด
+ได้ผ่าน artifact API พฤติกรรมและขอบเขต:
+
+- **ควบคุมด้วย `sync_mode` ของ worker** `/workspace/sync/*` ไม่ได้ป้องกันด้วย Bearer
+  ดังนั้น worker ที่ operator ยังไม่ได้ยืนยัน shape ที่อนุมัติ
+  (`tunnel`/`forward_auth`) จะไม่ถูกเรียกเลย — job จะบันทึก event
+  `files.collection_skipped` แทน ถ้าไม่ระบุ `collect_files` จะไม่มีการเรียก sync เลย
+  (พฤติกรรมไม่เปลี่ยน)
+- **Barrier ก่อน terminal** การเก็บไฟล์จะเสร็จ *ก่อน* เขียนสถานะ `succeeded`
+  ดังนั้น handoff และ workflow node ปลายทางจะเห็นชุด artifact ที่นิ่งแล้วเสมอ
+  โดย barrier มีเพดานเวลา `ATLAS_COLLECT_DEADLINE_SECONDS` (ค่าเริ่มต้น 120 วินาที)
+- **แยกความล้มเหลว (failure-isolated)** การเก็บไฟล์ไม่เปลี่ยนผลลัพธ์ของ job —
+  หากหมดเวลา ชนเพดาน tar ที่เป็นอันตราย หรือ network error จะบันทึก event
+  `files.collection_failed` (audit เก็บเฉพาะจำนวน ไม่เก็บเนื้อไฟล์) และ job ยังไปถึง
+  `succeeded` การตอบ `409 workspace busy` จะ retry แบบจำกัดจำนวนครั้ง
+- path ต้องเป็น relative และไม่มี `..` และไม่รองรับร่วมกับ `execution: "callback"`
+
 ### Handoff
 
 ```json

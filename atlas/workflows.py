@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .db import Database, now_iso
-from .jobs import CALLBACK_RETRY_ENVELOPE_SECONDS, JOB_EXECUTION_MODES
+from .jobs import CALLBACK_RETRY_ENVELOPE_SECONDS, DEFAULT_SYNC_MAX_FILES, JOB_EXECUTION_MODES, _validate_collect_files
 from .outbound import OutboundService, resolve_outbound_target
 from .router import Router
 from .usage import elapsed_seconds
@@ -188,6 +188,13 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
         ):
             # isinstance first: an unhashable value would TypeError out of the set probe (500).
             raise ValueError(f"workflow node {node_id} execution must be one of {sorted(JOB_EXECUTION_MODES)}")
+        if node["type"] in {"worker", "manager"} and "collect_files" in node:
+            # T5: validate the node's post-run collection list at save time (same rules the job
+            # submit path enforces), so a bad list is a save-time error, not a run-time surprise.
+            try:
+                _validate_collect_files(node["collect_files"], DEFAULT_SYNC_MAX_FILES)
+            except ValueError as exc:
+                raise ValueError(f"workflow node {node_id} {exc}") from exc
 
     start = graph.get("start")
     if not isinstance(start, str) or not start.strip():
@@ -1354,7 +1361,7 @@ class WorkflowRunner:
                 if action and action["instructions"].strip():
                     prompt = f"{action['instructions'].strip()}\n\n{prompt}".strip()
         payload: dict[str, Any] = {"prompt": prompt}
-        for key in ("worker_id", "workspace_id", "workspace_key", "company", "model", "tags", "role", "execution"):
+        for key in ("worker_id", "workspace_id", "workspace_key", "company", "model", "tags", "role", "execution", "collect_files"):
             if node.get(key):
                 payload[key] = node[key]
         for key in ("allowed_worker_ids", "allowed_workspace_ids"):

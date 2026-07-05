@@ -728,35 +728,40 @@ Files:
 
 Work:
 
-- [ ] Client methods incl. bounded 409 retry (small count, fixed delay —
+- [x] Client methods incl. bounded 409 retry (small count, fixed delay —
       collection follows worker stream termination, so contention should be
-      transient).
-- [ ] Safe-extractor helper (shared; the single validator any future tar
-      ingestion must use).
-- [ ] Job + node `collect_files`; artifacts with metadata: relpath, sha256
+      transient). `sync_export()` in `thclaws_client.py`. NOTE `sync_manifest()`
+      + Atlas-side glob resolution DEFERRED (no mandatory check covers it; the
+      export request is always an explicit concrete path list) — add when a
+      glob use-case appears.
+- [x] Safe-extractor helper (shared; the single validator any future tar
+      ingestion must use). `atlas/sync_files.py::safe_extract_tar` + `store_bytes`.
+- [x] Job + node `collect_files`; artifacts with metadata: relpath, sha256
       (verified on write), bytes, source job/worker.
-- [ ] Audit `files.collected` / `files.collection_failed` /
+- [x] Audit `files.collected` / `files.collection_failed` /
       `files.collection_skipped` (counts, never contents).
-- [ ] Dashboard: collected files on job/run views via existing artifact list
-      + download (gate markers).
+- [x] Dashboard: collected files on job/run views via existing artifact list
+      + download — reused as-is: collected files are `file_ref` artifacts keyed
+      to the run, so they render in the existing run-artifacts list/download with
+      no new markers.
 
 Checks:
 
-- [ ] Mock worker export → artifacts with correct sha256; downloaded bytes
+- [x] Mock worker export → artifacts with correct sha256; downloaded bytes
       byte-identical.
-- [ ] **Barrier ordering:** with `collect_files` + a handoff configured, the
+- [x] **Barrier ordering:** with `collect_files` + a handoff configured, the
       downstream job is created only AFTER artifacts exist (mock records
       event order); slow export (short of the deadline) still precedes
       `succeeded`.
-- [ ] Collection deadline exceeded → `collection_failed`, job still reaches
+- [x] Collection deadline exceeded → `collection_failed`, job still reaches
       `succeeded`, handoff proceeds.
-- [ ] Hostile tar members (`../x`, absolute, symlink) rejected; nothing
+- [x] Hostile tar members (`../x`, absolute, symlink) rejected; nothing
       written outside the upload store.
-- [ ] Caps abort collection; job stays `succeeded`; failure audited.
-- [ ] 409 then success → collection completes; persistent 409 → bounded give-up.
-- [ ] No `collect_files` → mock saw zero sync calls.
-- [ ] `sync_mode = disabled` worker → skipped event, no network call.
-- [ ] Mutation test: disable `..` rejection → hostile-tar check goes red.
+- [x] Caps abort collection; job stays `succeeded`; failure audited.
+- [x] 409 then success → collection completes; persistent 409 → bounded give-up.
+- [x] No `collect_files` → mock saw zero sync calls.
+- [x] `sync_mode = disabled` worker → skipped event, no network call.
+- [x] Mutation test: disable `..` rejection → hostile-tar check goes red.
 
 Why this milestone matters most (and the direction of its impact): today
 handoff passes `assistant_text` into the next prompt

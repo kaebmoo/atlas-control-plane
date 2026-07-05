@@ -10,10 +10,12 @@ import os
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from .db import Database, now_iso
 from .router import Router
+from .sync_files import safe_extract_tar, store_bytes
 from .thclaws_client import (
     SseEvent,
     ThClawsClient,
@@ -30,6 +32,9 @@ from .usage import elapsed_seconds
 
 TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
 JOB_EXECUTION_MODES = {"stream", "callback"}
+# T5: default cap on how many paths a job/node may collect. The runtime JobManager reads the
+# ATLAS_SYNC_MAX_FILES env; graph save-time validation (which has no runtime env) uses this.
+DEFAULT_SYNC_MAX_FILES = 200
 # thClaws CallbackPayload.status vocabulary — the full terminal enum, pinned in
 # docs/specs/thclaws-worker-contract.md against crates/core/src/api_v1/callback.rs.
 # "succeeded"/"cancelled" become the job's terminal state directly; "failed" is the worker's own
@@ -80,6 +85,28 @@ def verify_callback_token(job_id: str, token: str, secret_key: str, now_epoch: f
 
 def _nonempty_string(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _validate_collect_files(value: Any, max_files: int) -> list[str] | None:
+    """T5: normalize a job's `collect_files` request to a list of non-empty relative paths, or
+    None when absent. This bounds the REQUEST (count, string shape); the response tar is where
+    the real trust boundary is enforced (safe_extract_tar). Absolute / '..' paths are rejected
+    here too — a collect request should name outputs in the workspace, never escape it."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("collect_files must be a list of relative paths")
+    if len(value) > max_files:
+        raise ValueError(f"collect_files exceeds the {max_files}-path cap")
+    paths: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("collect_files entries must be non-empty strings")
+        path = item.strip()
+        if path.startswith("/") or "\\" in path or ".." in path.split("/"):
+            raise ValueError(f"collect_files path must be relative and contain no '..': {item!r}")
+        paths.append(path)
+    return paths or None
 
 
 def _pricing_for_worker_model(worker: dict[str, Any] | None, model: str) -> dict[str, Any] | None:
@@ -225,10 +252,19 @@ class JobManager:
         public_base_url: str | None = None,
         secret_key: str | None = None,
         callback_timeout_seconds: float | None = None,
+        upload_dir: Path | None = None,
     ):
         self.db = db
         self.router = Router(db)
         self.request_timeout_seconds = request_timeout_seconds
+        # T5 file collection: where collected artifacts land (the opaque-id upload store) and the
+        # bounds on a worker-supplied tar. The deadline caps the pre-terminal collection barrier
+        # so a hung export can never hold a job non-terminal; the byte/file caps bound a hostile
+        # or oversized transfer (a decompression bomb aborts against sync_max_bytes while streaming).
+        self.upload_dir = upload_dir
+        self.collect_deadline_seconds = float(os.getenv("ATLAS_COLLECT_DEADLINE_SECONDS", "120"))
+        self.sync_max_bytes = int(os.getenv("ATLAS_SYNC_MAX_BYTES", str(64 * 1024 * 1024)))
+        self.sync_max_files = int(os.getenv("ATLAS_SYNC_MAX_FILES", str(DEFAULT_SYNC_MAX_FILES)))
         # Backstops for a slow-dribbling / runaway worker on the (deadline-less) standalone-job
         # path: an overall wall-clock bound and a total-output cap. Generous defaults; override
         # via env. Workflow jobs additionally get the policy max_minutes deadline.
@@ -282,6 +318,16 @@ class JobManager:
             if not self.secret_key:
                 raise ValueError("execution 'callback' requires ATLAS_SECRET_KEY (signs the callback token)")
 
+        # T5 selective collection is opt-in per job. Validated here so a bad path list is a 400,
+        # not a silent no-op or a mid-run crash. None when absent -> zero behavior change.
+        collect_files = _validate_collect_files(payload.get("collect_files"), self.sync_max_files)
+        if collect_files and execution == "callback":
+            # The collection barrier lives on the stream success path (between [DONE] and the
+            # succeeded write); a callback job terminal-izes remotely, off that path. Reject the
+            # combination rather than silently skip collection.
+            # ponytail: wire collection into apply_worker_callback if async collection is ever needed.
+            raise ValueError("collect_files is not supported with execution 'callback'")
+
         conversation_id = payload.get("conversation_id")
         # Resolve routing and handoff BEFORE creating a conversation, so a failure here
         # (e.g. no workers registered, unknown handoff target) doesn't leave an orphan
@@ -321,6 +367,7 @@ class JobManager:
                 "handoff_workspace_id": handoff.get("workspace_id"),
                 "handoff_prompt": handoff.get("prompt") or "",
                 "execution": execution,
+                "collect_files": collect_files,
             }
         )
         self.db.append_job_event(
@@ -582,6 +629,11 @@ class JobManager:
                 # mid-output. Fail rather than report success so a truncated result is never
                 # handed off as complete.
                 raise ThClawsError("worker stream ended without a terminal [DONE] frame")
+            # T5 pre-terminal collection barrier: resolve file collection BEFORE the succeeded
+            # write, because 'succeeded' is what triggers _maybe_start_handoff and workflow-node
+            # progression — anything published after it races the downstream consumer. Collection
+            # is failure-isolated (never changes the job outcome) and deadline-bounded inside.
+            self._collect_files(job_id, job, worker, workspace, client)
             self.db.update_job(job_id, state="succeeded", finished_at=now_iso())
             self.db.append_job_event(job_id, "state", {"state": "succeeded"})
             self.db.audit("job.succeeded", "job", job_id)
@@ -957,6 +1009,82 @@ class JobManager:
             self.db.emit_usage_event(self._usage_payload(job, usage, job.get("finished_at"), effective_model))
         except Exception:
             LOGGER.exception("usage metering failed for job %s", job_id)
+
+    def _collect_files(
+        self,
+        job_id: str,
+        job: dict[str, Any],
+        worker: dict[str, Any],
+        workspace: dict[str, Any] | None,
+        client: ThClawsClient,
+    ) -> None:
+        """T5 pre-terminal collection: fetch the job's explicit `collect_files` list from the
+        worker via POST /workspace/sync/export and store each file as a `file_ref` artifact.
+        Failure-isolated — every outcome (collected / skipped / failed) leaves the job on its
+        way to `succeeded`; only the *timing* of the succeeded write waits for this to resolve.
+        Bounded by ATLAS_COLLECT_DEADLINE_SECONDS so a hung export never wedges the job."""
+        paths = job.get("collect_files")
+        if not paths:
+            return  # no config -> no sync call at all (zero behavior change)
+        requested = len(paths)
+        try:
+            if worker.get("sync_mode", "disabled") == "disabled":
+                # sync/* is not Bearer-protected; a disabled worker is never called. A skip, not
+                # an error — the operator has not asserted an approved shape for this worker.
+                self._collection_event(job_id, "files.collection_skipped", {"reason": "sync_mode_disabled", "requested": requested})
+                return
+            if self.upload_dir is None:
+                self._collection_event(job_id, "files.collection_failed", {"error": "no upload store configured", "requested": requested})
+                return
+            deadline = time.monotonic() + self.collect_deadline_seconds
+            raw = client.sync_export(paths, deadline=deadline, max_bytes=self.sync_max_bytes)
+            members = safe_extract_tar(raw, max_files=self.sync_max_files, max_bytes=self.sync_max_bytes)
+            context = self.db.workflow_context_for_job(job_id)
+            node_key = context.get("node_key")
+            run_id = context.get("run_id")
+            files_meta: list[dict[str, Any]] = []
+            for relpath, data in members:
+                opaque_id, sha256 = store_bytes(self.upload_dir, data)
+                key = f"files.{node_key}.{relpath}" if node_key else f"files.{relpath}"
+                self.db.create_artifact(
+                    {
+                        "run_id": run_id,
+                        "job_id": job_id,
+                        "key": key,
+                        "kind": "file_ref",
+                        "content": opaque_id,
+                        "metadata": {
+                            "relpath": relpath,
+                            "sha256": sha256,
+                            "size": len(data),
+                            "source_job_id": job_id,
+                            "source_worker_id": worker.get("id"),
+                        },
+                    }
+                )
+                # Structural metadata only (relpath/sha/bytes) — never file contents, matching
+                # T2's storage discipline. The bytes live in the opaque-id upload store.
+                files_meta.append({"relpath": relpath, "sha256": sha256, "bytes": len(data)})
+            self._collection_event(job_id, "files.collected", {"count": len(files_meta), "requested": requested, "files": files_meta})
+        except Exception as exc:
+            # Failure isolation, same discipline as the T1b cost-estimation block: collection
+            # NEVER changes the job outcome. This catch is deliberately BROAD — a narrow typed
+            # tuple would let a mid-stream tarfile error or a sqlite3 error from the artifact/
+            # audit writes escape to _run's handler and flip the job to `failed`, contradicting
+            # the "job still reaches succeeded" guarantee (threat-model + plan). The failure event
+            # is itself best-effort so a broken DB can't re-raise out of the handler either.
+            LOGGER.exception("file collection failed for job %s", job_id)
+            try:
+                self._collection_event(job_id, "files.collection_failed", {"error": str(exc), "requested": requested})
+            except Exception:
+                LOGGER.exception("failed to record files.collection_failed for job %s", job_id)
+
+    def _collection_event(self, job_id: str, event_type: str, payload: dict[str, Any]) -> None:
+        """One place for both the job-timeline event and the audit row. The audit carries COUNTS
+        only (never per-file contents or the file list), per the plan's file-collection audit rule."""
+        self.db.append_job_event(job_id, event_type, payload)
+        audit_details = {key: value for key, value in payload.items() if key != "files"}
+        self.db.audit(event_type, "job", job_id, audit_details)
 
     def _maybe_start_handoff(self, source_job_id: str) -> None:
         # Serialize the check-then-submit under the manager lock with a re-read INSIDE it: two

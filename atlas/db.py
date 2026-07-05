@@ -122,7 +122,7 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     data = dict(row)
-    list_fields = {"tags", "current_nodes", "input_artifacts", "output_artifacts", "choices"}
+    list_fields = {"tags", "current_nodes", "input_artifacts", "output_artifacts", "choices", "collect_files"}
     json_fields = {
         "agent_info",
         "condition_result",
@@ -576,6 +576,13 @@ def _migration_009_worker_sync_mode(conn: sqlite3.Connection) -> None:
     _add_missing_columns(conn, "workers", {"sync_mode": "TEXT NOT NULL DEFAULT 'disabled'"})
 
 
+def _migration_010_job_collect_files(conn: sqlite3.Connection) -> None:
+    # T5 selective file collection: the explicit path list a job collects from its worker via
+    # POST /workspace/sync/export once its stream terminates. JSON array text; NULL/absent = no
+    # collection (zero behavior change, no sync call). A new column so legacy rows read as NULL.
+    _add_missing_columns(conn, "jobs", {"collect_files": "TEXT"})
+
+
 # Ordered, append-only migration steps. A step is either a SQL string (run via
 # executescript) or a callable(conn). The 1-based index is the schema version.
 # Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
@@ -593,6 +600,7 @@ MIGRATIONS: list[str | Any] = [
     _migration_007_callback_due_index,
     _migration_008_non_terminal_jobs_index,
     _migration_009_worker_sync_mode,
+    _migration_010_job_collect_files,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -2182,9 +2190,9 @@ class Database:
                   id, conversation_id, worker_id, workspace_id, parent_job_id, state,
                   prompt, model, route_reason, thclaws_session_id,
                   handoff_worker_id, handoff_workspace_id, handoff_prompt,
-                  execution, created_at, updated_at
+                  execution, collect_files, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -2201,6 +2209,10 @@ class Database:
                     payload.get("handoff_workspace_id"),
                     payload.get("handoff_prompt") or "",
                     payload.get("execution") or "stream",
+                    # Explicit path list to collect post-stream (T5). Stored as JSON text; NULL
+                    # when absent so a plain job makes no sync call. The list was validated by the
+                    # caller (submit / workflow node); store [] as NULL to keep the no-op path clean.
+                    encode_json(payload["collect_files"]) if payload.get("collect_files") else None,
                     now,
                     now,
                 ),

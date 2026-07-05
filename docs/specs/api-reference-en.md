@@ -361,6 +361,40 @@ Requirements and bounds:
   the remote job's terminal result lands on the job row. Check that outcome
   before authorizing retry — retry always submits a new job.
 
+### File collection (`collect_files`, T5)
+
+A job (or a workflow worker/manager node) can collect real output files from its
+worker after the run finishes, instead of passing only assistant text downstream.
+Add an explicit list of relative paths:
+
+```json
+{"prompt": "Write the report", "worker_id": "wrk_reporter", "collect_files": ["reports/out.md", "data/summary.csv"]}
+```
+
+After the worker stream ends, Atlas fetches exactly those paths via
+`POST /workspace/sync/export` (a gzip tar of just the listed files), validates
+them through a strict tar filter (rejects absolute paths, `..` traversal,
+symlinks, and non-regular members; enforces `ATLAS_SYNC_MAX_FILES` /
+`ATLAS_SYNC_MAX_BYTES` caps while streaming, which also bounds a decompression
+bomb), and stores each as a `file_ref` artifact downloadable via the artifact
+API. Behaviour and bounds:
+
+- **Gated on the worker's `sync_mode`.** `/workspace/sync/*` is not Bearer-authed,
+  so a worker whose operator has not asserted an approved shape
+  (`tunnel`/`forward_auth`) is never called — the job records a
+  `files.collection_skipped` event instead. Absent `collect_files` = no sync
+  call at all (zero behaviour change).
+- **Pre-terminal barrier.** Collection resolves *before* the `succeeded` state is
+  written, so downstream handoff and workflow nodes always observe a settled
+  artifact set. The barrier is deadline-bounded by `ATLAS_COLLECT_DEADLINE_SECONDS`
+  (default 120 s).
+- **Failure-isolated.** Collection never changes the job outcome — a deadline,
+  cap, hostile tar, or network error records a `files.collection_failed` event
+  (audited with counts only, never file contents) and the job still reaches
+  `succeeded`. Export `409 workspace busy` responses are retried a bounded number
+  of times.
+- Paths must be relative with no `..`. Not supported with `execution: "callback"`.
+
 ### Handoff
 
 ```json

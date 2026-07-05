@@ -99,6 +99,7 @@ class AtlasRuntime:
             public_base_url=config.public_base_url,
             secret_key=config.secret_key,
             callback_timeout_seconds=config.callback_timeout_seconds,
+            upload_dir=self.upload_dir,
         )
         self.router = Router(self.db)
         self.outbound = OutboundService(
