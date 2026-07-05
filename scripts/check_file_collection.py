@@ -380,19 +380,23 @@ def check_job_artifacts_route(runtime: AtlasRuntime, base_url: str, worker_id: s
     # so GET /api/jobs/{id}/artifacts must return them for the Jobs-view download list. End-to-end
     # over HTTP (a static substring can't tell a working route from a broken one — mutation:
     # break the route's len(parts)/job_id filter -> this goes red).
+    # Collect MORE than list_artifacts' default limit (100) so the test also proves the route
+    # doesn't silently truncate (mutation: drop limit=1000 on the route -> only 100 returned -> red).
     _reset_worker(MockWorker)
-    MockWorker.export_tar = _gzip_tar([("out/report.md", b"job-scoped file", "file")])
-    job = _submit(runtime, worker_id, ["out/report.md"])
+    members = [(f"out/f{i:03d}.txt", f"file-{i}".encode(), "file") for i in range(105)]
+    MockWorker.export_tar = _gzip_tar(members)
+    job = _submit(runtime, worker_id, ["out"])
     job = _wait_terminal(runtime, job["id"])
     assert job["state"] == "succeeded"
     status, body, _ = request_json(base_url, "GET", f"/api/jobs/{job['id']}/artifacts", None, token)
     assert status == 200, (status, body)
     files = [art for art in body["artifacts"] if art.get("kind") == "file_ref"]
-    assert len(files) == 1 and files[0]["key"] == "files.out/report.md", files
+    assert len(files) == 105, f"expected all 105 collected files, got {len(files)} (limit truncation?)"
+    assert "files.out/f104.txt" in {art["key"] for art in files}, "a collected file is missing from the route"
     # an unknown job id is a clean 404, not a 500.
     status, _, _ = request_json(base_url, "GET", "/api/jobs/job_missing/artifacts", None, token)
     assert status == 404, status
-    print("  GET /api/jobs/{id}/artifacts returns job-scoped collected files OK")
+    print("  GET /api/jobs/{id}/artifacts returns all collected files (no 100-limit truncation) OK")
 
 
 def check_barrier_ordering(runtime: AtlasRuntime, worker_id: str, handoff_worker_id: str) -> None:

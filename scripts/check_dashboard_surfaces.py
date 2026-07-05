@@ -81,7 +81,10 @@ need("async function loadJobArtifacts(" in JS, "loadJobArtifacts not defined")
 need("/api/jobs/${encodeURIComponent(jobId)}/artifacts" in JS, "loadJobArtifacts must fetch the per-job artifacts route")
 need('artifact.kind === "file_ref"' in JS, "loadJobArtifacts must filter file_ref artifacts")
 # fetched on stream open AND on close (collection resolves at terminal).
-need(JS.count("loadJobArtifacts(jobId)") >= 2, "loadJobArtifacts must run on job open AND on stream close")
+# Count the CALL sites only (`.catch`), not the `async function loadJobArtifacts(jobId)`
+# definition — otherwise def(1)+open-call(1) = 2 would pass even with the stream-close refresh
+# removed, which is exactly the mutation this guards.
+need(JS.count("loadJobArtifacts(jobId).catch") >= 2, "loadJobArtifacts must run on job open AND on stream close")
 # NB: the backend GET /api/jobs/{id}/artifacts route is behaviour-tested end-to-end in
 # scripts/check_file_collection.py (a static substring can't tell a working route from a broken one).
 
