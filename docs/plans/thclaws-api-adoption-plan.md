@@ -10,11 +10,12 @@ Survey source: thClaws source at v0.85.0 commit `e481015` (2026-07-03),
 independent review rounds (2026-07-03); validated findings are folded in
 below — see "Review deltas" at the end for what changed and why.
 
-Execution scope: **T0 → T1a → T2 → T3 are approved for implementation now**
-(plus T1b and T4 when their preconditions are met). **T5–T8 are deferred
-milestones** — specified here so the design survives, but each requires its
-stated unblock (sync auth contract for T5–T6; operational demand for T7; a
-benchmark for T8) before implementation starts.
+Execution scope: **T0 → T1a → T2 → T3 are done and merged.** **T1b, T4, and
+T5/T6 are approved to implement now** — T5/T6 over the `tunnel` / `forward_auth`
+deployment shapes the T0 gate already sanctions (see "Sync deployment-shape
+strategy"), which need nothing from upstream. **T7 and T8's chat-completions
+half stay deferred** — T7 on operational demand, T8 Part B on a benchmark — each
+keeping its explicit unblock so the design survives.
 
 ## Objectives
 
@@ -129,26 +130,83 @@ retryable-after-terminal, not an error.
 `/v1/deploy*`, `/v1/restart`, `/v1/models`, `/v1/chat/completions`, and
 `/agent/run` all use the same Bearer auth — no such gate needed.
 
+## Sync deployment-shape strategy (T5/T6 adoption path)
+
+`/workspace/sync/{export,push,manifest,pull}` already exist in stock thClaws;
+only their **auth** is open (see the hard gate above). T5/T6 are therefore gated
+on a trust shape, not on a missing endpoint — and the project is never blocked,
+because Tier 1 needs nothing from upstream. Three tiers, in priority order:
+
+1. **Tunnel / ForwardAuth now (APPROVED, default path).** Enable
+   `sync_mode = tunnel` (sync socket reachable only through an operator-approved
+   private/SSH tunnel) or `forward_auth` (an ingress authenticates before sync).
+   Full T5/T6 on stock thClaws, no upstream change. Atlas builds against this.
+2. **Upstream Bearer on sync (preferred, opportunistic — NOT blocking).** If
+   thClaws adds Bearer to `/workspace/sync/*` (discussion #178), add a `bearer`
+   `sync_mode` after a version/capability check; it lets network-reachable
+   workers skip the tunnel. A convenience over Tier 1, never a prerequisite.
+3. **Self-patch fallback (only if a non-tunnel shape is genuinely needed AND
+   upstream stalls).** Atlas maintains a minimal thClaws patch — the
+   artifact-idea Tier-1 change (`THCLAWS_SYNC_REQUIRE_AUTH=1`, requiring the
+   existing Bearer on sync) — on a tracked fork, ships it, and submits the PR
+   upstream. Carries fork-maintenance cost (rebase until merged), so it is
+   justified only when a per-worker tunnel is a real operational blocker.
+
+**Division of labor — the operator provisions the pipe; Atlas verifies, gates,
+and tracks. Atlas never becomes a tunnel manager:**
+
+- Atlas does **not** run `ssh`, hold tunnel keys, or spawn tunnel processes —
+  that is a new secret-storage + subprocess trust surface and breaks the
+  stdlib-only / no-new-runtime-dep invariant. Tunnel credentials stay in the
+  OS/SSH layer, outside Atlas. The data path is wired simply by pointing the
+  worker's `base_url` at the tunnel endpoint.
+- Atlas **does** make it low-friction and central:
+  - **Verify at enable time** — setting `tunnel`/`forward_auth` runs the T0
+    pre-enable `sync_stat()` probe through the same client path; the mode
+    persists only on success, so a broken tunnel fails loud at toggle time, not
+    silently at collection time. (The probe proves reachability, not privacy —
+    the operator's shape assertion is load-bearing and cannot be auto-detected.)
+  - **One audited toggle per worker** (`worker.sync_mode_changed`, old→new +
+    actor); a fleet can be enabled in a batch action, each still probed.
+  - **Fleet visibility** — the dashboard shows each worker's sync shape and live
+    probe/tunnel health (reusing T4's `busy`/`busy_checked_at` staleness), so
+    "which tunnels are up" is one view, not N SSH sessions.
+  - **Copy-paste recipes, not automation** — `docs/ops/deployment.md` ships the
+    exact forward `ssh -NL` / reverse `ssh -R` / autossh / WireGuard / systemd
+    snippet parameterized by worker host:port (a T5 deliverable), turning
+    "figure out tunneling" into "paste this per machine".
+- **Transport-agnostic** — Atlas needs only `base_url` reachable + the probe to
+  pass, so the operator picks whatever fits: forward `ssh -L`, worker-initiated
+  reverse `ssh -R` to a bastion (no inbound firewall change on the worker),
+  WireGuard/Tailscale mesh, or an existing ingress ForwardAuth (near-zero
+  per-worker setup for hosted fleets). No lock-in.
+
+Net: **not** manual-and-blind per machine. The tunnel pipe is the one genuinely
+per-worker step (paste a recipe); enabling, verifying, auditing, and monitoring
+are central Atlas actions.
+
 ## Dependency order
 
 ```
 APPROVED NOW
-T0  (worker contract spike; no core code)
-T1a (token capture + doc fix)      — independent; do first
-T2  (structured events UI)         — independent
-T3  (async x_callback)             — independent; includes client-defect fix
+T0  (worker contract spike; no core code)          — done (#24)
+T1a (token capture + doc fix)                      — done (#16)
+T2  (structured events UI)                         — done (#18)
+T3  (async x_callback)                             — done (#20, #26)
 T1b (cost estimate w/ pricing snapshot) — needs T1a
 T4  (advisory state + info surface)— needs T0 (sync_mode) for the stat probe
+T5  (file collect via sync/export) — tunnel/forward_auth; T0 gate satisfied, no upstream dep
+T6  (file push handoff)            — needs T5; same tunnel/forward_auth gate
 
 DEFERRED (design recorded; each has an explicit unblock)
-T5  (file collect via sync/export) — unblock: sync auth contract (T0 gate)
-T6  (file push handoff)            — needs T5
 T7  (worker bundle deploy)         — unblock: operational demand; Bearer /v1/*
 T8  (chat-completions surface)     — unblock: benchmark proves value
 ```
 
-Recommended execution: T0 → T1a → T2 → T3, then T1b and T4.
-T1a–T3 are pure-value, low-risk, and independent of the sync auth question.
+Recommended execution: T0 → T1a → T2 → T3 (done), then T1b and T4, then
+T5 → T6 over tunnel/forward_auth. T1a–T3 were pure-value and independent of the
+sync auth question; T5/T6 adopt the tunnel shape the T0 gate already sanctions,
+so they no longer wait on upstream.
 
 ---
 
@@ -600,10 +658,14 @@ Checks:
 
 ---
 
-## Milestone T5 (DEFERRED): Selective file collection (sync/export, read-only)
+## Milestone T5 (APPROVED — tunnel/forward_auth): Selective file collection (sync/export, read-only)
 
-Unblock condition: the worker's `sync_mode` gate (T0) — an approved
-deployment shape or upstream Bearer auth on sync routes.
+Status: **unblocked for the tunnel/ForwardAuth shape.** The T0 `sync_mode` gate
+is delivered and the export endpoint exists in stock thClaws, so T5 runs now on
+any worker whose operator has asserted + probed a `tunnel` or `forward_auth`
+shape (Tier 1 of the sync deployment-shape strategy above) — no upstream change.
+Workers reachable only as plain network `--serve` stay `disabled` until upstream
+Bearer (Tier 2) or a self-patch (Tier 3).
 
 Goal: after a job succeeds on a worker whose `sync_mode` is not `disabled`, Atlas fetches an
 explicit list of output files via `POST /workspace/sync/export` (JSON array of
@@ -705,7 +767,7 @@ auth surface) is contained by the safe extractor, the caps, and the hard gate.
 
 ---
 
-## Milestone T6 (DEFERRED): File handoff (push to the next worker)
+## Milestone T6 (APPROVED — tunnel/forward_auth): File handoff (push to the next worker)
 
 Goal: a workflow edge or job handoff pushes previously-collected artifacts
 into the target worker's workspace before the downstream job starts.
@@ -1031,11 +1093,28 @@ Part B — chat-completions for builder previews (benchmark-gated):
    payload)` path would otherwise start persisting full tool payloads the
    moment the round-4 parser fix lands.
 
+### Round 6 (2026-07-05), execution-strategy update
+
+1. **T5/T6 promoted from DEFERRED to APPROVED (tunnel/forward_auth).** The T0
+   gate delivered `sync_mode` and the sync endpoints exist in stock thClaws, so
+   the tunnel/ForwardAuth path was never actually blocked — only the
+   network-reachable-without-tunnel case is. Added the "Sync deployment-shape
+   strategy" section (Tier 1 tunnel now / Tier 2 upstream Bearer #178,
+   opportunistic / Tier 3 self-patch fallback on a tracked fork, off the
+   critical path) and the operator-provisions vs Atlas-verifies-gates-tracks
+   division of labor, so Atlas never becomes a tunnel manager and the
+   stdlib-only invariant holds.
+
 ## External confirmations outstanding
 
 - thClaws: Bearer auth on `/workspace/sync/*`
-  ([discussion #178](https://github.com/thClaws/thClaws/discussions/178); blocks enabling T5/T6 for
-  network-reachable workers outside tunnel/ForwardAuth shapes).
+  ([discussion #178](https://github.com/thClaws/thClaws/discussions/178)) — **Tier 2** of the sync
+  deployment-shape strategy: opportunistic, **not blocking**. T5/T6 ship now
+  over tunnel/ForwardAuth (Tier 1); Bearer only removes the tunnel requirement
+  for network-reachable workers. **Tier 3 fallback** if upstream stalls and a
+  non-tunnel shape is genuinely needed: Atlas keeps a minimal thClaws patch
+  (`THCLAWS_SYNC_REQUIRE_AUTH=1`, the artifact-idea Tier-1 change) on a tracked
+  fork and submits it upstream — never on the T5/T6 critical path.
 - thClaws: `GET /v1/capabilities?workspace_dir=…` (workspace-scoped skills;
   [discussion #179](https://github.com/thClaws/thClaws/discussions/179)).
 - thClaws: protocol/schema version field in `/v1/agent/info`
