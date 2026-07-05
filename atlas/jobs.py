@@ -28,6 +28,13 @@ from .usage import elapsed_seconds
 
 TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
 JOB_EXECUTION_MODES = {"stream", "callback"}
+# thClaws CallbackPayload.status vocabulary — the full terminal enum, pinned in
+# docs/specs/thclaws-worker-contract.md against crates/core/src/api_v1/callback.rs.
+# "succeeded"/"cancelled" become the job's terminal state directly; "failed" is the worker's own
+# failure signal; ANYTHING else is unrecognized and mapped to 'failed' (never silently
+# 'succeeded', which would hand a possibly-failed run downstream) with the raw value surfaced so
+# contract drift or an additive upstream value stays loud instead of a mystery failure.
+_CALLBACK_TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 # A callback token must outlive the reaper deadline by the worker's whole delivery envelope:
 # thClaws retries at ~0/10/60s with a 30s per-attempt request timeout (~160s worst case), plus
 # margin for wall-clock skew between Atlas and the worker host (the token crosses machines, so
@@ -636,16 +643,31 @@ class JobManager:
             raise ValueError("callback run_id must equal the job id in the URL")
         status = payload.get("status")
         # isinstance first: an unhashable status (array/object) must map to 'failed', not
-        # TypeError out of the set probe (a 500 that leaves the job running forever).
-        state = status if isinstance(status, str) and status in {"succeeded", "cancelled"} else "failed"
+        # TypeError out of the set probe (a 500 that leaves the job running forever). Only the
+        # pinned enum is recognized: succeeded/cancelled map straight through, everything else
+        # (worker-reported "failed" AND any value outside the contract) funnels to 'failed'.
+        recognized_status = isinstance(status, str) and status in _CALLBACK_TERMINAL_STATUSES
+        # The inner isinstance is redundant at runtime (recognized_status implies it) but lets
+        # the type checker narrow `status` to str for the passthrough branch.
+        state = status if recognized_status and isinstance(status, str) and status != "failed" else "failed"
         error: str | None = None
         if state == "failed":
             detail = payload.get("error")
             message = detail.get("message") if isinstance(detail, dict) else None
-            error = str(message or f"worker reported status: {status}")[:4096]
-            # error.message is worker-controlled; if it reflects the callback api_key (the
-            # Bearer it received), persisting it verbatim breaks the never-store-tokens
-            # invariant. Redacted below, together with every other worker-controlled field.
+            if message:
+                error = str(message)[:4096]
+            elif recognized_status:
+                error = "worker reported status: failed"
+            else:
+                # A status Atlas does not recognize — drift from the pinned contract, or an
+                # additive value upstream introduced. It is mapped to 'failed' (never silently
+                # 'succeeded'), but the raw value is surfaced verbatim so the mismatch is loud
+                # and diagnosable rather than an unexplained failure. See the callback contract
+                # in docs/specs/thclaws-worker-contract.md.
+                error = f"worker reported unrecognized terminal status: {status!r}"[:4096]
+            # error is worker-controlled; if it reflects the callback api_key (the Bearer it
+            # received), persisting it verbatim breaks the never-store-tokens invariant. Redact
+            # together with every other worker-controlled field.
             error = _redact_token(error, token)
         raw_usage = payload.get("usage")
         usage = extract_usage(SseEvent(event="usage", data=json.dumps(raw_usage))) if isinstance(raw_usage, dict) else None

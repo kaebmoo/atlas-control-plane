@@ -2263,7 +2263,16 @@ class Database:
                 return None
             row = conn.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
             final = str(row["state"])
-            if final != "failed":
+            if final != state:
+                # A racing cancel flipped the CASE to 'cancelled' out from under the caller's
+                # requested terminal state (e.g. the reaper asked for 'failed' with a
+                # deadline-exceeded reason). That failure context is now stale — drop the error,
+                # the state reason, AND the audit details so the outcome reads as a clean cancel,
+                # not a cancel mislabeled with the pre-empted deadline reason.
+                error = None
+                state_reason = None
+                audit_details = None
+            elif final != "failed":
                 error = None
             seq_row = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM job_events WHERE job_id = ?", (job_id,)

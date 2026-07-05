@@ -626,6 +626,19 @@ def check_cancel_races_callback_terminal_write(tmp: Path) -> None:
         assert manager.reap_callback_jobs() == 1
         reaped = db.get_job(job2["id"])
         assert reaped["state"] == "cancelled" and reaped.get("error") is None, reaped
+        # The reaper asked for 'failed' with a deadline-exceeded reason, but cancel_requested
+        # flipped it to 'cancelled': the stale failure reason must NOT leak into the recorded
+        # outcome (state event / audit), or a cancel reads as a deadline failure.
+        cancel_events = [
+            e for e in db.get_job_events_after(job2["id"], 0, limit=1000)
+            if e["event_type"] == "state" and e["payload"].get("state") == "cancelled"
+        ]
+        assert cancel_events and all("deadline" not in str(e["payload"]) for e in cancel_events), cancel_events
+        cancel_audits = [
+            a for a in db.list_audit(limit=500)
+            if a["resource_id"] == job2["id"] and a["action"] == "job.cancelled"
+        ]
+        assert cancel_audits and all("deadline" not in str(a.get("details")) for a in cancel_audits), cancel_audits
     finally:
         mock.shutdown()
         mock.server_close()
@@ -915,7 +928,45 @@ def check_payload_validation(tmp: Path) -> None:
         status, result = _post_callback(envelope["url"], envelope["api_key"], weird)
         assert status == 200 and result == {"applied": True, "state": "failed"}, (status, result)
         final = runtime.db.get_job(job_id)
-        assert "worker reported status" in (final.get("error") or ""), final.get("error")
+        # A non-string (unhashable) status is unrecognized → failed with the offending value
+        # surfaced verbatim, not a silent mystery failure.
+        assert "unrecognized terminal status" in (final.get("error") or ""), final.get("error")
+    finally:
+        server.shutdown()
+        server.server_close()
+        mock.shutdown()
+        mock.server_close()
+
+
+def check_unrecognized_status_fails_loudly(tmp: Path) -> None:
+    """A callback whose status is a STRING outside the pinned enum (succeeded|failed|cancelled)
+    — worker/protocol drift, or an additive upstream value — must map to 'failed', NEVER
+    silently 'succeeded' (which would hand a possibly-failed run downstream), and must surface
+    the raw value verbatim so the mismatch is diagnosable. A recognized 'succeeded' still passes
+    through (the guard did not over-reject). Mutation: map an unknown status to 'succeeded', or
+    drop the verbatim surfacing, and this goes red."""
+    mock, worker_base = _start_mock_worker()
+    runtime = _make_runtime(tmp, "unknownstatus")
+    server, _base = _start_atlas(runtime)
+    try:
+        job = _submit_callback_job(runtime, worker_base, "unknown status")
+        envelope = CAPTURED[job["id"]]
+        # thClaws today sends "succeeded"; a drift to e.g. "completed" must fail loudly, not
+        # silently succeed a run whose real outcome Atlas cannot confirm.
+        status, result = _post_callback(
+            envelope["url"], envelope["api_key"], _terminal_payload(job["id"], status="completed")
+        )
+        assert status == 200 and result == {"applied": True, "state": "failed"}, (status, result)
+        final = runtime.db.get_job(job["id"])
+        assert final["state"] == "failed", final["state"]
+        assert "unrecognized terminal status" in (final.get("error") or ""), final.get("error")
+        assert "completed" in (final.get("error") or ""), final.get("error")
+
+        # The guard is not over-broad: a recognized 'succeeded' still applies as success.
+        job2 = _submit_callback_job(runtime, worker_base, "known status")
+        env2 = CAPTURED[job2["id"]]
+        status, result = _post_callback(env2["url"], env2["api_key"], _terminal_payload(job2["id"], status="succeeded"))
+        assert status == 200 and result == {"applied": True, "state": "succeeded"}, (status, result)
     finally:
         server.shutdown()
         server.server_close()
@@ -2200,6 +2251,7 @@ def main() -> None:
         check_non_202_ack_fails_fast(tmp)
         check_mismatched_ack_stays_pending(tmp)
         check_payload_validation(tmp)
+        check_unrecognized_status_fails_loudly(tmp)
         check_usage_context_backfill(tmp)
         check_workflow_wait_extends_for_callback(tmp)
         check_callback_wait_grace_math(tmp)
