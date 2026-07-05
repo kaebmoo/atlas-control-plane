@@ -124,6 +124,50 @@ names must remain forward-compatible: Atlas stores/renders them generically and
 must not crash. Tool and skill `input`/`output` payloads are never persisted by
 Atlas; only the structural projection defined in the threat model is stored.
 
+## `x_callback` async dispatch and callback contract
+
+`POST /agent/run` accepts an optional `x_callback` object (`api_v1/agent.rs`,
+`callback.rs`). When present, the worker runs fire-and-forget: it replies with a
+`202` ACK immediately and later delivers the terminal result to the Atlas URL.
+
+- **Request envelope** (Atlas → worker): `x_callback` is an **object**
+  `{url, api_key, run_id}` — NOT a bare string. `idempotency_key` defaults to
+  `run_id` upstream, so Atlas omits it and uses `run_id` (= the Atlas job id) as
+  the idempotency key.
+- **202 ACK** (worker → Atlas, synchronous): a JSON object
+  `{run_id, session_id, status: "accepted", ...}`. Atlas treats **only** a `202`
+  whose body echoes `status: "accepted"` and the same `run_id` as an accepted
+  dispatch; any other 2xx, a mismatched echo, or an unreadable ACK is not a clean
+  dispatch.
+- **Terminal delivery** (worker → Atlas, later): `POST <url>` carrying
+  `Authorization: Bearer <api_key>` and the `CallbackPayload` body. Delivery is
+  best-effort: **3 attempts at ~0/10/60 s** backoff (30 s per-attempt request
+  timeout), and the worker **gives up on any non-`429` 4xx** — so Atlas answers
+  an unverifiable/duplicate delivery with `200`/`503` (retryable), never a 4xx
+  that would strand a real result.
+- **`CallbackPayload` wire shape** (pinned against `callback.rs`):
+
+  | Field | Type | Atlas use |
+  |---|---|---|
+  | `run_id` | string | MUST equal the Atlas job id in the URL, else `400` |
+  | `status` | enum **`succeeded` \| `failed` \| `cancelled`** | terminal job state |
+  | `finish_reason` | string (`stop`/`length`/`tool_calls`/`error`) | structural event only |
+  | `summary` | string (may be empty) | appended to `assistant_text` |
+  | `usage` | object (`prompt_tokens`, `completion_tokens`, `cached_input_tokens`, `cache_creation_input_tokens`, `reasoning_output_tokens`, …) | metering ledger (same tolerant rules as the streamed `usage` event) |
+  | `tool_calls`, `tool_denials` | string[] (NAMES only) | structural `callback_result` event |
+  | `iterations` | integer | structural `callback_result` event |
+  | `error` | object `{code, message}` \| null | failure message (on non-success) |
+
+  **`status` is the load-bearing field.** Atlas recognizes exactly the enum
+  above. `succeeded`/`cancelled` map straight to the terminal state; `failed`
+  (or an `error.message`) fails the job. Any value **outside** the enum — worker
+  drift or an additive upstream status — is mapped to `failed` (never silently
+  `succeeded`) and surfaced verbatim as
+  `worker reported unrecognized terminal status: <value>`, so a vocabulary
+  mismatch is loud and diagnosable. If upstream adds or renames a terminal
+  status, THIS is the line Atlas must be re-verified against and
+  `_CALLBACK_TERMINAL_STATUSES` (`atlas/jobs.py`) updated.
+
 ## Outstanding upstream contract requests
 
 - Bearer authentication for `/workspace/sync/*`.
