@@ -122,8 +122,8 @@ Bearer auth to sync (tracked under "External confirmations"), a new
 `bearer` mode collapses the gate to a version check. Atlas never falls back
 to "use anyway".
 
-Also verified: `sync/export|pull|push|trash` return **409 Conflict while an
-agent turn is active** (`workspace busy`). Collectors must treat 409 as
+Also verified: `sync/manifest|export|pull|push|trash` return **409 Conflict
+while an agent turn is active** (`workspace busy`). Collectors must treat 409 as
 retryable-after-terminal, not an error.
 
 `/v1/deploy*`, `/v1/restart`, `/v1/models`, `/v1/chat/completions`, and
