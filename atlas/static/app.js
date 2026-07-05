@@ -17,6 +17,7 @@ const state = {
   selectedWorkflowTriggerId: null,
   workflowRunDetail: null,
   workflowArtifacts: [],
+  jobArtifacts: [],
   workflowEvents: [],
   workflowTriggerEvents: [],
   workerSuggestions: [],
@@ -1255,6 +1256,32 @@ async function downloadArtifact(artifactId, filename) {
   URL.revokeObjectURL(url);
 }
 
+// T5: a job's collected files (file_ref artifacts keyed to the job). Standalone jobs have
+// run_id NULL so they never show in the Monitor run-artifact list — surface them per job here.
+// downloadArtifact uses the passed filename for the saved name, so pass the artifact's relpath.
+async function loadJobArtifacts(jobId) {
+  let files = [];
+  try {
+    const data = await api(`/api/jobs/${encodeURIComponent(jobId)}/artifacts`);
+    files = (data.artifacts || []).filter((artifact) => artifact.kind === "file_ref");
+  } catch {
+    files = [];
+  }
+  if (state.selectedJobId !== jobId) return;  // the user switched jobs mid-fetch
+  state.jobArtifacts = files;
+  const box = $("#jobArtifactDownloads");
+  if (!box) return;
+  box.innerHTML = files.length
+    ? files.map((artifact) => {
+        const name = artifact.metadata?.relpath || artifact.metadata?.filename || artifact.key;
+        return `<button type="button" class="workflow-run-item download-artifact" data-artifact-id="${escapeHtml(artifact.id)}" data-filename="${escapeHtml(name)}">
+      <span>${escapeHtml(name)}</span>
+      <span class="item-sub">${escapeHtml(artifact.metadata?.size ?? 0)} bytes · ${escapeHtml(artifact.metadata?.sha256 || "")}</span>
+    </button>`;
+      }).join("")
+    : '<div class="empty">ยังไม่มีไฟล์ที่เก็บจากงานนี้</div>';
+}
+
 // Read-only run-count threshold alert. Derived purely from usage_events; never touches
 // budget_units (which stays the per-run cost guard).
 function renderUsageAlert(usedRuns) {
@@ -1418,8 +1445,12 @@ function openJobStream(jobId) {
   updateStreamHeader();
   $("#streamOutput").textContent = "";
   $("#eventList").innerHTML = "";
+  $("#jobArtifactDownloads").innerHTML = '<div class="empty">ยังไม่มีไฟล์ที่เก็บจากงานนี้</div>';
   renderToolTimeline();
   renderJobs();
+  // Load any already-collected files now (revisiting a finished job); collection for a still-
+  // running job resolves at terminal, so refresh again on the stream `close` below.
+  loadJobArtifacts(jobId).catch(() => {});
 
   let sawClose = false;
   const safeJson = (data) => { try { return JSON.parse(data); } catch { return { data }; } };
@@ -1433,6 +1464,7 @@ function openJobStream(jobId) {
       sawClose = true;
       appendEvent("close", safeJson(data));
       loadAll().catch((error) => toast(error.message));
+      loadJobArtifacts(jobId).catch(() => {});  // collection resolved at terminal — pick up the files
     } else {
       // Every other frame — known structured events (tool_*/skill_*/thinking/…) AND unknown
       // future names — becomes a generic event entry; buildToolTimeline() picks out the

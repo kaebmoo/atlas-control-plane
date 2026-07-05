@@ -74,6 +74,17 @@ need("payload.count" in JS and "payload.bytes" in JS and "payload.target_worker_
 need("state.workflowEvents.slice(-14)" in JS, "run timeline must show the most recent events, not the first 14")
 need("state.workflowEvents.slice(0, 14)" not in JS, "run timeline still slices the FIRST 14 events")
 
+# --- T5 gap: a standalone job's collected files are downloadable in the Jobs view ---------
+need('data-job-tab="files"' in HTML, "Jobs view missing the Files tab")
+need('id="jobArtifactDownloads"' in HTML, "Jobs view missing #jobArtifactDownloads pane")
+need("async function loadJobArtifacts(" in JS, "loadJobArtifacts not defined")
+need("/api/jobs/${encodeURIComponent(jobId)}/artifacts" in JS, "loadJobArtifacts must fetch the per-job artifacts route")
+need('artifact.kind === "file_ref"' in JS, "loadJobArtifacts must filter file_ref artifacts")
+# fetched on stream open AND on close (collection resolves at terminal).
+need(JS.count("loadJobArtifacts(jobId)") >= 2, "loadJobArtifacts must run on job open AND on stream close")
+# NB: the backend GET /api/jobs/{id}/artifacts route is behaviour-tested end-to-end in
+# scripts/check_file_collection.py (a static substring can't tell a working route from a broken one).
+
 # --- existing anchors must not regress (careless rewrite guard) ---------------------------
 need('id="usageBudgetUnits"' in HTML, "existing Usage marker regressed")
 need('id="promptInput"' in HTML, "existing job-form marker regressed")

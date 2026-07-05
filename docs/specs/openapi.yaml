@@ -552,6 +552,28 @@ paths:
                   job: {$ref: '#/components/schemas/Job'}
         default: {$ref: '#/components/responses/Error'}
 
+  /api/jobs/{job_id}/artifacts:
+    parameters:
+      - {$ref: '#/components/parameters/JobId'}
+    get:
+      tags: [Jobs]
+      operationId: listJobArtifacts
+      summary: List artifacts collected for a job (T5)
+      description: |
+        The job's collected `file_ref` artifacts (from `collect_files`). A standalone job's
+        collected files are keyed to the job (run_id NULL), so this per-job list surfaces them
+        for download; workflow-node jobs also appear under the run's artifacts list.
+      responses:
+        '200':
+          description: Artifacts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifacts: {type: array, items: {$ref: '#/components/schemas/Artifact'}}
+        default: {$ref: '#/components/responses/Error'}
+
   /api/jobs/{job_id}/events:
     parameters:
       - {$ref: '#/components/parameters/JobId'}

@@ -146,6 +146,7 @@ Every error uses one JSON shape:
 | GET | `/api/jobs/{job_id}` | Job detail |
 | POST | `/api/jobs/{job_id}/cancel` | Best-effort cancellation |
 | GET | `/api/jobs/{job_id}/events?after=0` | Replay/follow SSE |
+| GET | `/api/jobs/{job_id}/artifacts` | Collected files for the job (T5 `file_ref` artifacts) |
 | POST | `/api/worker-callbacks/{job_id}` | Worker-only terminal delivery for `execution: "callback"` jobs (signed callback token, not user auth) |
 
 ### Workflow definitions and AI builder

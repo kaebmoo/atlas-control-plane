@@ -515,6 +515,15 @@ class AtlasHandler(BaseHTTPRequestHandler):
             self._stream_job_events(parts[2], after)
             return
 
+        if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "artifacts" and method == "GET":
+            # T5: a standalone job's collected files are file_ref artifacts keyed to the job
+            # (run_id is NULL when it's not a workflow node), so the run-scoped artifacts route
+            # can't surface them. Mirror it per job so the dashboard can list + download them.
+            if not runtime.db.get_job(parts[2]):
+                raise FileNotFoundError()
+            self._json({"artifacts": [_public_artifact(artifact) for artifact in runtime.db.list_artifacts(job_id=parts[2])]})
+            return
+
         if parts == ["api", "workflows"]:
             if method == "GET":
                 limit = _parse_limit(query)
