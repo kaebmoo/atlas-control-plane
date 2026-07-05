@@ -203,6 +203,9 @@ const POLICY_FORM_FIELDS = [
   ["allowed_worker_ids", "#policyAllowedWorkersInput", "list"],
   ["allowed_workspace_ids", "#policyAllowedWorkspacesInput", "list"],
   ["stop_on_first_failure", "#policyStopOnFailureInput", "boolean"],
+  // T6: default-OFF boolean (unlike stop_on_first_failure, which defaults ON) — a missing
+  // file_handoff must render UNCHECKED, so it uses the "boolean_off" handling below.
+  ["file_handoff", "#policyFileHandoffInput", "boolean_off"],
 ];
 
 function syncPolicyFormFromJson() {
@@ -217,6 +220,9 @@ function syncPolicyFormFromJson() {
     const value = policy[key];
     if (type === "boolean") {
       $(selector).checked = value !== false;
+    } else if (type === "boolean_off") {
+      // default-off: only an explicit true checks the box (a missing key stays unchecked).
+      $(selector).checked = value === true;
     } else {
       $(selector).value = type === "list" ? (Array.isArray(value) ? value.join(", ") : "") : (value ?? "");
     }
@@ -235,6 +241,13 @@ function syncPolicyJsonFromForm() {
   for (const [key, selector, type] of POLICY_FORM_FIELDS) {
     if (type === "boolean") {
       policy[key] = $(selector).checked;
+      continue;
+    }
+    if (type === "boolean_off") {
+      // default-off: write true only when checked; drop the key entirely when unchecked so the
+      // saved policy stays clean (no noisy `file_handoff: false` on every workflow).
+      if ($(selector).checked) policy[key] = true;
+      else delete policy[key];
       continue;
     }
     const raw = $(selector).value.trim();
@@ -309,7 +322,12 @@ function addBuilderEdge() {
   } else if (type === "max_iterations_below") {
     condition = { type, node: subject, max: Number.parseInt(value, 10) };
   }
-  graph.edges = [...(graph.edges || []), { from, to, condition }];
+  const edge = { from, to, condition };
+  // T6: optional artifact-key globs pushed to the target worker before its job (needs
+  // policy.file_handoff; the server validator rejects push_files without it at save time).
+  const pushFiles = $("#builderEdgePushFilesInput").value.split(",").map((pattern) => pattern.trim()).filter(Boolean);
+  if (pushFiles.length) edge.push_files = pushFiles;
+  graph.edges = [...(graph.edges || []), edge];
   $("#workflowGraphInput").value = prettyJson(graph);
   setDirty(true);
   toast(`${type} edge added to JSON preview`);
@@ -1075,7 +1093,13 @@ function renderWorkflowRuns() {
     node.innerHTML = state.workflowEvents.slice(0, 14).map((event) => {
       const type = event.event_type || "";
       const dot = /completed|succeeded|granted/.test(type) ? "ok" : /running|started/.test(type) ? "run" : /failed|error|rejected/.test(type) ? "err" : "";
-      return `<div class="tl-item"><span class="tl-dot ${dot}"></span><div><div class="ttl">${escapeHtml(type)}${event.node_key ? ` · ${escapeHtml(event.node_key)}` : ""}</div><div class="sub">${escapeHtml(formatTime(event.created_at))}</div></div></div>`;
+      // T6: surface the file-handoff push details (count/bytes/target) inline rather than only
+      // in the raw JSON. Numbers are coerced and the worker id escaped, so the detail is safe.
+      const payload = event.payload || {};
+      const detail = type === "files_pushed"
+        ? ` · ${Number(payload.count ?? 0)} files · ${Number(payload.bytes ?? 0)} bytes → ${escapeHtml(String(payload.target_worker_id || ""))}`
+        : "";
+      return `<div class="tl-item"><span class="tl-dot ${dot}"></span><div><div class="ttl">${escapeHtml(type)}${event.node_key ? ` · ${escapeHtml(event.node_key)}` : ""}</div><div class="sub">${escapeHtml(formatTime(event.created_at))}${detail}</div></div></div>`;
     }).join("");
   });
 
@@ -1256,6 +1280,13 @@ async function loadUsage() {
   $("#usageRuns").textContent = totals.workflow_runs ?? 0;
   $("#usageJobs").textContent = totals.jobs ?? 0;
   $("#usageBudgetUnits").textContent = totals.budget_units ?? 0;
+  // T1a token totals + T1b estimated cost. The estimate is deliberately labelled non-billable
+  // (byok_token_counts_billable stays false server-side); show a plain "$0" when absent.
+  const tokensPrompt = Number(totals.tokens_prompt ?? 0);
+  const tokensOutput = Number(totals.tokens_output ?? 0);
+  $("#usageTokens").textContent = `${tokensPrompt.toLocaleString()} · ${tokensOutput.toLocaleString()}`;
+  const estCost = Number(totals.estimated_cost_usd ?? 0);
+  $("#usageEstCost").textContent = estCost ? `$${estCost.toFixed(4)}` : "$0";
   $("#usageMeta").textContent = (data.from || data.to)
     ? `ช่วง ${data.from || "…"} → ${data.to || "…"}`
     : "ทุกช่วงเวลา";
@@ -1331,6 +1362,10 @@ async function submitJob() {
     workspace_id: $("#workspaceSelect").value || undefined,
     model: $("#modelInput").value.trim() || undefined,
   };
+  // T5: optional collect_files (relative paths, comma-separated); T3: opt-in async callback.
+  const collectFiles = $("#collectFilesInput").value.split(",").map((path) => path.trim()).filter(Boolean);
+  if (collectFiles.length) payload.collect_files = collectFiles;
+  if ($("#jobExecutionCallback").checked) payload.execution = "callback";
   if ($("#handoffEnabled").checked) {
     const handoffWorkspaceId = $("#handoffWorkspaceSelect").value || undefined;
     const handoffWorkerId = $("#handoffWorkerSelect").value || undefined;
@@ -1350,6 +1385,7 @@ async function submitJob() {
   state.streamText = "";
   state.events = [];
   $("#promptInput").value = "";
+  $("#collectFilesInput").value = "";
   await loadAll();
   openJobStream(data.job.id);
   showView("jobs");

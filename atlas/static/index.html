@@ -217,6 +217,10 @@
                 <label class="field"><span>Workspace</span><select id="workspaceSelect"></select></label>
                 <label class="field"><span>บทสนทนา · Conversation</span><select id="conversationSelect"></select></label>
                 <label class="field"><span>โมเดล · Model</span><input id="modelInput" placeholder="ค่าเริ่มต้นของ worker"></label>
+                <label class="field"><span>เก็บไฟล์ · Collect files <span class="hint-inline">— T5 · relative paths คั่นด้วย comma</span></span><input id="collectFilesInput" placeholder="reports/out.md, data/summary.csv"></label>
+                <div class="field toggle-field"><span>Async (callback) <span class="hint-inline">— T3 · ต้องตั้ง ATLAS_PUBLIC_BASE_URL ที่ server</span></span>
+                  <label class="switch"><input id="jobExecutionCallback" type="checkbox"><span class="slider"></span></label>
+                </div>
               </div>
 
               <div class="handoff-box" id="handoffBox">
@@ -354,6 +358,7 @@
                         <label class="field"><span>Artifact / node</span><input id="builderConditionSubjectInput" placeholder="fact_check"></label>
                         <label class="field"><span>Path</span><input id="builderConditionPathInput" placeholder="verdict"></label>
                         <label class="field"><span>Value(s) / max</span><input id="builderConditionValueInput" placeholder="approved or approved,rewrite"></label>
+                        <label class="field"><span>Push files <span class="hint-inline">— T6 · artifact-key globs, ต้องเปิด policy file handoff</span></span><input id="builderEdgePushFilesInput" placeholder="files.coder.*"></label>
                       </div>
                       <button id="builderAddEdgeBtn" class="preview-btn" type="button">Add edge</button>
                     </div>
@@ -382,6 +387,9 @@
                   <label class="field"><span>Allowed workspace IDs</span><input id="policyAllowedWorkspacesInput" placeholder="wsp_one, wsp_two"></label>
                   <div class="field toggle-field"><span>Stop on first failure</span>
                     <label class="switch"><input id="policyStopOnFailureInput" type="checkbox" checked><span class="slider"></span></label>
+                  </div>
+                  <div class="field toggle-field"><span>File handoff <span class="hint-inline">— T6 · เปิดใช้ edge push_files</span></span>
+                    <label class="switch"><input id="policyFileHandoffInput" type="checkbox"><span class="slider"></span></label>
                   </div>
                 </div>
                 <div class="field code-field">
@@ -633,6 +641,8 @@
               <div class="metric metric-dark"><span class="metric-label">Workflow runs</span><span id="usageRuns" class="metric-value">—</span><span class="metric-foot accent">หน่วยใช้งานหลัก (headline)</span></div>
               <div class="metric"><span class="metric-label">งาน (jobs)</span><span id="usageJobs" class="metric-value">—</span><span class="metric-foot">รวมทุก worker</span></div>
               <div class="metric"><span class="metric-label">Budget units</span><span id="usageBudgetUnits" class="metric-value">—</span><span class="metric-foot">ตัวเลขจำนวนเต็ม · ไม่ใช่ค่าเงิน</span></div>
+              <div class="metric"><span class="metric-label">Tokens (prompt · output)</span><span id="usageTokens" class="metric-value">—</span><span class="metric-foot">T1a · นับจาก worker</span></div>
+              <div class="metric"><span class="metric-label">Est. cost (USD)</span><span id="usageEstCost" class="metric-value">—</span><span class="metric-foot">T1b · ประมาณการ ไม่ใช่บิล (estimate)</span></div>
             </div>
 
             <div class="usage-charts">
