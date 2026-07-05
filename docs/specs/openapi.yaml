@@ -1886,6 +1886,18 @@ components:
             ATLAS_SECRET_KEY on the server, else the request is rejected with 400.
             Jobs that never call back are failed by a reaper after
             ATLAS_CALLBACK_TIMEOUT_SECONDS.
+        collect_files:
+          type: array
+          items: {type: string}
+          description: |
+            T5 selective collection: explicit relative paths to fetch from the
+            worker via POST /workspace/sync/export after the job's stream ends,
+            stored as file_ref artifacts. Requires the worker's sync_mode to be an
+            approved shape (tunnel/forward_auth); a disabled worker yields a
+            files.collection_skipped event. Collection is failure-isolated — it
+            never changes the job outcome, only delays the succeeded write until it
+            resolves. Not supported with execution:"callback". Paths must be relative
+            with no "..". Absent = no collection (no sync call).
       additionalProperties: true
 
     Job:
@@ -1915,6 +1927,10 @@ components:
           type: [string, 'null']
           format: date-time
           description: For execution:"callback" jobs, when the reaper fails a job that never called back; null on stream jobs
+        collect_files:
+          type: [array, 'null']
+          items: {type: string}
+          description: T5 selective-collection path list (see JobCreate.collect_files); null when no collection is requested
         created_at: {type: string, format: date-time}
         started_at: {type: [string, 'null'], format: date-time}
         finished_at: {type: [string, 'null'], format: date-time}

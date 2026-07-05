@@ -54,10 +54,22 @@ class ThClawsClient:
         self.token = token
         self.timeout = timeout
 
-    def _request(self, method: str, path: str, payload: Any = None, timeout: float | None = None) -> urllib.response.addinfourl:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: Any = None,
+        timeout: float | None = None,
+        raw_body: bytes | None = None,
+        content_type: str | None = None,
+    ) -> urllib.response.addinfourl:
         body = None
         headers = {"Accept": "application/json"}
-        if payload is not None:
+        if raw_body is not None:
+            # Raw bytes (a T6 push tar), not JSON — the caller owns the content type.
+            body = raw_body
+            headers["Content-Type"] = content_type or "application/octet-stream"
+        elif payload is not None:
             body = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
         if self.token:
@@ -134,6 +146,108 @@ class ThClawsClient:
         if not isinstance(payload, dict):
             raise ThClawsError("Invalid sync stat from /workspace/sync/stat")
         return payload
+
+    def sync_export(
+        self,
+        paths: list[str],
+        *,
+        deadline: float,
+        max_bytes: int,
+        retry_409_max: int = 4,
+        retry_409_delay: float = 0.5,
+    ) -> bytes:
+        """Collect an EXPLICIT path list from the worker via `POST /workspace/sync/export`
+        (JSON path array in, gzip tar of just those paths out). Returns the raw tar bytes,
+        bounded in BOTH size (`max_bytes`) and wall-clock (`deadline`, a `time.monotonic()`
+        value) — a semi-trusted worker must not be able to pin the collection thread or exhaust
+        memory. NOT `/sync/pull`, which tars the whole workspace.
+
+        Export returns 409 Conflict while an agent turn is active (`workspace busy`). Collection
+        runs AFTER the worker stream terminates, so contention is transient — retry a bounded
+        number of times with a fixed delay, but never past `deadline`. Any other error (or a
+        persistent 409) propagates as a ThClawsError for the caller's failure isolation.
+
+        Like `sync_stat`, `/workspace/sync/*` is NOT Bearer-protected: only call this on a worker
+        whose operator-asserted `sync_mode` is an approved shape (docs/specs/thclaws-worker-contract.md)."""
+        return self._call_with_409_retry(
+            lambda: self._sync_export_once(paths, deadline=deadline, max_bytes=max_bytes),
+            deadline=deadline,
+            retry_max=retry_409_max,
+            retry_delay=retry_409_delay,
+        )
+
+    def sync_push(
+        self,
+        tar_bytes: bytes,
+        *,
+        deadline: float,
+        max_ack_bytes: int = 64 * 1024,
+        retry_409_max: int = 4,
+        retry_409_delay: float = 0.5,
+    ) -> dict[str, Any]:
+        """Push a gzip tar of ADDITIVE files into the target worker's workspace via
+        `POST /workspace/sync/push` (T6). Atlas builds the arcnames as
+        `incoming/<run_id>/<node_key>/…`, so a push can never clobber the worker's own files;
+        Atlas never sends any replace/trash option. Bounded by `deadline` (a `time.monotonic()`
+        value) with a bounded 409-`workspace busy` retry. The ACK body is read bounded. Same
+        sync-auth caveat as `sync_export` — only call on a `tunnel`/`forward_auth` worker."""
+        return self._call_with_409_retry(
+            lambda: self._sync_push_once(tar_bytes, deadline=deadline, max_ack_bytes=max_ack_bytes),
+            deadline=deadline,
+            retry_max=retry_409_max,
+            retry_delay=retry_409_delay,
+        )
+
+    def _call_with_409_retry(self, once: Any, *, deadline: float, retry_max: int, retry_delay: float) -> Any:
+        # 409 = the worker is mid-turn; sync collection/push follows stream termination so it
+        # clears quickly. Retry a bounded number of times, but only while enough of the deadline
+        # remains for both the delay and a subsequent attempt. Any other error, or a persistent
+        # 409, propagates to the caller. Shared by sync_export and sync_push (one source).
+        attempts_left = max(0, retry_max)
+        while True:
+            try:
+                return once()
+            except ThClawsError as exc:
+                if exc.http_status == 409 and attempts_left > 0 and (deadline - time.monotonic()) > retry_delay:
+                    attempts_left -= 1
+                    time.sleep(retry_delay)
+                    continue
+                raise
+
+    def _sync_export_once(self, paths: list[str], *, deadline: float, max_bytes: int) -> bytes:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ThClawsError("sync export exceeded its deadline")
+        response = self._request(
+            "POST", "/workspace/sync/export", payload=list(paths), timeout=min(self.timeout, remaining)
+        )
+        try:
+            return _read_bounded(response, max_bytes, deadline)
+        finally:
+            response.close()
+
+    def _sync_push_once(self, tar_bytes: bytes, *, deadline: float, max_ack_bytes: int) -> dict[str, Any]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ThClawsError("sync push exceeded its deadline")
+        response = self._request(
+            "POST",
+            "/workspace/sync/push",
+            timeout=min(self.timeout, remaining),
+            raw_body=tar_bytes,
+            content_type="application/gzip",
+        )
+        try:
+            body = _read_bounded(response, max_ack_bytes, deadline).decode("utf-8", errors="replace")
+        finally:
+            response.close()
+        if not body.strip():
+            return {}
+        try:
+            ack = json.loads(body)
+        except json.JSONDecodeError:
+            return {}  # a non-JSON 2xx ack is fine — the status already means accepted
+        return ack if isinstance(ack, dict) else {}
 
     def run_agent_stream(
         self,

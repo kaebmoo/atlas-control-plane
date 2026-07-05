@@ -37,6 +37,19 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
+def resolve_in_store(upload_dir: Path, content: Any) -> Path | None:
+    """Resolve a file_ref's `content` to its file in the FLAT upload store, or None when it
+    escapes (absolute path, '..', or symlink-resolves outside) or is missing. The single
+    containment check for every consumer of file_ref bytes — artifact download, retention
+    purge, and the T6 push all route through here so the store boundary can never drift
+    between copies."""
+    root = upload_dir.resolve()
+    target = (root / str(content or "")).resolve()
+    if target.parent != root or not target.is_file():
+        return None
+    return target
+
+
 def atomic_write_0600(path: Path, data: bytes) -> None:
     """Write bytes to path atomically at 0600: a temp file in the same directory is written,
     fsynced, then os.replace()d over the target. A short write or disk error leaves the
@@ -122,7 +135,7 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     data = dict(row)
-    list_fields = {"tags", "current_nodes", "input_artifacts", "output_artifacts", "choices"}
+    list_fields = {"tags", "current_nodes", "input_artifacts", "output_artifacts", "choices", "collect_files"}
     json_fields = {
         "agent_info",
         "condition_result",
@@ -576,6 +589,13 @@ def _migration_009_worker_sync_mode(conn: sqlite3.Connection) -> None:
     _add_missing_columns(conn, "workers", {"sync_mode": "TEXT NOT NULL DEFAULT 'disabled'"})
 
 
+def _migration_010_job_collect_files(conn: sqlite3.Connection) -> None:
+    # T5 selective file collection: the explicit path list a job collects from its worker via
+    # POST /workspace/sync/export once its stream terminates. JSON array text; NULL/absent = no
+    # collection (zero behavior change, no sync call). A new column so legacy rows read as NULL.
+    _add_missing_columns(conn, "jobs", {"collect_files": "TEXT"})
+
+
 # Ordered, append-only migration steps. A step is either a SQL string (run via
 # executescript) or a callable(conn). The 1-based index is the schema version.
 # Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
@@ -593,6 +613,7 @@ MIGRATIONS: list[str | Any] = [
     _migration_007_callback_due_index,
     _migration_008_non_terminal_jobs_index,
     _migration_009_worker_sync_mode,
+    _migration_010_job_collect_files,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -1629,6 +1650,7 @@ class Database:
         run_id: str | None = None,
         job_id: str | None = None,
         key: str | None = None,
+        kind: str | None = None,
     ) -> list[dict[str, Any]]:
         where = []
         params: list[Any] = []
@@ -1641,6 +1663,9 @@ class Database:
         if key:
             where.append("key = ?")
             params.append(key)
+        if kind:
+            where.append("kind = ?")
+            params.append(kind)
         sql = "SELECT * FROM artifacts"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -1698,8 +1723,8 @@ class Database:
         with self._lock, self.connect() as conn:
             for artifact in candidates:
                 if root is not None and artifact.get("kind") == "file_ref":
-                    target = (root / str(artifact.get("content") or "")).resolve()
-                    if target.parent == root and target.is_file():
+                    target = resolve_in_store(root, artifact.get("content"))
+                    if target is not None:
                         try:
                             target.unlink()
                         except OSError as exc:
@@ -2182,9 +2207,9 @@ class Database:
                   id, conversation_id, worker_id, workspace_id, parent_job_id, state,
                   prompt, model, route_reason, thclaws_session_id,
                   handoff_worker_id, handoff_workspace_id, handoff_prompt,
-                  execution, created_at, updated_at
+                  execution, collect_files, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -2201,6 +2226,10 @@ class Database:
                     payload.get("handoff_workspace_id"),
                     payload.get("handoff_prompt") or "",
                     payload.get("execution") or "stream",
+                    # Explicit path list to collect post-stream (T5). Stored as JSON text; NULL
+                    # when absent so a plain job makes no sync call. The list was validated by the
+                    # caller (submit / workflow node); store [] as NULL to keep the no-op path clean.
+                    encode_json(payload["collect_files"]) if payload.get("collect_files") else None,
                     now,
                     now,
                 ),

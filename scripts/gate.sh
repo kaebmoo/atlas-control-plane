@@ -17,7 +17,8 @@ python3 -m py_compile \
   scripts/check_docs.py scripts/check_stress.py scripts/check_fuzz.py \
   scripts/check_ui_ux.py scripts/check_input_adapter.py scripts/check_outbound.py \
   scripts/check_observability.py scripts/check_permit_poc.py scripts/check_event_views.py \
-  scripts/check_lib.py scripts/check_async_jobs.py scripts/check_worker_state.py
+  scripts/check_lib.py scripts/check_async_jobs.py scripts/check_worker_state.py \
+  scripts/check_file_collection.py scripts/check_file_handoff.py
 
 node --check atlas/static/app.js
 
@@ -46,5 +47,7 @@ python3 scripts/check_outbound.py       # OB-1: signed outbound delivery + deliv
 python3 scripts/check_observability.py  # cross-cutting: metrics, audit export, classification + purge
 python3 scripts/check_permit_poc.py     # permit PoC: operator dashboard escapes untrusted fields
 python3 scripts/check_async_jobs.py     # T3: x_callback async jobs — pre-auth carve-out, HMAC token, reaper, races
+python3 scripts/check_file_collection.py # T5: sync/export collection barrier — safe tar, caps, 409 retry, ordering
+python3 scripts/check_file_handoff.py   # T6: sync/push file handoff — two workers, policy gate, additive, push failure
 
 echo "=== completion gate GREEN ==="

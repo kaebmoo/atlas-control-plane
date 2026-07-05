@@ -728,35 +728,40 @@ Files:
 
 Work:
 
-- [ ] Client methods incl. bounded 409 retry (small count, fixed delay —
+- [x] Client methods incl. bounded 409 retry (small count, fixed delay —
       collection follows worker stream termination, so contention should be
-      transient).
-- [ ] Safe-extractor helper (shared; the single validator any future tar
-      ingestion must use).
-- [ ] Job + node `collect_files`; artifacts with metadata: relpath, sha256
+      transient). `sync_export()` in `thclaws_client.py`. NOTE `sync_manifest()`
+      + Atlas-side glob resolution DEFERRED (no mandatory check covers it; the
+      export request is always an explicit concrete path list) — add when a
+      glob use-case appears.
+- [x] Safe-extractor helper (shared; the single validator any future tar
+      ingestion must use). `atlas/sync_files.py::safe_extract_tar` + `store_bytes`.
+- [x] Job + node `collect_files`; artifacts with metadata: relpath, sha256
       (verified on write), bytes, source job/worker.
-- [ ] Audit `files.collected` / `files.collection_failed` /
+- [x] Audit `files.collected` / `files.collection_failed` /
       `files.collection_skipped` (counts, never contents).
-- [ ] Dashboard: collected files on job/run views via existing artifact list
-      + download (gate markers).
+- [x] Dashboard: collected files on job/run views via existing artifact list
+      + download — reused as-is: collected files are `file_ref` artifacts keyed
+      to the run, so they render in the existing run-artifacts list/download with
+      no new markers.
 
 Checks:
 
-- [ ] Mock worker export → artifacts with correct sha256; downloaded bytes
+- [x] Mock worker export → artifacts with correct sha256; downloaded bytes
       byte-identical.
-- [ ] **Barrier ordering:** with `collect_files` + a handoff configured, the
+- [x] **Barrier ordering:** with `collect_files` + a handoff configured, the
       downstream job is created only AFTER artifacts exist (mock records
       event order); slow export (short of the deadline) still precedes
       `succeeded`.
-- [ ] Collection deadline exceeded → `collection_failed`, job still reaches
+- [x] Collection deadline exceeded → `collection_failed`, job still reaches
       `succeeded`, handoff proceeds.
-- [ ] Hostile tar members (`../x`, absolute, symlink) rejected; nothing
+- [x] Hostile tar members (`../x`, absolute, symlink) rejected; nothing
       written outside the upload store.
-- [ ] Caps abort collection; job stays `succeeded`; failure audited.
-- [ ] 409 then success → collection completes; persistent 409 → bounded give-up.
-- [ ] No `collect_files` → mock saw zero sync calls.
-- [ ] `sync_mode = disabled` worker → skipped event, no network call.
-- [ ] Mutation test: disable `..` rejection → hostile-tar check goes red.
+- [x] Caps abort collection; job stays `succeeded`; failure audited.
+- [x] 409 then success → collection completes; persistent 409 → bounded give-up.
+- [x] No `collect_files` → mock saw zero sync calls.
+- [x] `sync_mode = disabled` worker → skipped event, no network call.
+- [x] Mutation test: disable `..` rejection → hostile-tar check goes red.
 
 Why this milestone matters most (and the direction of its impact): today
 handoff passes `assistant_text` into the next prompt
@@ -804,23 +809,33 @@ Files:
 
 Work:
 
-- [ ] Tar assembly from file_ref artifacts; push client with deadline/caps;
-      no automatic retry of a failed push beyond the 409 policy (a re-run is
-      the operator's decision — same philosophy as restart recovery).
-- [ ] Engine: resolve `push_files` against run artifacts → push → create
-      downstream job with `{files_dir}`.
-- [ ] Validator: `push_files` requires `policy.file_handoff`; builder repair
-      suggests enabling it.
-- [ ] Dashboard: pushes (count/bytes/target) on the run timeline (markers).
+- [x] Tar assembly from file_ref artifacts (`sync_files.build_push_tar`,
+      reproducible); push client `sync_push()` with deadline/caps + bounded
+      409-retry; no automatic retry of a failed push beyond the 409 policy.
+- [x] Engine: resolve `push_files` against run artifacts → push → create
+      downstream job with `{files_dir}` (`_push_files_to_worker`, taken-edge
+      intent stashed per target node, pushed to the RESOLVED worker).
+- [x] Validator: `push_files` requires `policy.file_handoff` (save-time in
+      `validate_workflow_graph` + runtime guard in the `_execute_run` node loop).
+      NOTE: builder explain/repair "suggests enabling it" DEFERRED — an
+      AI-builder nicety, no mandatory check; the hard validator ships.
+- [x] Dashboard: pushes on the run timeline — reused: `files_pushed` workflow
+      events (count/bytes/target) render via the existing workflow-event
+      timeline; no new marker code needed.
+- [ ] **Single-job `handoff_push_files` variant (jobs.py) — DEFERRED.** No
+      mandatory check covers it; standalone-job handoff currently passes
+      assistant_text and file push there needs its own opt-in + job column.
+      Workflow edges are the tested primary path (add when a single-job
+      file-handoff use-case appears).
 
 Checks:
 
-- [ ] Two mock workers end-to-end: A's artifacts → pushed → B's prompt has
+- [x] Two mock workers end-to-end: A's artifacts → pushed → B's prompt has
       `{files_dir}`; B's mock received members byte-identical to A's.
-- [ ] Push without policy → save-time validation error AND runtime guard.
-- [ ] Push failure → edge fails loudly; continue-on-failure audited skip.
-- [ ] Mock asserts trash/replace endpoints never called.
-- [ ] Mutation test: drop the runtime policy guard → check goes red.
+- [x] Push without policy → save-time validation error AND runtime guard.
+- [x] Push failure → edge fails loudly; continue-on-failure audited skip.
+- [x] Mock asserts trash/replace endpoints never called.
+- [x] Mutation test: drop the runtime policy guard → check goes red.
 
 ---
 
