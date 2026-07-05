@@ -1,9 +1,10 @@
-# thClaws API Adoption — Autonomous Spin Prompts (with codex review loop)
+# thClaws API Adoption — Autonomous Spin Prompts (with Claude review loop)
 
 Ready-to-run prompts that drive Claude Code through the **approved-now**
 milestones of [../plans/thclaws-api-adoption-plan.md](../plans/thclaws-api-adoption-plan.md)
 — **T0 → T1a → T2 → T3** — committing each milestone only after the gate is
-green AND a `codex review` pass reports no unresolved actionable findings.
+green AND an independent Claude review pass reports no unresolved actionable
+findings.
 
 > T1b/T4 run only after their stated preconditions; T5–T8 are DEFERRED in the
 > plan and are NOT in scope for this driver. Do not implement them.
@@ -18,7 +19,10 @@ set the stop conditions.
 ```text
 Repo: /Users/seal/Documents/GitHub/atlas-control-plane
 Start from a clean `main` with `./scripts/gate.sh` passing. Requires
-Python 3.11+ (datetime.UTC) and node. codex-cli 0.140.0 is installed.
+Python 3.11+ (datetime.UTC) and node. Reviews run as an INDEPENDENT Claude Code
+review — a fresh `feature-dev:code-reviewer` subagent (or the `/code-review`
+skill on the diff), never the context that wrote the code. No external review
+CLI is used (codex is not required).
 
 Read FIRST, before editing (source of truth, in this order):
 - AGENTS.md                                        (invariants + workflow)
@@ -51,8 +55,11 @@ Per-milestone loop (run in exactly this order; never skip a step):
    → revert → MUST pass. Record which mutation you used.
 3. ./scripts/gate.sh   (fix until green; do not proceed while red)
 4. ./scripts/lint.sh   (fix until clean)
-5. codex review --uncommitted 'Review this implementation against AGENTS.md
-   and docs/plans/thclaws-api-adoption-plan.md. Trace every implemented
+5. INDEPENDENT Claude review of the uncommitted diff. Launch a fresh
+   `feature-dev:code-reviewer` subagent (NOT the context that wrote the code —
+   independence is the whole point) with this rubric: 'Review this
+   implementation against AGENTS.md and
+   docs/plans/thclaws-api-adoption-plan.md. Trace every implemented
    milestone end-to-end through the real execution path. Treat plan
    noncompliance, security regressions, state-machine races, API
    compatibility breaks, missing hermetic checks, missing mutation tests,
@@ -60,22 +67,23 @@ Per-milestone loop (run in exactly this order; never skip a step):
    Report only actionable findings ordered by severity with file:line and
    concrete evidence. If no findings remain, state exactly what paths and
    checks were verified.'
-6. Fix every actionable finding codex reports. Do not argue a finding away
+6. Fix every actionable finding the review reports. Do not argue a finding away
    without verifying against the real execution path; if a finding is
    invalid, record WHY with file:line evidence in the commit message.
 7. Re-run ./scripts/gate.sh and ./scripts/lint.sh (both must be green after
    the fixes).
-8. If codex reported findings in step 5, run codex review --uncommitted once
-   more; repeat 6–8 until it reports none.
+8. If the review reported findings in step 5, run one more independent review
+   pass (a fresh subagent); repeat 6–8 until a pass reports none.
 9. Tick the milestone's Work/Checks boxes in
    docs/plans/thclaws-api-adoption-plan.md, add one close-out row to
    PROGRESS.md, then commit (one commit per milestone; message lists the
-   mutation tests performed and the codex verdict).
-10. Post-commit verification: codex review --commit HEAD 'Verify this commit
-    against AGENTS.md and docs/plans/thclaws-api-adoption-plan.md. Report
-    only confirmed actionable findings with file:line, impact, evidence,
-    and reproduction steps.'  Any confirmed finding → fix as a follow-up
-    commit through the same loop.
+   mutation tests performed and the review verdict).
+10. Post-commit verification: one more INDEPENDENT Claude review scoped to the
+    new commit — a fresh `feature-dev:code-reviewer` subagent given
+    `git show HEAD`: 'Verify this commit against AGENTS.md and
+    docs/plans/thclaws-api-adoption-plan.md. Report only confirmed actionable
+    findings with file:line, impact, evidence, and reproduction steps.'  Any
+    confirmed finding → fix as a follow-up commit through the same loop.
 
 Stop conditions: STOP and report (do not improvise) if the gate cannot run,
 if a plan Design decision conflicts with what you find in the code, or if a
@@ -105,7 +113,7 @@ results, never from assumption. The SSE event-name list in the contract must
 be pinned by reading the emitter code (crates/core/src/api_v1/agent.rs), not
 by grepping for string literals — event names can be computed (skill_invoked).
 
-Close out per the loop: check_docs.py green, codex review --uncommitted,
+Close out per the loop: check_docs.py green, independent Claude review,
 commit.
 ```
 
@@ -202,11 +210,12 @@ Run the branch-level review before opening the PR:
 
 ./scripts/gate.sh && ./scripts/lint.sh
 
-codex review --base main 'Review this branch against AGENTS.md and
-docs/plans/thclaws-api-adoption-plan.md. Verify the implementation
-end-to-end, including security boundaries, backward-compatible API behavior,
-recovery/race paths, tests, mutation coverage, and documentation parity.
-Report actionable findings ordered by severity with file:line.'
+Then an INDEPENDENT Claude branch review — a fresh `feature-dev:code-reviewer`
+subagent given the branch diff (`git diff main...HEAD`): 'Review this branch
+against AGENTS.md and docs/plans/thclaws-api-adoption-plan.md. Verify the
+implementation end-to-end, including security boundaries, backward-compatible
+API behavior, recovery/race paths, tests, mutation coverage, and documentation
+parity. Report actionable findings ordered by severity with file:line.'
 
 Fix findings through the per-milestone loop, then open the PR (CI runs gate
 + lint as required checks). T1b and T4 get their own driver prompts only
