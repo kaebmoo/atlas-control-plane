@@ -1508,7 +1508,7 @@ def check_token_not_persisted_from_worker_fields(tmp: Path) -> None:
     """The callback token is a LIVE credential. A semi-trusted worker echoing it into ANY
     persisted worker-controlled field must not leak it: (1) an ACK session_id equal to the
     token is not bound (no session id, no binding, byte-scan clean); (2) a terminal callback
-    whose summary and tool_calls contain the token stores neither — byte-scan the DB file."""
+    whose summary, model, and tool_calls contain the token stores none — byte-scan the DB file."""
     mock = ThreadingHTTPServer(("127.0.0.1", 0), TokenEchoAckWorker)
     threading.Thread(target=mock.serve_forever, daemon=True).start()
     runtime = _make_runtime(tmp, "tokenfields")
@@ -1530,6 +1530,7 @@ def check_token_not_persisted_from_worker_fields(tmp: Path) -> None:
 
         # (2) A terminal callback echoing the token in summary + tool names stores neither.
         payload = _terminal_payload(job["id"], summary=f"done, key was {token}")
+        payload["model"] = f"model-{token}"
         payload["tool_calls"] = ["Read", f"Bash({token})"]
         status, result = _post_callback(CAPTURED[job["id"]]["url"], token, payload)
         assert status == 200 and result["applied"] is True, (status, result)
