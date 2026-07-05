@@ -621,40 +621,40 @@ Files:
 
 Work:
 
-- [ ] Migration + `sync_mode` admin API. A transition from `disabled` to
+- [x] Migration + `sync_mode` admin API. A transition from `disabled` to
       `tunnel`/`forward_auth` MUST run a short-timeout `sync_stat()` probe
       through the same worker URL/client path and validate the response before
       persisting; failure leaves the old mode unchanged. Successful changes emit
       `worker.sync_mode_changed` carrying old→new value and actor. This
       authenticated pre-enable transition is the ONLY caller allowed to probe
       while the persisted mode is still `disabled`.
-- [ ] `sync_stat()` — short-timeout client method. The normal poll calls it only
+- [x] `sync_stat()` — short-timeout client method. The normal poll calls it only
       when mode is enabled; disabled or any probe error produces `busy: null`
       ("unknown") without a network call/fallback, never a routing blocker.
-- [ ] Poll records `busy` + `busy_checked_at` inside the `agent_info` blob
+- [x] Poll records `busy` + `busy_checked_at` inside the `agent_info` blob
       (probe results are poll-owned data, so blob storage is correct HERE —
       unlike the operator-owned `sync_mode`).
-- [ ] Router: `busy == false` beats `true` only as a **tie-break** among
+- [x] Router: `busy == false` beats `true` only as a **tie-break** among
       equal-scored candidates; `null` between. Reason string emitted.
-- [ ] Skill-hint matching (`when_to_use` vs prompt hints): advisory bonus
+- [x] Skill-hint matching (`when_to_use` vs prompt hints): advisory bonus
       smaller than any tag/role weight; existing routing fixture outcomes
       MUST NOT flip (asserted).
-- [ ] Dashboard surfaces as above; version-compatibility warning when a
+- [x] Dashboard surfaces as above; version-compatibility warning when a
       worker's reported version is outside the contract-tested range (T0).
 
 Checks:
 
-- [ ] Busy worker loses the tie-break; stat 404/409/disabled → routing
+- [x] Busy worker loses the tie-break; stat 404/409/disabled → routing
       byte-identical to today.
-- [ ] Fixture-stability assertion: existing route decisions unchanged.
-- [ ] `sync_mode` survives a worker poll cycle (mutation: store it in
+- [x] Fixture-stability assertion: existing route decisions unchanged.
+- [x] `sync_mode` survives a worker poll cycle (mutation: store it in
       `agent_info` instead → check goes red because the poll erases it).
-- [ ] Enabling `tunnel`/`forward_auth` with an unreachable or malformed stat
+- [x] Enabling `tunnel`/`forward_auth` with an unreachable or malformed stat
       response is rejected and leaves `sync_mode = disabled`; a valid probe
       enables it (mutation: skip the enable-time probe → check goes red).
-- [ ] `ui_url` with `javascript:` / `file:` scheme → link not rendered.
-- [ ] Gate markers for new dashboard elements; existing markers intact.
-- [ ] Mutation test: invert the busy tie-break → check goes red.
+- [x] `ui_url` with `javascript:` / `file:` scheme → link not rendered.
+- [x] Gate markers for new dashboard elements; existing markers intact.
+- [x] Mutation test: invert the busy tie-break → check goes red.
 
 ---
 

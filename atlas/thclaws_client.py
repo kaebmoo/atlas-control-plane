@@ -122,6 +122,19 @@ class ThClawsClient:
             raise ThClawsError("Invalid model list from /v1/models")
         return [row for row in payload["data"] if isinstance(row, dict)]
 
+    def sync_stat(self) -> dict[str, Any]:
+        """Advisory process-wide `busy` snapshot from `GET /workspace/sync/stat`.
+
+        Short timeout — an advisory routing signal must never pace the poll. NOTE `/workspace/
+        sync/*` is NOT protected by the worker Bearer (docs/specs/thclaws-worker-contract.md):
+        only call this on a worker whose operator-asserted `sync_mode` is an approved shape
+        (tunnel / forward_auth). A malformed response is a probe failure, not a false signal.
+        """
+        payload = self.get_json("/workspace/sync/stat", timeout=min(self.timeout, 5.0))
+        if not isinstance(payload, dict):
+            raise ThClawsError("Invalid sync stat from /workspace/sync/stat")
+        return payload
+
     def run_agent_stream(
         self,
         *,

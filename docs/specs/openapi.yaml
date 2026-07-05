@@ -334,6 +334,33 @@ paths:
                   worker: {$ref: '#/components/schemas/Worker'}
         default: {$ref: '#/components/responses/Error'}
 
+  /api/workers/{worker_id}/sync-mode:
+    parameters:
+      - {$ref: '#/components/parameters/WorkerId'}
+    post:
+      tags: [Workers]
+      operationId: setWorkerSyncMode
+      summary: Set a worker's sync trust mode (admin). Enabling tunnel/forward_auth runs a pre-enable sync probe; a failed probe returns 400 and leaves the mode unchanged. Audited (worker.sync_mode_changed).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sync_mode]
+              properties:
+                sync_mode: {type: string, enum: [disabled, tunnel, forward_auth]}
+      responses:
+        '200':
+          description: Updated worker
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  worker: {$ref: '#/components/schemas/Worker'}
+        default: {$ref: '#/components/responses/Error'}
+
   /api/workspaces:
     get:
       tags: [Workspaces]
@@ -1729,8 +1756,9 @@ components:
         tags: {type: array, items: {type: string}}
         status: {type: string}
         token_set: {type: boolean}
+        sync_mode: {type: string, enum: [disabled, tunnel, forward_auth], description: 'T4 operator-owned sync trust assertion; default disabled. Gates /workspace/sync/* use.'}
         last_seen_at: {type: [string, 'null'], format: date-time}
-        agent_info: {type: object, additionalProperties: true}
+        agent_info: {type: object, additionalProperties: true, description: 'Poll-owned snapshot; may include advisory busy (bool|null) + busy_checked_at when sync_mode != disabled.'}
         last_error: {type: [string, 'null']}
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}

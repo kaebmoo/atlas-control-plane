@@ -17,7 +17,7 @@ python3 -m py_compile \
   scripts/check_docs.py scripts/check_stress.py scripts/check_fuzz.py \
   scripts/check_ui_ux.py scripts/check_input_adapter.py scripts/check_outbound.py \
   scripts/check_observability.py scripts/check_permit_poc.py scripts/check_event_views.py \
-  scripts/check_lib.py scripts/check_async_jobs.py
+  scripts/check_lib.py scripts/check_async_jobs.py scripts/check_worker_state.py
 
 node --check atlas/static/app.js
 
@@ -38,6 +38,7 @@ python3 scripts/check_audit_fixes.py  # terminal-state races, run snapshot, trig
 python3 scripts/check_docs.py         # docs-drift: README links + route coverage
 python3 scripts/check_ui_ux.py        # dashboard UX: job sync, mobile drawer, modal focus
 python3 scripts/check_event_views.py  # T2: tool/skill timeline builder, name escaping, dispatch
+python3 scripts/check_worker_state.py # T4: sync_mode gate, busy probe, advisory router tie-break
 python3 scripts/check_stress.py       # concurrency: atomic transitions converge under load
 python3 scripts/check_fuzz.py         # parsers never crash; validators raise only ValueError
 python3 scripts/check_input_adapter.py  # IA-1: envelope + provenance audit

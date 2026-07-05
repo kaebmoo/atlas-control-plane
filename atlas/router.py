@@ -86,6 +86,18 @@ class Router:
         if not ranked:
             raise ValueError("No routeable worker/workspace candidates")
         score, reason, worker, workspace = ranked[0]
+        # T4 advisory tie-break: among candidates sharing the TOP score, prefer a worker the
+        # `busy` probe reports free (False) over unknown (None) over busy (True). PURE secondary
+        # key — it only reorders within an exact score tie, so when `busy` is null everywhere
+        # (sync disabled / no probe / probe error) the winner is byte-identical to score-only
+        # routing. `max` returns the FIRST candidate at the best busy-rank, preserving today's
+        # order on a rank tie; the reason only changes when the tie-break actually moves the pick.
+        tied = [candidate for candidate in ranked if candidate[0] == score]
+        if len(tied) > 1:
+            best = max(tied, key=lambda candidate: _busy_rank(candidate[2]))
+            if best[2]["id"] != worker["id"]:
+                score, reason, worker, workspace = best
+                reason = f"{reason}, advisory: less busy"
         return RouteDecision(worker=worker, workspace=workspace, reason=f"{reason} (score {score})")
 
     def _rank_candidates(
@@ -155,6 +167,11 @@ class Router:
                     score += 15
                     reasons.append("role hint")
 
+                skill_bonus, skill_reason = _skill_hint_bonus(worker, prompt)
+                if skill_bonus and skill_reason:
+                    score += skill_bonus
+                    reasons.append(skill_reason)
+
                 reason = ", ".join(reasons) if reasons else "fallback"
                 candidates.append((score, reason, worker, workspace))
         candidates.sort(key=lambda item: item[0], reverse=True)
@@ -184,6 +201,49 @@ class Router:
             if match:
                 return match
         return owned[0]
+
+
+# Advisory skill-hint weight — strictly below the smallest tag/role weight (tag +10) AND below
+# the prompt-hint weight (+5), so a skill hint can only break a tie among otherwise-equal
+# candidates, never overturn a tag/role/prompt decision. Guarded on skill data being present,
+# so workers (and existing routing fixtures) without a daemon skill list are unaffected.
+_SKILL_HINT_BONUS = 2
+
+
+def _busy_rank(worker: dict[str, Any]) -> int:
+    """Advisory ordering key: not-busy (2) > unknown (1) > busy (0). `busy` lives in the
+    poll-owned agent_info blob and is only present once the worker's sync_mode is enabled;
+    absent/None ranks as unknown so it never beats a definitely-free worker or loses to nothing."""
+    info = worker.get("agent_info")
+    busy = info.get("busy") if isinstance(info, dict) else None
+    if busy is False:
+        return 2
+    if busy is True:
+        return 0
+    return 1
+
+
+def _skill_hint_bonus(worker: dict[str, Any], prompt: str) -> tuple[int, str | None]:
+    """Advisory: a small bonus when a daemon-scoped skill's `when_to_use` shares a word with the
+    prompt. Daemon-scoped (not per-workspace), so this is a hint only — operator tags/roles stay
+    the routing contract. Returns (0, None) unless the worker actually publishes matching skills."""
+    if not prompt:
+        return 0, None
+    info = worker.get("agent_info")
+    agent = info.get("agent") if isinstance(info, dict) else None
+    skills = agent.get("skills") if isinstance(agent, dict) else None
+    if not isinstance(skills, list):
+        return 0, None
+    prompt_words = {word for word in prompt.split() if len(word) > 3}
+    if not prompt_words:
+        return 0, None
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        when = str(skill.get("when_to_use") or "").lower()
+        if when and any(word in when for word in prompt_words):
+            return _SKILL_HINT_BONUS, f"skill hint: {skill.get('name') or 'skill'}"
+    return 0, None
 
 
 def _normalize_tags(tags: Any) -> list[str]:

@@ -128,6 +128,7 @@ Every error uses one JSON shape:
 | GET | `/api/workers/{worker_id}` | Get worker |
 | DELETE | `/api/workers/{worker_id}` | Delete worker and its workspaces |
 | POST | `/api/workers/{worker_id}/poll` | Poll one worker |
+| POST | `/api/workers/{worker_id}/sync-mode` | Set sync trust mode (admin); enabling `tunnel`/`forward_auth` runs a pre-enable sync probe — a failed probe returns 400 and leaves the mode unchanged; audited (`worker.sync_mode_changed`) |
 | GET | `/api/workspaces` | List workspaces |
 | POST | `/api/workspaces` | Create/upsert workspace |
 | GET | `/api/workspaces/{workspace_id}` | Get workspace |
