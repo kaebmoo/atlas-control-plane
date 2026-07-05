@@ -31,8 +31,9 @@ from tempfile import TemporaryDirectory
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from atlas.app import AtlasRuntime
+from atlas.app import AtlasHttpServer, AtlasRuntime
 from atlas.config import Config
+from scripts.check_lib import request_json
 
 
 def _gzip_tar(members: list[tuple[str, bytes, str]]) -> bytes:
@@ -164,6 +165,9 @@ def check_happy_path(runtime: AtlasRuntime, worker_id: str) -> None:
 
     arts = [art for art in runtime.db.list_artifacts(limit=1000) if (art.get("metadata") or {}).get("source_job_id") == job["id"]]
     assert len(arts) == 2, arts
+    # The per-job artifacts route (GET /api/jobs/{id}/artifacts, dashboard T5 gap) filters by
+    # job_id — lock that query so a standalone job's collected files are retrievable by job.
+    assert len(runtime.db.list_artifacts(job_id=job["id"])) == 2, "collected files must be listable by job_id"
     by_relpath = {art["metadata"]["relpath"]: art for art in arts}
     for relpath, data in (("reports/a.md", a), ("out/data.csv", b)):
         art = by_relpath[relpath]
@@ -371,6 +375,26 @@ def check_cancel_during_collection(runtime: AtlasRuntime, worker_id: str, handof
     print("  cancel during collection wins; no handoff OK")
 
 
+def check_job_artifacts_route(runtime: AtlasRuntime, base_url: str, worker_id: str, token: str) -> None:
+    # T5 dashboard gap: a standalone job's collected files are keyed to the JOB (run_id NULL),
+    # so GET /api/jobs/{id}/artifacts must return them for the Jobs-view download list. End-to-end
+    # over HTTP (a static substring can't tell a working route from a broken one — mutation:
+    # break the route's len(parts)/job_id filter -> this goes red).
+    _reset_worker(MockWorker)
+    MockWorker.export_tar = _gzip_tar([("out/report.md", b"job-scoped file", "file")])
+    job = _submit(runtime, worker_id, ["out/report.md"])
+    job = _wait_terminal(runtime, job["id"])
+    assert job["state"] == "succeeded"
+    status, body, _ = request_json(base_url, "GET", f"/api/jobs/{job['id']}/artifacts", None, token)
+    assert status == 200, (status, body)
+    files = [art for art in body["artifacts"] if art.get("kind") == "file_ref"]
+    assert len(files) == 1 and files[0]["key"] == "files.out/report.md", files
+    # an unknown job id is a clean 404, not a 500.
+    status, _, _ = request_json(base_url, "GET", "/api/jobs/job_missing/artifacts", None, token)
+    assert status == 404, status
+    print("  GET /api/jobs/{id}/artifacts returns job-scoped collected files OK")
+
+
 def check_barrier_ordering(runtime: AtlasRuntime, worker_id: str, handoff_worker_id: str) -> None:
     _reset_worker(MockWorker)
     MockWorker.export_tar = _gzip_tar([("out.md", b"deliverable", "file")])
@@ -427,6 +451,13 @@ def main() -> None:
         runtime.db.set_worker_sync_mode(worker["id"], "tunnel")
         handoff = runtime.db.upsert_worker({"name": "downstream", "base_url": base_url + "/x"})
 
+        # A separate Atlas API server (distinct from the mock WORKER above) for the HTTP route test.
+        api_server = AtlasHttpServer(("127.0.0.1", 0), runtime)
+        threading.Thread(target=api_server.serve_forever, daemon=True).start()
+        api_base = f"http://127.0.0.1:{api_server.server_address[1]}"
+        user = runtime.db.create_user("admin", "admin-password", "admin")
+        _, token = runtime.db.create_api_token(user["id"], "file-collection route check")
+
         try:
             check_happy_path(runtime, worker["id"])
             check_no_config_no_calls(runtime, worker["id"])
@@ -440,8 +471,10 @@ def main() -> None:
             check_corrupt_tar(runtime, worker["id"])
             check_db_error_isolated(runtime, worker["id"])
             check_cancel_during_collection(runtime, worker["id"], handoff["id"])
+            check_job_artifacts_route(runtime, api_base, worker["id"], token)
             check_barrier_ordering(runtime, worker["id"], handoff["id"])
         finally:
+            api_server.shutdown()
             mock.shutdown()
 
     print("check_file_collection OK")

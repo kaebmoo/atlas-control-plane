@@ -17,6 +17,7 @@ const state = {
   selectedWorkflowTriggerId: null,
   workflowRunDetail: null,
   workflowArtifacts: [],
+  jobArtifacts: [],
   workflowEvents: [],
   workflowTriggerEvents: [],
   workerSuggestions: [],
@@ -203,6 +204,9 @@ const POLICY_FORM_FIELDS = [
   ["allowed_worker_ids", "#policyAllowedWorkersInput", "list"],
   ["allowed_workspace_ids", "#policyAllowedWorkspacesInput", "list"],
   ["stop_on_first_failure", "#policyStopOnFailureInput", "boolean"],
+  // T6: default-OFF boolean (unlike stop_on_first_failure, which defaults ON) — a missing
+  // file_handoff must render UNCHECKED, so it uses the "boolean_off" handling below.
+  ["file_handoff", "#policyFileHandoffInput", "boolean_off"],
 ];
 
 function syncPolicyFormFromJson() {
@@ -217,6 +221,9 @@ function syncPolicyFormFromJson() {
     const value = policy[key];
     if (type === "boolean") {
       $(selector).checked = value !== false;
+    } else if (type === "boolean_off") {
+      // default-off: only an explicit true checks the box (a missing key stays unchecked).
+      $(selector).checked = value === true;
     } else {
       $(selector).value = type === "list" ? (Array.isArray(value) ? value.join(", ") : "") : (value ?? "");
     }
@@ -235,6 +242,13 @@ function syncPolicyJsonFromForm() {
   for (const [key, selector, type] of POLICY_FORM_FIELDS) {
     if (type === "boolean") {
       policy[key] = $(selector).checked;
+      continue;
+    }
+    if (type === "boolean_off") {
+      // default-off: write true only when checked; drop the key entirely when unchecked so the
+      // saved policy stays clean (no noisy `file_handoff: false` on every workflow).
+      if ($(selector).checked) policy[key] = true;
+      else delete policy[key];
       continue;
     }
     const raw = $(selector).value.trim();
@@ -309,7 +323,12 @@ function addBuilderEdge() {
   } else if (type === "max_iterations_below") {
     condition = { type, node: subject, max: Number.parseInt(value, 10) };
   }
-  graph.edges = [...(graph.edges || []), { from, to, condition }];
+  const edge = { from, to, condition };
+  // T6: optional artifact-key globs pushed to the target worker before its job (needs
+  // policy.file_handoff; the server validator rejects push_files without it at save time).
+  const pushFiles = $("#builderEdgePushFilesInput").value.split(",").map((pattern) => pattern.trim()).filter(Boolean);
+  if (pushFiles.length) edge.push_files = pushFiles;
+  graph.edges = [...(graph.edges || []), edge];
   $("#workflowGraphInput").value = prettyJson(graph);
   setDirty(true);
   toast(`${type} edge added to JSON preview`);
@@ -1072,10 +1091,18 @@ function renderWorkflowRuns() {
   });
   set("monNodeChips", (node) => { node.innerHTML = run ? renderNodeChips(run) : '<span class="hint">เลือก run เพื่อดูความคืบหน้าของโหนด</span>'; });
   set("workflowEventList", (node) => {
-    node.innerHTML = state.workflowEvents.slice(0, 14).map((event) => {
+    // Events arrive seq ASC (oldest→newest); show the most RECENT 14 so mid/late-run events
+    // (e.g. files_pushed) surface instead of only the run's first 14 setup events.
+    node.innerHTML = state.workflowEvents.slice(-14).map((event) => {
       const type = event.event_type || "";
       const dot = /completed|succeeded|granted/.test(type) ? "ok" : /running|started/.test(type) ? "run" : /failed|error|rejected/.test(type) ? "err" : "";
-      return `<div class="tl-item"><span class="tl-dot ${dot}"></span><div><div class="ttl">${escapeHtml(type)}${event.node_key ? ` · ${escapeHtml(event.node_key)}` : ""}</div><div class="sub">${escapeHtml(formatTime(event.created_at))}</div></div></div>`;
+      // T6: surface the file-handoff push details (count/bytes/target) inline rather than only
+      // in the raw JSON. Numbers are coerced and the worker id escaped, so the detail is safe.
+      const payload = event.payload || {};
+      const detail = type === "files_pushed"
+        ? ` · ${Number(payload.count ?? 0)} files · ${Number(payload.bytes ?? 0)} bytes → ${escapeHtml(String(payload.target_worker_id || ""))}`
+        : "";
+      return `<div class="tl-item"><span class="tl-dot ${dot}"></span><div><div class="ttl">${escapeHtml(type)}${event.node_key ? ` · ${escapeHtml(event.node_key)}` : ""}</div><div class="sub">${escapeHtml(formatTime(event.created_at))}${detail}</div></div></div>`;
     }).join("");
   });
 
@@ -1229,6 +1256,32 @@ async function downloadArtifact(artifactId, filename) {
   URL.revokeObjectURL(url);
 }
 
+// T5: a job's collected files (file_ref artifacts keyed to the job). Standalone jobs have
+// run_id NULL so they never show in the Monitor run-artifact list — surface them per job here.
+// downloadArtifact uses the passed filename for the saved name, so pass the artifact's relpath.
+async function loadJobArtifacts(jobId) {
+  let files = [];
+  try {
+    const data = await api(`/api/jobs/${encodeURIComponent(jobId)}/artifacts`);
+    files = (data.artifacts || []).filter((artifact) => artifact.kind === "file_ref");
+  } catch {
+    files = [];
+  }
+  if (state.selectedJobId !== jobId) return;  // the user switched jobs mid-fetch
+  state.jobArtifacts = files;
+  const box = $("#jobArtifactDownloads");
+  if (!box) return;
+  box.innerHTML = files.length
+    ? files.map((artifact) => {
+        const name = artifact.metadata?.relpath || artifact.metadata?.filename || artifact.key;
+        return `<button type="button" class="workflow-run-item download-artifact" data-artifact-id="${escapeHtml(artifact.id)}" data-filename="${escapeHtml(name)}">
+      <span>${escapeHtml(name)}</span>
+      <span class="item-sub">${escapeHtml(artifact.metadata?.size ?? 0)} bytes · ${escapeHtml(artifact.metadata?.sha256 || "")}</span>
+    </button>`;
+      }).join("")
+    : '<div class="empty">ยังไม่มีไฟล์ที่เก็บจากงานนี้</div>';
+}
+
 // Read-only run-count threshold alert. Derived purely from usage_events; never touches
 // budget_units (which stays the per-run cost guard).
 function renderUsageAlert(usedRuns) {
@@ -1256,6 +1309,17 @@ async function loadUsage() {
   $("#usageRuns").textContent = totals.workflow_runs ?? 0;
   $("#usageJobs").textContent = totals.jobs ?? 0;
   $("#usageBudgetUnits").textContent = totals.budget_units ?? 0;
+  // T1a token totals + T1b estimated cost. The estimate is deliberately labelled non-billable
+  // (byok_token_counts_billable stays false server-side); show a plain "$0" when absent.
+  const tokensPrompt = Number(totals.tokens_prompt ?? 0);
+  const tokensOutput = Number(totals.tokens_output ?? 0);
+  $("#usageTokens").textContent = `${tokensPrompt.toLocaleString()} · ${tokensOutput.toLocaleString()}`;
+  const estCost = Number(totals.estimated_cost_usd ?? 0);
+  // Sub-cent estimates would round to "$0.0000" under toFixed(4) though they're non-zero;
+  // fall back to 2 significant figures below $0.0001 so a real tiny cost stays visible.
+  $("#usageEstCost").textContent = !estCost
+    ? "$0"
+    : `$${estCost >= 0.0001 ? estCost.toFixed(4) : estCost.toPrecision(2)}`;
   $("#usageMeta").textContent = (data.from || data.to)
     ? `ช่วง ${data.from || "…"} → ${data.to || "…"}`
     : "ทุกช่วงเวลา";
@@ -1331,6 +1395,17 @@ async function submitJob() {
     workspace_id: $("#workspaceSelect").value || undefined,
     model: $("#modelInput").value.trim() || undefined,
   };
+  // T5: optional collect_files (relative paths, comma-separated); T3: opt-in async callback.
+  const collectFiles = $("#collectFilesInput").value.split(",").map((path) => path.trim()).filter(Boolean);
+  const asyncCallback = $("#jobExecutionCallback").checked;
+  // The server rejects this combination (the collection barrier is on the stream path); catch it
+  // client-side with a clear message instead of a round-trip to a 400.
+  if (asyncCallback && collectFiles.length) {
+    toast("Collect files ใช้ร่วมกับ Async (callback) ไม่ได้");
+    return;
+  }
+  if (collectFiles.length) payload.collect_files = collectFiles;
+  if (asyncCallback) payload.execution = "callback";
   if ($("#handoffEnabled").checked) {
     const handoffWorkspaceId = $("#handoffWorkspaceSelect").value || undefined;
     const handoffWorkerId = $("#handoffWorkerSelect").value || undefined;
@@ -1350,6 +1425,8 @@ async function submitJob() {
   state.streamText = "";
   state.events = [];
   $("#promptInput").value = "";
+  $("#collectFilesInput").value = "";
+  $("#jobExecutionCallback").checked = false;  // don't silently carry async mode into the next job
   await loadAll();
   openJobStream(data.job.id);
   showView("jobs");
@@ -1368,8 +1445,12 @@ function openJobStream(jobId) {
   updateStreamHeader();
   $("#streamOutput").textContent = "";
   $("#eventList").innerHTML = "";
+  $("#jobArtifactDownloads").innerHTML = '<div class="empty">ยังไม่มีไฟล์ที่เก็บจากงานนี้</div>';
   renderToolTimeline();
   renderJobs();
+  // Load any already-collected files now (revisiting a finished job); collection for a still-
+  // running job resolves at terminal, so refresh again on the stream `close` below.
+  loadJobArtifacts(jobId).catch(() => {});
 
   let sawClose = false;
   const safeJson = (data) => { try { return JSON.parse(data); } catch { return { data }; } };
@@ -1383,6 +1464,7 @@ function openJobStream(jobId) {
       sawClose = true;
       appendEvent("close", safeJson(data));
       loadAll().catch((error) => toast(error.message));
+      loadJobArtifacts(jobId).catch(() => {});  // collection resolved at terminal — pick up the files
     } else {
       // Every other frame — known structured events (tool_*/skill_*/thinking/…) AND unknown
       // future names — becomes a generic event entry; buildToolTimeline() picks out the
