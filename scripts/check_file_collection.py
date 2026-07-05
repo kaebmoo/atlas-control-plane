@@ -342,6 +342,35 @@ def check_db_error_isolated(runtime: AtlasRuntime, worker_id: str) -> None:
     print("  DB error during collection isolated; job still succeeds OK")
 
 
+def check_cancel_during_collection(runtime: AtlasRuntime, worker_id: str, handoff_worker_id: str) -> None:
+    # A cancel landing while the collection barrier blocks must win: the job ends cancelled
+    # and no handoff starts (mutation: drop the post-barrier is_cancel_requested re-check in
+    # _run -> the succeeded write overwrites the cancel and handoff fires -> red).
+    _reset_worker(MockWorker)
+    MockWorker.export_tar = _gzip_tar([("out.md", b"deliverable", "file")])
+    MockWorker.export_delay = 1.0
+    job = runtime.jobs.submit(
+        {
+            "prompt": "do work",
+            "worker_id": worker_id,
+            "allowed_worker_ids": [worker_id],
+            "collect_files": ["out.md"],
+            "handoff": {"enabled": True, "worker_id": handoff_worker_id},
+        }
+    )
+    # Wait until the export call is in flight — the pre-barrier cancel check has already passed.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and MockWorker.export_calls == 0:
+        time.sleep(0.02)
+    assert MockWorker.export_calls == 1, "collection never started"
+    runtime.db.mark_cancel_requested(job["id"])
+    job = _wait_terminal(runtime, job["id"])
+    assert job["state"] == "cancelled", f"cancel during collection must win, got {job['state']}"
+    assert not job.get("handoff_job_id"), "a cancelled job must not hand off"
+    assert "handoff_started" not in _event_types(runtime, job["id"])
+    print("  cancel during collection wins; no handoff OK")
+
+
 def check_barrier_ordering(runtime: AtlasRuntime, worker_id: str, handoff_worker_id: str) -> None:
     _reset_worker(MockWorker)
     MockWorker.export_tar = _gzip_tar([("out.md", b"deliverable", "file")])
@@ -360,6 +389,11 @@ def check_barrier_ordering(runtime: AtlasRuntime, worker_id: str, handoff_worker
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and not runtime.db.get_job(job["id"]).get("handoff_job_id"):
         time.sleep(0.02)
+    handoff_job_id = runtime.db.get_job(job["id"]).get("handoff_job_id")
+    if handoff_job_id:
+        # Let the handoff job's thread finish before teardown — otherwise it races the
+        # TemporaryDirectory cleanup (writes into a deleted dir / reopens a deleted DB).
+        _wait_terminal(runtime, handoff_job_id)
     events = _events(runtime, job["id"])
     seq = {event["event_type"]: event["seq"] for event in events}
     assert "files.collected" in seq, [event["event_type"] for event in events]
@@ -405,6 +439,7 @@ def main() -> None:
             check_deadline(runtime, worker["id"])
             check_corrupt_tar(runtime, worker["id"])
             check_db_error_isolated(runtime, worker["id"])
+            check_cancel_during_collection(runtime, worker["id"], handoff["id"])
             check_barrier_ordering(runtime, worker["id"], handoff["id"])
         finally:
             mock.shutdown()

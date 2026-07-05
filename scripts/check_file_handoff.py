@@ -198,6 +198,16 @@ def check_validation_no_policy(a_id: str, b_id: str) -> None:
         raise AssertionError("non-boolean file_handoff must be rejected")
     except ValueError:
         pass
+    # collect_files + execution:"callback" is a submit-time rejection; the save-time
+    # cross-check must catch it too, or the graph saves cleanly and fails on every run
+    # (mutation: drop the cross-check in validate_workflow_graph -> no raise -> red).
+    graph = _graph(a_id, b_id)
+    graph["nodes"][0]["execution"] = "callback"
+    try:
+        validate_workflow_graph(graph, {"file_handoff": True, "allowed_worker_ids": [a_id, b_id]})
+        raise AssertionError("collect_files with execution 'callback' must be rejected at save time")
+    except ValueError as exc:
+        assert "callback" in str(exc), exc
     print("  save-time validation: push_files requires policy.file_handoff OK")
 
 

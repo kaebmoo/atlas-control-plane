@@ -11,8 +11,8 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .db import Database, now_iso
-from .jobs import CALLBACK_RETRY_ENVELOPE_SECONDS, DEFAULT_SYNC_MAX_FILES, JOB_EXECUTION_MODES, _validate_collect_files
+from .db import Database, now_iso, resolve_in_store
+from .jobs import CALLBACK_RETRY_ENVELOPE_SECONDS, JOB_EXECUTION_MODES, _validate_collect_files, sync_max_files_cap
 from .outbound import OutboundService, resolve_outbound_target
 from .router import Router
 from .sync_files import SyncFileError, _reject_unsafe_path, build_push_tar
@@ -193,12 +193,17 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
             # isinstance first: an unhashable value would TypeError out of the set probe (500).
             raise ValueError(f"workflow node {node_id} execution must be one of {sorted(JOB_EXECUTION_MODES)}")
         if node["type"] in {"worker", "manager"} and "collect_files" in node:
-            # T5: validate the node's post-run collection list at save time (same rules the job
-            # submit path enforces), so a bad list is a save-time error, not a run-time surprise.
+            # T5: validate the node's post-run collection list at save time (same rules AND
+            # the same cap source as the job submit path), so a bad list is a save-time error,
+            # not a run-time surprise.
             try:
-                _validate_collect_files(node["collect_files"], DEFAULT_SYNC_MAX_FILES)
+                _validate_collect_files(node["collect_files"], sync_max_files_cap())
             except ValueError as exc:
                 raise ValueError(f"workflow node {node_id} {exc}") from exc
+            if node.get("collect_files") and node.get("execution") == "callback":
+                # Mirrors the submit-path rejection; without this cross-check the graph would
+                # save cleanly and then fail at submit on every run.
+                raise ValueError(f"workflow node {node_id} collect_files is not supported with execution 'callback'")
 
     start = graph.get("start")
     if not isinstance(start, str) or not start.strip():
@@ -1008,6 +1013,11 @@ class WorkflowRunner:
                         # Outside the run lock: the bounded-but-blocking push (mirrors the
                         # unlocked _wait_for_job below), then the fast submit under the lock again.
                         if node_submit["do_push"]:
+                            # Budget gate BEFORE the push: a node that can't be afforded must
+                            # not write into the target worker's workspace first. The
+                            # authoritative check still runs under the lock in
+                            # _reserve_and_submit_job; this pre-check only fronts the side-effect.
+                            _check_budget(policy, int(counters.get("budget_units_spent") or 0), _node_budget_units(node))
                             self._push_files_to_worker(
                                 run, node, node_submit["payload"]["worker_id"], node_submit["pushes"], node_submit["files_dir"]
                             )
@@ -1418,13 +1428,16 @@ class WorkflowRunner:
         # or a crafted artifact could exfiltrate an arbitrary host file (content="../../etc/passwd",
         # or an absolute path, which `root / content` would resolve to) or escape the additive
         # `incoming/<run>/<node>/` prefix (relpath="../evil"). Fail the edge loudly on any violation.
-        root = upload_dir.resolve()
         selected: list[tuple[str, bytes, str | None]] = []  # (arcname, data, sha256)
         seen_keys: set[str] = set()
         total = 0
-        for art in self.db.list_artifacts(run_id=run["id"], limit=1000):
-            if art.get("kind") != "file_ref":
-                continue
+        candidates = self.db.list_artifacts(run_id=run["id"], kind="file_ref", limit=1000)
+        if len(candidates) >= 1000:
+            # The enumeration window is full, so older file_refs may have been truncated —
+            # fail loudly rather than silently push an incomplete set downstream.
+            # ponytail: 1000-row window; paginate list_artifacts if real runs ever hit this.
+            raise ValueError("file handoff cannot enumerate the run's file_ref artifacts (over 1000)")
+        for art in candidates:
             key = art.get("key") or ""
             if key in seen_keys or not any(fnmatch.fnmatch(key, pattern) for pattern in patterns):
                 continue
@@ -1433,8 +1446,8 @@ class WorkflowRunner:
                 safe_relpath = _reject_unsafe_path(str(meta.get("relpath") or key))
             except SyncFileError as exc:
                 raise ValueError(f"file handoff artifact {key!r} has an unsafe relpath: {exc}") from exc
-            target = (root / str(art.get("content") or "")).resolve()
-            if target.parent != root or not target.is_file():
+            target = resolve_in_store(upload_dir, art.get("content"))
+            if target is None:
                 raise ValueError(f"file handoff artifact {key!r} is outside the upload store")
             data = target.read_bytes()
             # Cap on ACTUAL bytes (a forged metadata.size can't undercount); each in-store file is

@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
 from .config import Config
-from .db import ARTIFACT_KINDS, WORKER_SYNC_MODES, Database, new_id, now_iso
+from .db import ARTIFACT_KINDS, WORKER_SYNC_MODES, Database, new_id, now_iso, resolve_in_store
 from .jobs import JobManager, TERMINAL_STATES, verify_callback_token
 from .outbound import OutboundService, OutboundSettings
 from .packs import export_pack, import_pack, list_available_packs
@@ -908,9 +908,8 @@ class AtlasHandler(BaseHTTPRequestHandler):
             raise FileNotFoundError()
         if artifact.get("kind") != "file_ref":
             raise ValueError("artifact is not a file_ref")
-        root = runtime.upload_dir.resolve()
-        target = (root / str(artifact.get("content") or "")).resolve()
-        if target.parent != root or not target.is_file():
+        target = resolve_in_store(runtime.upload_dir, artifact.get("content"))
+        if target is None:
             raise ValueError("file_ref is outside the upload root or missing")
         content = target.read_bytes()
         metadata = artifact.get("metadata") or {}

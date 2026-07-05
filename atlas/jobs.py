@@ -15,7 +15,7 @@ from typing import Any
 
 from .db import Database, now_iso
 from .router import Router
-from .sync_files import safe_extract_tar, store_bytes
+from .sync_files import SyncFileError, _reject_unsafe_path, safe_extract_tar, store_bytes
 from .thclaws_client import (
     SseEvent,
     ThClawsClient,
@@ -32,9 +32,15 @@ from .usage import elapsed_seconds
 
 TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
 JOB_EXECUTION_MODES = {"stream", "callback"}
-# T5: default cap on how many paths a job/node may collect. The runtime JobManager reads the
-# ATLAS_SYNC_MAX_FILES env; graph save-time validation (which has no runtime env) uses this.
+# T5: default cap on how many paths a job/node may collect.
 DEFAULT_SYNC_MAX_FILES = 200
+
+
+def sync_max_files_cap() -> int:
+    """The effective collect_files path cap (env-overridable). The single source for BOTH
+    graph save-time validation and the runtime submit path — two reads of the same value, so
+    a graph that saves cleanly can never fail submit purely because the caps diverged."""
+    return int(os.getenv("ATLAS_SYNC_MAX_FILES", str(DEFAULT_SYNC_MAX_FILES)))
 # thClaws CallbackPayload.status vocabulary — the full terminal enum, pinned in
 # docs/specs/thclaws-worker-contract.md against crates/core/src/api_v1/callback.rs.
 # "succeeded"/"cancelled" become the job's terminal state directly; "failed" is the worker's own
@@ -102,9 +108,12 @@ def _validate_collect_files(value: Any, max_files: int) -> list[str] | None:
     for item in value:
         if not isinstance(item, str) or not item.strip():
             raise ValueError("collect_files entries must be non-empty strings")
-        path = item.strip()
-        if path.startswith("/") or "\\" in path or ".." in path.split("/"):
-            raise ValueError(f"collect_files path must be relative and contain no '..': {item!r}")
+        try:
+            # Same validator the tar-ingestion side uses (sync_files is the single home for
+            # the path-safety rule), so the request-side and extraction-side checks can't drift.
+            path = _reject_unsafe_path(item.strip())
+        except SyncFileError as exc:
+            raise ValueError(f"collect_files path must be relative and contain no '..': {item!r}") from exc
         paths.append(path)
     return paths or None
 
@@ -264,7 +273,7 @@ class JobManager:
         self.upload_dir = upload_dir
         self.collect_deadline_seconds = float(os.getenv("ATLAS_COLLECT_DEADLINE_SECONDS", "120"))
         self.sync_max_bytes = int(os.getenv("ATLAS_SYNC_MAX_BYTES", str(64 * 1024 * 1024)))
-        self.sync_max_files = int(os.getenv("ATLAS_SYNC_MAX_FILES", str(DEFAULT_SYNC_MAX_FILES)))
+        self.sync_max_files = sync_max_files_cap()
         # Backstops for a slow-dribbling / runaway worker on the (deadline-less) standalone-job
         # path: an overall wall-clock bound and a total-output cap. Generous defaults; override
         # via env. Workflow jobs additionally get the policy max_minutes deadline.
@@ -634,6 +643,11 @@ class JobManager:
             # progression — anything published after it races the downstream consumer. Collection
             # is failure-isolated (never changes the job outcome) and deadline-bounded inside.
             self._collect_files(job_id, job, worker, workspace, client)
+            # Re-check AFTER the barrier: collection can block for up to the collect deadline,
+            # and a cancel landing in that window must not be overwritten by the succeeded
+            # write below (which would also trigger handoff for a cancelled job).
+            if self.db.is_cancel_requested(job_id):
+                raise _JobCancelled()
             self.db.update_job(job_id, state="succeeded", finished_at=now_iso())
             self.db.append_job_event(job_id, "state", {"state": "succeeded"})
             self.db.audit("job.succeeded", "job", job_id)

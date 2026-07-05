@@ -37,6 +37,19 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
+def resolve_in_store(upload_dir: Path, content: Any) -> Path | None:
+    """Resolve a file_ref's `content` to its file in the FLAT upload store, or None when it
+    escapes (absolute path, '..', or symlink-resolves outside) or is missing. The single
+    containment check for every consumer of file_ref bytes — artifact download, retention
+    purge, and the T6 push all route through here so the store boundary can never drift
+    between copies."""
+    root = upload_dir.resolve()
+    target = (root / str(content or "")).resolve()
+    if target.parent != root or not target.is_file():
+        return None
+    return target
+
+
 def atomic_write_0600(path: Path, data: bytes) -> None:
     """Write bytes to path atomically at 0600: a temp file in the same directory is written,
     fsynced, then os.replace()d over the target. A short write or disk error leaves the
@@ -1637,6 +1650,7 @@ class Database:
         run_id: str | None = None,
         job_id: str | None = None,
         key: str | None = None,
+        kind: str | None = None,
     ) -> list[dict[str, Any]]:
         where = []
         params: list[Any] = []
@@ -1649,6 +1663,9 @@ class Database:
         if key:
             where.append("key = ?")
             params.append(key)
+        if kind:
+            where.append("kind = ?")
+            params.append(kind)
         sql = "SELECT * FROM artifacts"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -1706,8 +1723,8 @@ class Database:
         with self._lock, self.connect() as conn:
             for artifact in candidates:
                 if root is not None and artifact.get("kind") == "file_ref":
-                    target = (root / str(artifact.get("content") or "")).resolve()
-                    if target.parent == root and target.is_file():
+                    target = resolve_in_store(root, artifact.get("content"))
+                    if target is not None:
                         try:
                             target.unlink()
                         except OSError as exc:
