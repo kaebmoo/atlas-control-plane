@@ -485,6 +485,40 @@ remain valid. `DELETE` removes the definition and its triggers. Historical runs
 remain, while their `workflow_definition_id` may become null according to the
 foreign-key behavior.
 
+### File handoff between nodes (`push_files`, T6)
+
+An edge can push previously-collected files (see `collect_files`, T5) into the
+**next** worker's workspace before the downstream node's job starts — so a
+Coder→Reviewer or Reporter→Anchor chain hands over real deliverables, not just
+text. Opt-in per workflow:
+
+```json
+{
+  "policy": {"file_handoff": true},
+  "graph": {
+    "nodes": [
+      {"id": "coder", "type": "worker", "role": "coder", "collect_files": ["src/app.py"]},
+      {"id": "reviewer", "type": "worker", "role": "reviewer", "prompt": "Review the files in {files_dir}"}
+    ],
+    "edges": [{"from": "coder", "to": "reviewer", "condition": {"type": "always"}, "push_files": ["files.coder.*"]}]
+  }
+}
+```
+
+- **`policy.file_handoff` is required** for any edge `push_files` — enforced at
+  save time (validation error) AND as a runtime guard. Off by default.
+- `push_files` is a list of artifact-key glob patterns, matched against the run's
+  collected `file_ref` artifacts (keyed `files.<node_key>.<relpath>`).
+- **Additive only.** Files land under `incoming/<run_id>/<node_key>/…` in the
+  target worker; Atlas never calls a trash/replace/delete option, so a push can
+  never clobber the target's own files. The downstream prompt's `{files_dir}`
+  token is substituted with that incoming prefix.
+- Reuses the T5 sync caps (`ATLAS_SYNC_MAX_FILES`/`ATLAS_SYNC_MAX_BYTES`) and the
+  target worker's `sync_mode` gate (a disabled target fails the edge). The
+  outgoing tar has deterministic member order and normalized mtimes (reproducible
+  bytes for the `files.pushed` audit). A `409 workspace busy` is retried; any
+  other push failure fails the edge loudly.
+
 ### Validate, Explain, and Repair
 
 ```bash

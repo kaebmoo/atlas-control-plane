@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextvars
+import fnmatch
+import hashlib
 import json
 import logging
 import re
@@ -13,6 +15,8 @@ from .db import Database, now_iso
 from .jobs import CALLBACK_RETRY_ENVELOPE_SECONDS, DEFAULT_SYNC_MAX_FILES, JOB_EXECUTION_MODES, _validate_collect_files
 from .outbound import OutboundService, resolve_outbound_target
 from .router import Router
+from .sync_files import SyncFileError, _reject_unsafe_path, build_push_tar
+from .thclaws_client import ThClawsClient
 from .usage import elapsed_seconds
 
 
@@ -225,6 +229,13 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
         if node_map[edge["from"]]["type"] == "human_gate" and node_map[edge["from"]].get("choices") and condition.get("type") != "human_selected":
             raise ValueError(f"workflow human_gate edge at index {index} requires human_selected condition")
 
+    # T6: a push_files edge only makes sense with the file-handoff opt-in. Save-time guard
+    # (the run loop re-checks policy.file_handoff as a second, runtime guard before any push).
+    if not (policy or {}).get("file_handoff"):
+        for index, edge in enumerate(edges):
+            if isinstance(edge, dict) and edge.get("push_files"):
+                raise ValueError(f"workflow edge at index {index} push_files requires policy.file_handoff=true")
+
     incoming: dict[str, set[str]] = {node_id: set() for node_id in node_ids}
     for edge in edges:
         incoming[edge["to"]].add(edge["from"])
@@ -263,6 +274,9 @@ def validate_workflow_policy(policy: dict[str, Any] | None) -> None:
             raise ValueError(f"workflow policy {key} must be an integer between 1 and {maximum}")
     if "stop_on_first_failure" in policy and not isinstance(policy["stop_on_first_failure"], bool):
         raise ValueError("workflow policy stop_on_first_failure must be boolean")
+    if "file_handoff" in policy and not isinstance(policy["file_handoff"], bool):
+        # T6 opt-in for edge push_files. A bare boolean, off by default.
+        raise ValueError("workflow policy file_handoff must be boolean")
 
 
 def _string_list(value: Any, name: str) -> list[str]:
@@ -820,6 +834,11 @@ class WorkflowRunner:
         if not run:
             raise ValueError(f"Unknown workflow_run_id: {run_id}")
         ready = list(run.get("current_nodes") or [])
+        # T6 file handoff: when an edge carrying push_files is TAKEN, stash its intent keyed by
+        # the target node; the target consumes it just before its job is created. In-memory for
+        # this execution pass (edge-taken and node-run happen in the same pass); a restart mid-run
+        # follows the standard explicit-recovery rule (re-running re-takes the edge and re-pushes).
+        pending_pushes: dict[str, list[dict[str, Any]]] = {}
         artifacts = self._load_artifacts(run_id)
         counters = run.get("counters") or {"jobs_started": 0, "node_counts": {}}
         counters.setdefault("jobs_started", 0)
@@ -851,6 +870,12 @@ class WorkflowRunner:
                         {"to": edge["to"], "condition_result": condition_result},
                         node_key=node_key,
                     )
+                    if edge.get("push_files"):
+                        # T6: record the push intent for the target node (executed at its run
+                        # time by the run loop, gated by policy.file_handoff before any push).
+                        pending_pushes.setdefault(edge["to"], []).append(
+                            {"from": node_key, "push_files": edge["push_files"]}
+                        )
                     _schedule_node(
                         edge,
                         ready,
@@ -948,6 +973,7 @@ class WorkflowRunner:
                             node_key=node_key,
                         )
                         job = None
+                        node_submit: dict[str, Any] | None = None
                         if node_type == "human_gate":
                             approval = self.db.create_approval(
                                 {
@@ -964,10 +990,30 @@ class WorkflowRunner:
                             self._wait_for_human(run_id, ready, counters, approval)
                             return self.db.get_workflow_run(run_id) or run
                         if node_type in {"worker", "manager"}:
-                            job = self._submit_worker_node(run, node, input, artifacts, policy, graph, counters)
-                            self.db.update_workflow_node(runtime_node["id"], job_id=job["id"])
+                            # Resolve the worker + build the payload (with {files_dir}) UNDER the
+                            # lock (fast), but defer the network push and the submit to AFTER the
+                            # lock — a blocking push held inside this shared runner lock would
+                            # stall every other run's stepping and operator pause/cancel. The
+                            # worker is pinned in `payload`, so push and submit hit the same one.
+                            pushes = pending_pushes.pop(node_key, [])
+                            do_push = bool(pushes) and bool(policy.get("file_handoff"))
+                            files_dir = f"incoming/{run['id']}/{node_key}" if do_push else ""
+                            payload = self._prepare_worker_node_payload(
+                                run, node, input, artifacts, policy, graph, counters, files_dir=files_dir
+                            )
+                            node_submit = {"payload": payload, "do_push": do_push, "files_dir": files_dir, "pushes": pushes}
                     output_artifacts: list[str] = []
                     manager_decision = None
+                    if node_submit is not None:
+                        # Outside the run lock: the bounded-but-blocking push (mirrors the
+                        # unlocked _wait_for_job below), then the fast submit under the lock again.
+                        if node_submit["do_push"]:
+                            self._push_files_to_worker(
+                                run, node, node_submit["payload"]["worker_id"], node_submit["pushes"], node_submit["files_dir"]
+                            )
+                        with self._thread_lock:
+                            job = self._reserve_and_submit_job(run, node, node_submit["payload"], policy, counters)
+                            self.db.update_workflow_node(runtime_node["id"], job_id=job["id"])
                     if job:
                         job = self._wait_for_job(job["id"], run["id"], deadline)
                         counters["jobs_started"] += 1
@@ -1315,17 +1361,16 @@ class WorkflowRunner:
         self.db.append_workflow_event(run_id, event_type, decision, node_key=decision["manager"])
         self.db.audit(f"workflow.{event_type}", "workflow_run", run_id, decision)
 
-    def _submit_worker_node(
+    def _reserve_and_submit_job(
         self,
         run: dict[str, Any],
         node: dict[str, Any],
-        input: dict[str, Any],
-        artifacts: dict[str, Any],
+        payload: dict[str, Any],
         policy: dict[str, Any],
-        graph: dict[str, Any],
         counters: dict[str, Any],
     ) -> dict[str, Any]:
-        payload = self._prepare_worker_node_payload(run, node, input, artifacts, policy, graph, counters)
+        """Budget-check, submit the job, and record the reservation. Fast (submit only starts a
+        thread), so it stays under the run lock; the slow file push happens before this, unlocked."""
         cost = _node_budget_units(node)
         _check_budget(policy, int(counters.get("budget_units_spent") or 0), cost)
         job = self.job_service.submit(payload)
@@ -1339,6 +1384,98 @@ class WorkflowRunner:
         )
         return job
 
+    def _push_files_to_worker(
+        self,
+        run: dict[str, Any],
+        node: dict[str, Any],
+        worker_id: str,
+        pushes: list[dict[str, Any]],
+        files_dir: str,
+    ) -> None:
+        """T6: push previously-collected artifacts into the RESOLVED target worker's workspace,
+        ADDITIVELY, under `incoming/<run_id>/<node_key>/…` (Atlas owns the arcnames, so a push
+        can never clobber the worker's files; Atlas never calls trash/replace). Resolves the
+        edge's `push_files` key-glob patterns against the run's `file_ref` artifacts, reuses the
+        T5 sync caps, and audits `files.pushed` after a successful push (before the downstream
+        job is created). A missing/disabled target or a push failure raises — the edge fails loudly."""
+        worker = self.db.get_worker(worker_id)
+        if not worker:
+            raise ValueError(f"file handoff target worker not found: {worker_id}")
+        if (worker.get("sync_mode") or "disabled") == "disabled":
+            raise ValueError(f"file handoff target worker {worker_id} has sync disabled (needs tunnel/forward_auth)")
+        upload_dir = getattr(self.job_service, "upload_dir", None)
+        if upload_dir is None:
+            raise ValueError("file handoff requires an upload store")
+        max_files = self.job_service.sync_max_files
+        max_bytes = self.job_service.sync_max_bytes
+
+        patterns: list[str] = []
+        for entry in pushes:
+            patterns.extend(entry.get("push_files") or [])
+        # A file_ref artifact is NOT necessarily from T5's validated collection: POST /api/artifacts
+        # lets any authenticated caller create one with an arbitrary `content` path and `relpath`.
+        # So re-validate BOTH before use — the same containment `_download_artifact` enforces —
+        # or a crafted artifact could exfiltrate an arbitrary host file (content="../../etc/passwd",
+        # or an absolute path, which `root / content` would resolve to) or escape the additive
+        # `incoming/<run>/<node>/` prefix (relpath="../evil"). Fail the edge loudly on any violation.
+        root = upload_dir.resolve()
+        selected: list[tuple[str, bytes, str | None]] = []  # (arcname, data, sha256)
+        seen_keys: set[str] = set()
+        total = 0
+        for art in self.db.list_artifacts(run_id=run["id"], limit=1000):
+            if art.get("kind") != "file_ref":
+                continue
+            key = art.get("key") or ""
+            if key in seen_keys or not any(fnmatch.fnmatch(key, pattern) for pattern in patterns):
+                continue
+            meta = art.get("metadata") or {}
+            try:
+                safe_relpath = _reject_unsafe_path(str(meta.get("relpath") or key))
+            except SyncFileError as exc:
+                raise ValueError(f"file handoff artifact {key!r} has an unsafe relpath: {exc}") from exc
+            target = (root / str(art.get("content") or "")).resolve()
+            if target.parent != root or not target.is_file():
+                raise ValueError(f"file handoff artifact {key!r} is outside the upload store")
+            data = target.read_bytes()
+            # Cap on ACTUAL bytes (a forged metadata.size can't undercount); each in-store file is
+            # already bounded by the T5 collection caps, so reading one before the check is safe.
+            total += len(data)
+            if len(selected) + 1 > max_files or total > max_bytes:
+                raise ValueError("file handoff exceeds the sync caps")
+            selected.append((f"incoming/{run['id']}/{node['id']}/{safe_relpath}", data, meta.get("sha256")))
+            seen_keys.add(key)
+
+        if not selected:
+            # A push edge that matched zero artifacts — record and continue (the downstream just
+            # gets an empty incoming dir); not a failure.
+            self.db.append_workflow_event(
+                run["id"], "files_push_empty", {"patterns": patterns, "to": node["id"]}, node_key=node["id"]
+            )
+            return
+
+        tar = build_push_tar([(arcname, data) for arcname, data, _ in selected])
+        client = ThClawsClient(worker["base_url"], worker.get("token"), timeout=self.job_service.request_timeout_seconds)
+        deadline = time.monotonic() + self.job_service.collect_deadline_seconds
+        # Push first; a failure raises and fails the edge before any audit says it succeeded.
+        client.sync_push(tar, deadline=deadline)
+        detail = {
+            "to_node": node["id"],
+            "from_nodes": [entry.get("from") for entry in pushes],
+            "target_worker_id": worker_id,
+            "count": len(selected),
+            "bytes": sum(len(data) for _, data, _ in selected),
+            "files_dir": files_dir,
+            "sha256": [sha for _, _, sha in selected],
+            "tar_sha256": hashlib.sha256(tar).hexdigest(),
+        }
+        self.db.audit("files.pushed", "workflow_run", run["id"], detail)
+        self.db.append_workflow_event(
+            run["id"],
+            "files_pushed",
+            {key: detail[key] for key in ("to_node", "from_nodes", "target_worker_id", "count", "bytes", "files_dir")},
+            node_key=node["id"],
+        )
+
     def _prepare_worker_node_payload(
         self,
         run: dict[str, Any],
@@ -1349,6 +1486,7 @@ class WorkflowRunner:
         graph: dict[str, Any],
         counters: dict[str, Any],
         consume_manager_action: bool = True,
+        files_dir: str = "",
     ) -> dict[str, Any]:
         if node.get("type") not in {"worker", "manager"}:
             raise ValueError(f"unsupported workflow node type: {node.get('type')}")
@@ -1360,6 +1498,9 @@ class WorkflowRunner:
                 action = (counters.get("manager_actions") or {}).pop(node["id"], None)
                 if action and action["instructions"].strip():
                     prompt = f"{action['instructions'].strip()}\n\n{prompt}".strip()
+        # T6: {files_dir} carries no dot, so render_prompt's dotted-path regex leaves it intact;
+        # substitute it here (like jobs.py::_render_handoff_prompt's {result}). Empty when no push.
+        prompt = prompt.replace("{files_dir}", files_dir)
         payload: dict[str, Any] = {"prompt": prompt}
         for key in ("worker_id", "workspace_id", "workspace_key", "company", "model", "tags", "role", "execution", "collect_files"):
             if node.get(key):
@@ -1678,6 +1819,15 @@ def _validate_edge(edge: Any, index: int, node_ids: set[str]) -> None:
         raise ValueError(f"workflow edge at index {index} references missing from node: {from_node}")
     if not isinstance(to_node, str) or to_node not in node_ids:
         raise ValueError(f"workflow edge at index {index} references missing to node: {to_node}")
+    push_files = edge.get("push_files")
+    if push_files is not None and (
+        not isinstance(push_files, list)
+        or not push_files
+        or not all(isinstance(pattern, str) and pattern.strip() for pattern in push_files)
+    ):
+        # T6: artifact-key glob patterns to push to the target worker. Shape validated here;
+        # the policy.file_handoff requirement is enforced in validate_workflow_graph (has policy).
+        raise ValueError(f"workflow edge at index {index} push_files must be a non-empty list of strings")
     _validate_condition(edge.get("condition", {"type": "always"}), index, node_ids)
 
 

@@ -809,23 +809,33 @@ Files:
 
 Work:
 
-- [ ] Tar assembly from file_ref artifacts; push client with deadline/caps;
-      no automatic retry of a failed push beyond the 409 policy (a re-run is
-      the operator's decision — same philosophy as restart recovery).
-- [ ] Engine: resolve `push_files` against run artifacts → push → create
-      downstream job with `{files_dir}`.
-- [ ] Validator: `push_files` requires `policy.file_handoff`; builder repair
-      suggests enabling it.
-- [ ] Dashboard: pushes (count/bytes/target) on the run timeline (markers).
+- [x] Tar assembly from file_ref artifacts (`sync_files.build_push_tar`,
+      reproducible); push client `sync_push()` with deadline/caps + bounded
+      409-retry; no automatic retry of a failed push beyond the 409 policy.
+- [x] Engine: resolve `push_files` against run artifacts → push → create
+      downstream job with `{files_dir}` (`_push_files_to_worker`, taken-edge
+      intent stashed per target node, pushed to the RESOLVED worker).
+- [x] Validator: `push_files` requires `policy.file_handoff` (save-time in
+      `validate_workflow_graph` + runtime guard in the `_execute_run` node loop).
+      NOTE: builder explain/repair "suggests enabling it" DEFERRED — an
+      AI-builder nicety, no mandatory check; the hard validator ships.
+- [x] Dashboard: pushes on the run timeline — reused: `files_pushed` workflow
+      events (count/bytes/target) render via the existing workflow-event
+      timeline; no new marker code needed.
+- [ ] **Single-job `handoff_push_files` variant (jobs.py) — DEFERRED.** No
+      mandatory check covers it; standalone-job handoff currently passes
+      assistant_text and file push there needs its own opt-in + job column.
+      Workflow edges are the tested primary path (add when a single-job
+      file-handoff use-case appears).
 
 Checks:
 
-- [ ] Two mock workers end-to-end: A's artifacts → pushed → B's prompt has
+- [x] Two mock workers end-to-end: A's artifacts → pushed → B's prompt has
       `{files_dir}`; B's mock received members byte-identical to A's.
-- [ ] Push without policy → save-time validation error AND runtime guard.
-- [ ] Push failure → edge fails loudly; continue-on-failure audited skip.
-- [ ] Mock asserts trash/replace endpoints never called.
-- [ ] Mutation test: drop the runtime policy guard → check goes red.
+- [x] Push without policy → save-time validation error AND runtime guard.
+- [x] Push failure → edge fails loudly; continue-on-failure audited skip.
+- [x] Mock asserts trash/replace endpoints never called.
+- [x] Mutation test: drop the runtime policy guard → check goes red.
 
 ---
 

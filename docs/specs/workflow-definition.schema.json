@@ -45,7 +45,12 @@
         },
         "output_format": {"const": "json"},
         "budget_units": {"type": "integer", "minimum": 1},
-        "execution": {"enum": ["stream", "callback"]}
+        "execution": {"enum": ["stream", "callback"]},
+        "collect_files": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "T5: relative paths to collect from the worker via sync/export after the stream ends"
+        }
       }
     },
     "managerNode": {
@@ -69,7 +74,12 @@
           "uniqueItems": true
         },
         "budget_units": {"type": "integer", "minimum": 1},
-        "execution": {"enum": ["stream", "callback"]}
+        "execution": {"enum": ["stream", "callback"]},
+        "collect_files": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "T5: relative paths to collect from the worker via sync/export after the stream ends"
+        }
       }
     },
     "joinNode": {
@@ -196,7 +206,13 @@
       "properties": {
         "from": {"$ref": "#/$defs/nonEmptyString"},
         "to": {"$ref": "#/$defs/nonEmptyString"},
-        "condition": {"$ref": "#/$defs/condition"}
+        "condition": {"$ref": "#/$defs/condition"},
+        "push_files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/nonEmptyString"},
+          "description": "T6: artifact-key glob patterns pushed to the target worker before its job; requires policy.file_handoff"
+        }
       }
     },
     "graph": {
@@ -233,7 +249,11 @@
         "max_budget_units": {"type": "integer", "minimum": 1, "maximum": 1000000},
         "allowed_worker_ids": {"$ref": "#/$defs/idList"},
         "allowed_workspace_ids": {"$ref": "#/$defs/idList"},
-        "stop_on_first_failure": {"type": "boolean"}
+        "stop_on_first_failure": {"type": "boolean"},
+        "file_handoff": {
+          "type": "boolean",
+          "description": "T6: opt-in enabling edge push_files (off by default)"
+        }
       }
     }
   }
