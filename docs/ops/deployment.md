@@ -114,7 +114,32 @@ migration runner (a `schema_version` table records applied steps), so deploying 
 newer Atlas over an existing DB upgrades the schema forward automatically and
 re-running is a no-op. Back up first — see [backup-restore.md](backup-restore.md).
 
-## 6. Data retention
+## 6. thClaws worker connectivity
+
+Atlas authenticates `/agent/run` and `/v1/*` with each worker's
+`THCLAWS_API_TOKEN`. That Bearer token does **not** protect
+`/workspace/sync/*` on a plain single-tenant `thclaws --serve` listener.
+
+Keep worker sync disabled in Atlas unless the worker is reached through one of
+these approved shapes:
+
+- a private/SSH tunnel that is not reachable by untrusted network clients; or
+- an ingress that enforces ForwardAuth before forwarding sync routes.
+
+Binding plain `thclaws --serve` to `0.0.0.0` with only
+`THCLAWS_API_TOKEN` is not sufficient protection for sync. Firewalling the port
+is useful defense in depth but is not a substitute for an asserted `tunnel` or
+`forward_auth` deployment shape. See the
+[thClaws worker protocol contract](../specs/thclaws-worker-contract.md) for the
+tested endpoint/auth matrix and capability-gating rules.
+
+For a thClaws `--multiuser` worker, the outer HMAC identity middleware applies
+to the complete worker surface (except `/healthz`) in addition to the
+`THCLAWS_API_TOKEN` Bearer checks on `/agent/run` and `/v1/*`. Do not register a
+multiuser worker unless the Atlas-to-worker path supplies that deployment
+identity.
+
+## 7. Data retention
 
 Atlas never deletes data on its own. Retention is operator-driven:
 

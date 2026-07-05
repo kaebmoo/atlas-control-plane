@@ -1,9 +1,9 @@
 # Draft: thClaws Ideas discussion post
 
 > Target: https://github.com/thClaws/thClaws/discussions/categories/ideas
-> Status: draft, not yet posted
+> Status: posted as [thClaws discussion #178](https://github.com/thClaws/thClaws/discussions/178)
 >
-> Note before posting: keep the auth wording neutral (as below). If the missing
+> Posting note retained for history: keep the auth wording neutral (as below). If the missing
 > auth on `/workspace/sync/*` looks unintended rather than documented behavior,
 > report that part privately via the repo Security tab first.
 

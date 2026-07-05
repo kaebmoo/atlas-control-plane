@@ -167,24 +167,43 @@ Files:
 
 Work:
 
-- [ ] Run `thclaws --serve` locally; probe `/workspace/sync/stat` with and
+- [x] Run `thclaws --serve` locally; probe `/workspace/sync/stat` with and
       without the Bearer token, on loopback and on a LAN bind. Record results.
-- [ ] Probe `/v1/deploy/manifest` the same way (expected: 401 without token).
-- [ ] Write the worker contract doc: endpoints Atlas may call, auth per
+- [x] Probe `/v1/deploy/manifest` the same way (expected: 401 without token).
+- [x] Write the worker contract doc: endpoints Atlas may call, auth per
       endpoint, the sync 409-busy semantics, the SSE event names Atlas relies
       on (`text`, `thinking`, `usage`, `result`, `error`, `session`,
       tool events, `[DONE]`), and the thClaws version range tested.
-- [ ] Define per-worker capability gating: how a worker gets marked
+- [x] Define per-worker capability gating: how a worker gets marked
       `sync_mode` (operator assertion of an approved deployment shape +
       successful authenticated probe), stored where, and how T5/T6 read it.
-- [ ] File the upstream asks: Bearer auth on sync routes; a
+- [x] File the upstream asks: Bearer auth on sync routes; a
       `GET /v1/capabilities?workspace_dir=…` that scopes skills to a
       workspace; protocol/schema version field in `/v1/agent/info`.
+      Filed as thClaws discussions
+      [#178](https://github.com/thClaws/thClaws/discussions/178) and
+      [#179](https://github.com/thClaws/thClaws/discussions/179); local copies
+      remain under `docs/upstream/`.
 
 Checks:
 
-- [ ] `scripts/check_docs.py` green (links resolve).
-- [ ] Findings table added here.
+- [x] `scripts/check_docs.py` green (links resolve).
+- [x] Findings table added here.
+
+Findings (live probe on 2026-07-04; thClaws `0.85.0`, source `18e3aa2`):
+
+| Bind | Endpoint | No Bearer | Bearer | Result |
+|---|---|---:|---:|---|
+| loopback | `GET /workspace/sync/stat` | 200 | 200 | sync ignores the worker Bearer |
+| loopback | `POST /v1/deploy/manifest` | 401 | 200 | `/v1/deploy/*` enforces Bearer |
+| `0.0.0.0` | `GET /workspace/sync/stat` | 200 | 200 | LAN-bound configuration has the same sync auth surface |
+| `0.0.0.0` | `POST /v1/deploy/manifest` | 401 | 200 | LAN-bound `/v1/*` still enforces Bearer |
+
+The LAN-bound process was reached through the host-local socket. A probe through
+the physical LAN interface timed out before HTTP, so it was excluded as host
+firewall/network behavior rather than treated as an auth result. The full
+contract and gating semantics are recorded in
+`docs/specs/thclaws-worker-contract.md`.
 
 Definition of done: contract doc merged; T4–T6 have explicit gating semantics
 to build against.
@@ -531,7 +550,8 @@ Files:
   'disabled' — persistent column, NOT the `agent_info` blob, which the poll
   loop rewrites wholesale on every status update)
 - `atlas/app.py` (admin API to set `sync_mode` — additive, audited; poll
-  loop: busy probe only when `sync_mode != 'disabled'`)
+  loop: busy probe only when `sync_mode != 'disabled'`; enabling a mode probes
+  through the same client path before persisting it)
 - `atlas/router.py` (advisory tie-break scoring; reasons in `RouteDecision`)
 - `atlas/static/` (busy badge with staleness timestamp; "Open worker UI" link
   from `external_access.ui_url` — rendered ONLY when the URL parses as
@@ -543,10 +563,16 @@ Files:
 
 Work:
 
-- [ ] Migration + `sync_mode` admin API (`worker.sync_mode_changed` audit
-      event carrying old→new value and actor).
-- [ ] `sync_stat()` — short timeout; any error (incl. mode-disabled) →
-      `busy: null` ("unknown"), never a routing blocker.
+- [ ] Migration + `sync_mode` admin API. A transition from `disabled` to
+      `tunnel`/`forward_auth` MUST run a short-timeout `sync_stat()` probe
+      through the same worker URL/client path and validate the response before
+      persisting; failure leaves the old mode unchanged. Successful changes emit
+      `worker.sync_mode_changed` carrying old→new value and actor. This
+      authenticated pre-enable transition is the ONLY caller allowed to probe
+      while the persisted mode is still `disabled`.
+- [ ] `sync_stat()` — short-timeout client method. The normal poll calls it only
+      when mode is enabled; disabled or any probe error produces `busy: null`
+      ("unknown") without a network call/fallback, never a routing blocker.
 - [ ] Poll records `busy` + `busy_checked_at` inside the `agent_info` blob
       (probe results are poll-owned data, so blob storage is correct HERE —
       unlike the operator-owned `sync_mode`).
@@ -565,6 +591,9 @@ Checks:
 - [ ] Fixture-stability assertion: existing route decisions unchanged.
 - [ ] `sync_mode` survives a worker poll cycle (mutation: store it in
       `agent_info` instead → check goes red because the poll erases it).
+- [ ] Enabling `tunnel`/`forward_auth` with an unreachable or malformed stat
+      response is rejected and leaves `sync_mode = disabled`; a valid probe
+      enables it (mutation: skip the enable-time probe → check goes red).
 - [ ] `ui_url` with `javascript:` / `file:` scheme → link not rendered.
 - [ ] Gate markers for new dashboard elements; existing markers intact.
 - [ ] Mutation test: invert the busy tie-break → check goes red.
@@ -1004,10 +1033,13 @@ Part B — chat-completions for builder previews (benchmark-gated):
 
 ## External confirmations outstanding
 
-- thClaws: Bearer auth on `/workspace/sync/*` (blocks enabling T5/T6 for
+- thClaws: Bearer auth on `/workspace/sync/*`
+  ([discussion #178](https://github.com/thClaws/thClaws/discussions/178); blocks enabling T5/T6 for
   network-reachable workers outside tunnel/ForwardAuth shapes).
-- thClaws: `GET /v1/capabilities?workspace_dir=…` (workspace-scoped skills).
-- thClaws: protocol/schema version field in `/v1/agent/info`.
+- thClaws: `GET /v1/capabilities?workspace_dir=…` (workspace-scoped skills;
+  [discussion #179](https://github.com/thClaws/thClaws/discussions/179)).
+- thClaws: protocol/schema version field in `/v1/agent/info`
+  ([discussion #179](https://github.com/thClaws/thClaws/discussions/179)).
 - thClaws: remote cancel endpoint — not planned upstream; Atlas cancel stays
   best-effort.
 - thClaws: a replace/prune deploy mode (current deploy merges live + bundle;
