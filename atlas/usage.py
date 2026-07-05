@@ -62,6 +62,11 @@ def summarize_usage(events: list[dict[str, Any]]) -> dict[str, int | float]:
         # Additive (T1a): worker-reported token counts, NULL-tolerant for pre-usage workers.
         "tokens_prompt": sum(int(event.get("tokens_prompt") or 0) for event in job_events),
         "tokens_output": sum(int(event.get("tokens_output") or 0) for event in job_events),
+        # T1b: immutable per-event estimates only. Never consult a worker's current catalogue,
+        # because pricing changes must not re-price historical usage.
+        "estimated_cost_usd": round(
+            sum(float((event.get("metadata") or {}).get("estimated_cost_usd") or 0) for event in job_events), 12
+        ),
     }
 
 

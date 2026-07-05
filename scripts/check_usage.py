@@ -28,6 +28,9 @@ from scripts.check_lib import request, request_json
 
 
 class MockThClawsHandler(BaseHTTPRequestHandler):
+    output_rate = 4.0
+    models_fail = False
+
     def log_message(self, _format: str, *_args: object) -> None:
         return
 
@@ -36,16 +39,65 @@ class MockThClawsHandler(BaseHTTPRequestHandler):
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
         body = (
             b"event: text\ndata: metered result\n\n"
-            b'event: usage\ndata: {"prompt_tokens": 120, "completion_tokens": 45,'
+            b'event: usage\ndata: {"model": "priced-model", "prompt_tokens": 120, "completion_tokens": 45,'
             b' "cached_input_tokens": 10, "cache_creation_input_tokens": 5,'
             b' "reasoning_output_tokens": 7}\n\n'
             # A later PARTIAL usage frame updates its own key only — it must never
             # clobber the prompt/completion counts already seen back to NULL.
             b'event: usage\ndata: {"reasoning_output_tokens": 9}\n\n'
+            b'event: result\ndata: {"stop_reason": "stop"}\n\n'
             b"event: done\ndata: [DONE]\n\n"
         )
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        if self.path == "/healthz":
+            payload = {"ok": True}
+        elif self.path == "/v1/agent/info":
+            payload = {"version": "0.85.0"}
+        elif self.path == "/v1/models":
+            if self.models_fail:
+                # Transient pricing-discovery failure: the worker still serves health + info.
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            payload = {
+                "object": "list",
+                "data": [
+                    {
+                        "id": "priced-model",
+                        "pricing": {
+                            "currency": "USD",
+                            "input_per_mtok": 2.0,
+                            "output_per_mtok": self.output_rate,
+                            "cached_input_per_mtok": 0.2,
+                            "cache_creation_per_mtok": 3.0,
+                            "reasoning_per_mtok": 5.0,
+                        },
+                    },
+                    {
+                        "id": "partial-model",
+                        "pricing": {"currency": "USD", "input_per_mtok": 2.0},
+                    },
+                    {
+                        "id": "overflow-model",
+                        "pricing": {"currency": "USD", "input_per_mtok": 10**400},
+                    },
+                    {
+                        "id": "infinity-model",
+                        "pricing": {"currency": "USD", "input_per_mtok": 1e308},
+                    },
+                ],
+            }
+        else:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -74,6 +126,7 @@ def main() -> None:
         worker = runtime.db.upsert_worker(
             {"name": "Mock usage worker", "base_url": f"http://127.0.0.1:{mock_worker.server_address[1]}"}
         )
+        runtime.jobs.poll_worker(worker["id"])
         definition = runtime.db.create_workflow_definition(
             {
                 "name": "Metered workflow",
@@ -123,7 +176,6 @@ def main() -> None:
             run_event = next(event for event in events if event["kind"] == "workflow_run")
             assert job_event["idempotency_key"] == f"job:{job_event['job_id']}" and job_event["units"] == 1
             assert job_event["run_id"] == run["id"] and job_event["node_key"] == "work"
-            assert job_event["model"] == "byok-visibility-model"
             # T1a: tokens parsed from the worker's `usage` SSE event, full payload in measures.
             assert job_event["tokens_prompt"] == 120 and job_event["tokens_output"] == 45
             measures = job_event["metadata"]["measures"]
@@ -134,6 +186,14 @@ def main() -> None:
             # without clobbering prompt/completion above.
             assert measures["reasoning_output_tokens"] == 9
             assert job_event["metadata"]["byok_token_counts_billable"] is False
+            # T1b: worker-reported model wins over the requested model and the exact pricing
+            # block used for this estimate is frozen into the event.
+            assert job_event["model"] == "priced-model"
+            assert job_event["metadata"]["effective_model_source"] == "worker"
+            assert job_event["metadata"]["pricing_snapshot"]["output_per_mtok"] == 4.0
+            assert job_event["metadata"]["estimated_cost_usd"] == 0.000462
+            assert job_event["metadata"]["estimate"] is True
+            assert job_event["metadata"]["pricing_partial"] is False
             assert run_event["idempotency_key"] == f"run:{run['id']}"
             assert run_event["units"] == run["counters"]["budget_units_spent"] == 3
             assert run_event["metadata"]["measures"]["job_count"] == run["counters"]["jobs_started"] == 1
@@ -147,10 +207,63 @@ def main() -> None:
             assert totals["jobs"] == run["counters"]["jobs_started"]
             assert totals["budget_units"] == run["counters"]["budget_units_spent"]
             assert totals["tokens_prompt"] == 120 and totals["tokens_output"] == 45
+            assert totals["estimated_cost_usd"] == 0.000462
+
+            # A later catalogue refresh changes the live rate but MUST NOT re-price history:
+            # summarize_usage reads only the event snapshot above.
+            MockThClawsHandler.output_rate = 400.0
+            runtime.jobs.poll_worker(worker["id"])
+            assert summarize_usage(runtime.db.list_usage_events())["estimated_cost_usd"] == 0.000462
+
+            job = runtime.db.get_job(job_event["job_id"])
+            unknown = runtime.jobs._usage_payload(job, measures, job["finished_at"], "unknown-model")
+            assert unknown["tokens_prompt"] == 120 and unknown["tokens_output"] == 45
+            assert "pricing_snapshot" not in unknown["metadata"]
+            assert "estimated_cost_usd" not in unknown["metadata"]
+            partial = runtime.jobs._usage_payload(job, measures, job["finished_at"], "partial-model")
+            assert partial["metadata"]["estimated_cost_usd"] == 0.00024
+            assert partial["metadata"]["pricing_partial"] is True
+            # Semi-trusted catalogue numbers must never overflow into Infinity or suppress
+            # the usage row. They remain an immutable raw snapshot but produce no estimate.
+            overflow = runtime.jobs._usage_payload(job, measures, job["finished_at"], "overflow-model")
+            assert overflow["tokens_prompt"] == 120
+            assert "estimated_cost_usd" not in overflow["metadata"], overflow
+            huge_usage = {"prompt_tokens": 2**63 - 1}
+            infinity = runtime.jobs._usage_payload(job, huge_usage, job["finished_at"], "infinity-model")
+            assert infinity["tokens_prompt"] == 2**63 - 1
+            assert "estimated_cost_usd" not in infinity["metadata"], infinity
 
             runtime.jobs._record_job_usage(job_event["job_id"])
             runtime.workflows._record_workflow_usage(run["id"])
             assert len(runtime.db.list_usage_events()) == 2
+
+            # T1b hardening #2: cost estimation is best-effort and must NEVER raise out of
+            # _usage_payload — that payload is built inside the T3 atomic terminal apply, so an
+            # escaping exception would abort the whole transaction and wedge the job non-terminal.
+            # A cost failure drops only the cost fields; the T1a token/metering row survives.
+            # (Mutation: drop the try/except around the pricing block → this raises → check red.)
+            with mock.patch("atlas.jobs._estimate_cost_usd", side_effect=RuntimeError("pricing kaboom")):
+                isolated = runtime.jobs._usage_payload(job, measures, job["finished_at"], "priced-model")
+            assert isolated["tokens_prompt"] == 120 and isolated["tokens_output"] == 45, isolated
+            assert "estimated_cost_usd" not in isolated["metadata"], isolated
+            assert "pricing_snapshot" not in isolated["metadata"], isolated
+
+            # T1b hardening #3: a transient /v1/models failure must NOT drop the cached catalogue
+            # (update_worker_status rewrites agent_info wholesale). The prior catalogue is carried
+            # forward so pricing snapshots keep working until the next successful poll.
+            # (Mutation: remove the carry-forward branch → the catalogue is blanked → check red.)
+            before_models = runtime.db.get_worker(worker["id"])["agent_info"]["models"]
+            assert isinstance(before_models, list) and before_models, before_models
+            MockThClawsHandler.models_fail = True
+            try:
+                runtime.jobs.poll_worker(worker["id"])
+            finally:
+                MockThClawsHandler.models_fail = False
+            after_info = runtime.db.get_worker(worker["id"])["agent_info"]
+            assert after_info.get("models") == before_models, "transient /v1/models failure dropped the cached catalogue"
+            # And a real usage row still prices off the carried-forward catalogue.
+            still_priced = runtime.jobs._usage_payload(job, measures, job["finished_at"], "priced-model")
+            assert "estimated_cost_usd" in still_priced["metadata"], still_priced
 
             # B4: read-only run-count threshold alert; the Usage view reads the same data.
             ledger = runtime.db.list_usage_events()

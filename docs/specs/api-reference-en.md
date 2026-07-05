@@ -716,7 +716,8 @@ The JSON response is:
     "wall_seconds": 4.0,
     "job_wall_seconds": 3.0,
     "tokens_prompt": 0,
-    "tokens_output": 0
+    "tokens_output": 0,
+    "estimated_cost_usd": 0.0
   },
   "from": "2026-06-01T00:00:00Z",
   "to": "2026-06-30T23:59:59Z"
@@ -730,7 +731,13 @@ for successful runs. Model/token fields are visibility-only under BYOK
 (`byok_token_counts_billable` stays false): `tokens_prompt`/`tokens_output` are
 captured from the worker's `usage` SSE event (thClaws v0.85.0+) with the full
 usage payload under `metadata.measures`, and stay null for older workers.
-`totals` includes additive `tokens_prompt`/`tokens_output` sums over job events.
+When the effective model is present in the worker's `/v1/models` catalogue,
+`metadata` also freezes `effective_model`, its source (`worker` or `requested`),
+the USD `pricing_snapshot`, and `estimated_cost_usd`. Partial pricing covers only
+token types with a published rate and sets `pricing_partial: true`; tier-billed or
+unknown models have no estimate. These values are visibility-only, never billing.
+`totals` includes additive token sums and `estimated_cost_usd` read strictly from
+the immutable event snapshots; current worker pricing never reprices history.
 Metering failures are logged and never change job/run outcomes.
 
 CSV uses one row per raw event with columns `id`, `idempotency_key`, `kind`,

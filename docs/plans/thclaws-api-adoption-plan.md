@@ -352,20 +352,20 @@ Files:
 
 Work:
 
-- [ ] `list_models()` client + poll cache (failure → no snapshots, metering
+- [x] `list_models()` client + poll cache (failure → no snapshots, metering
       unaffected).
-- [ ] Snapshot writer: effective model resolution (model reported by the
+- [x] Snapshot writer: effective model resolution (model reported by the
       worker's usage/result payload if present, else the requested model,
       recorded which), rates copied verbatim.
-- [ ] Summaries compute cost strictly from per-event snapshots.
+- [x] Summaries compute cost strictly from per-event snapshots.
 
 Checks:
 
-- [ ] Mock pricing → cost = tokens × snapshot rates; changing the mock's
+- [x] Mock pricing → cost = tokens × snapshot rates; changing the mock's
       pricing AFTER the event does not change the event's reported cost.
-- [ ] Unknown model / no pricing → tokens recorded, no cost fields.
-- [ ] Partial rates → only covered types priced, `pricing_partial: true`.
-- [ ] Mutation test: make summaries read the live cache instead of the
+- [x] Unknown model / no pricing → tokens recorded, no cost fields.
+- [x] Partial rates → only covered types priced, `pricing_partial: true`.
+- [x] Mutation test: make summaries read the live cache instead of the
       snapshot → the price-change check goes red.
 
 ---

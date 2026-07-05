@@ -78,8 +78,8 @@ class ThClawsClient:
                 request_not_accepted=isinstance(exc.reason, _NOT_ACCEPTED_REASONS),
             ) from exc
 
-    def get_json(self, path: str) -> Any:
-        with self._request("GET", path) as response:
+    def get_json(self, path: str, timeout: float | None = None) -> Any:
+        with self._request("GET", path, timeout=timeout) as response:
             body = response.read().decode("utf-8", errors="replace")
         try:
             return json.loads(body or "{}")
@@ -110,6 +110,17 @@ class ThClawsClient:
 
     def agent_info(self) -> dict[str, Any]:
         return self.get_json("/v1/agent/info")
+
+    def list_models(self) -> list[dict[str, Any]]:
+        """Return the worker's OpenAI-compatible model catalogue.
+
+        Keep validation at the client boundary: a malformed response is a poll failure, not
+        a poisoned pricing cache that can later produce a misleading estimate.
+        """
+        payload = self.get_json("/v1/models", timeout=min(self.timeout, 5.0))
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise ThClawsError("Invalid model list from /v1/models")
+        return [row for row in payload["data"] if isinstance(row, dict)]
 
     def run_agent_stream(
         self,
@@ -553,6 +564,17 @@ def extract_usage(event: SseEvent) -> dict[str, int] | None:
         if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**63 - 1:
             usage[key] = value
     return usage or None
+
+
+def extract_effective_model(event: SseEvent) -> str | None:
+    """Worker-reported model from a usage or terminal result frame."""
+    if event.event not in {"usage", "result"}:
+        return None
+    data = event.json_data()
+    if not isinstance(data, dict):
+        return None
+    model = data.get("model")
+    return model if isinstance(model, str) and model.strip() else None
 
 
 def extract_session_id(event: SseEvent) -> str | None:

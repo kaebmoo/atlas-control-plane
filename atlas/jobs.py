@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -18,6 +19,7 @@ from .thclaws_client import (
     ThClawsClient,
     ThClawsError,
     extract_session_id,
+    extract_effective_model,
     extract_text,
     extract_usage,
     parse_event_payload,
@@ -42,6 +44,13 @@ _CALLBACK_TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 # would 401 the worker's legitimate final retries — thClaws gives up on any non-429 4xx.
 CALLBACK_RETRY_ENVELOPE_SECONDS = 300
 _CALLBACK_TOKEN_DOMAIN = "atlas-worker-callback-v1"
+_PRICING_FIELDS = (
+    "input_per_mtok",
+    "output_per_mtok",
+    "cached_input_per_mtok",
+    "cache_creation_per_mtok",
+    "reasoning_per_mtok",
+)
 
 
 def mint_callback_token(job_id: str, expires_epoch: int, secret_key: str) -> str:
@@ -67,6 +76,83 @@ def verify_callback_token(job_id: str, token: str, secret_key: str, now_epoch: f
     if not hmac.compare_digest(signature, expected):
         return False
     return (time.time() if now_epoch is None else now_epoch) <= expires_epoch
+
+
+def _nonempty_string(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _pricing_for_worker_model(worker: dict[str, Any] | None, model: str) -> dict[str, Any] | None:
+    info = (worker or {}).get("agent_info") or {}
+    rows = info.get("models") if isinstance(info, dict) else None
+    if not isinstance(rows, list):
+        return None
+    row = next((item for item in rows if isinstance(item, dict) and item.get("id") == model), None)
+    pricing = row.get("pricing") if row else None
+    if not isinstance(pricing, dict) or pricing.get("currency") != "USD":
+        return None
+    # Copy only the upstream PricingBlock contract. Values remain verbatim in the immutable
+    # event snapshot; invalid rates are ignored by the estimator below.
+    return {
+        key: pricing[key]
+        for key in ("currency", *_PRICING_FIELDS, "tier_billed", "free")
+        if key in pricing
+    }
+
+
+def _estimate_cost_usd(usage: dict[str, int] | None, pricing: dict[str, Any]) -> dict[str, Any] | None:
+    if not usage or pricing.get("tier_billed") is True:
+        return None
+    if pricing.get("free") is True:
+        return {"estimated_cost_usd": 0.0, "estimate": True, "pricing_partial": False}
+
+    cached = usage.get("cached_input_tokens", 0)
+    token_rates = (
+        (max(0, usage.get("prompt_tokens", 0) - cached), "input_per_mtok", None),
+        (cached, "cached_input_per_mtok", "input_per_mtok"),
+        (usage.get("cache_creation_input_tokens", 0), "cache_creation_per_mtok", None),
+        (usage.get("completion_tokens", 0), "output_per_mtok", None),
+        (usage.get("reasoning_output_tokens", 0), "reasoning_per_mtok", "output_per_mtok"),
+    )
+    total = 0.0
+    priced = False
+    partial = False
+    for tokens, field, fallback_field in token_rates:
+        if not tokens:
+            continue
+        normalized_rate = _finite_nonnegative_rate(pricing.get(field))
+        if normalized_rate is None and fallback_field:
+            # thClaws's catalogue contract bills cached input at the base input rate and
+            # reasoning at the base output rate when a specialized rate is absent. Keep the
+            # partial marker so consumers still know the specialized coverage was missing.
+            partial = True
+            normalized_rate = _finite_nonnegative_rate(pricing.get(fallback_field))
+        if normalized_rate is None:
+            partial = True
+            continue
+        subtotal = tokens / 1_000_000 * normalized_rate
+        if not math.isfinite(subtotal):
+            partial = True
+            continue
+        candidate = total + subtotal
+        if not math.isfinite(candidate):
+            partial = True
+            continue
+        total = candidate
+        priced = True
+    if not priced:
+        return None
+    return {"estimated_cost_usd": round(total, 12), "estimate": True, "pricing_partial": partial}
+
+
+def _finite_nonnegative_rate(value: Any) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        rate = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return rate if math.isfinite(rate) and rate >= 0 else None
 
 
 def _handoff_child_id(source_job_id: str) -> str:
@@ -282,7 +368,21 @@ class JobManager:
             # health() always returns a dict (truthy), so key off the worker's own ok flag:
             # a reachable-but-unhealthy worker ({"ok": false}) must not be ranked as online.
             status = "online" if health.get("ok") else "offline"
-            merged_info = {"health": health, "agent": agent_info}
+            merged_info: dict[str, Any] = {"health": health, "agent": agent_info}
+            try:
+                merged_info["models"] = client.list_models()
+                merged_info["models_checked_at"] = now_iso()
+            except ThClawsError:
+                # Pricing discovery is advisory and a worker that can run jobs stays online. But
+                # update_worker_status rewrites agent_info WHOLESALE, so simply skipping here would
+                # DROP the last-known catalogue on a single transient /v1/models failure, blanking
+                # pricing snapshots until the next success. Carry the prior catalogue forward
+                # instead — stale pricing is fine (snapshots freeze at record time and the estimate
+                # is explicitly non-billable); only a successful poll replaces it.
+                prior = worker.get("agent_info")
+                if isinstance(prior, dict) and isinstance(prior.get("models"), list):
+                    merged_info["models"] = prior["models"]
+                    merged_info["models_checked_at"] = prior.get("models_checked_at")
             self.db.update_worker_status(worker_id, status, merged_info, None)
         except ThClawsError as exc:
             self.db.update_worker_status(worker_id, "offline", {}, str(exc))
@@ -407,6 +507,7 @@ class JobManager:
         done_seen = False
         stream_deadline = time.monotonic() + self.max_stream_seconds
         usage: dict[str, int] | None = None
+        effective_model: str | None = None
         try:
             # max_total_bytes bounds the CUMULATIVE raw worker output in iter_sse, at the byte
             # source — so every wire byte counts (data, framing/whitespace padding, comment and
@@ -438,6 +539,7 @@ class JobManager:
                     # Merge per key, last-seen wins: a retried turn re-emits final counts,
                     # but a partial frame must never clobber counts already seen back to NULL.
                     usage = (usage or {}) | parsed_usage
+                effective_model = extract_effective_model(event) or effective_model
 
                 session_id = extract_session_id(event)
                 if session_id:
@@ -484,7 +586,7 @@ class JobManager:
             self.db.append_job_event(job_id, "error", {"error": str(exc)})
             self.db.audit("job.failed", "job", job_id, {"error": str(exc)})
         finally:
-            self._record_job_usage(job_id, usage)
+            self._record_job_usage(job_id, usage, effective_model)
             with self._lock:
                 self._threads.pop(job_id, None)
 
@@ -691,7 +793,12 @@ class JobManager:
             error=error,
             summary=summary,
             events=[("callback_result", _project_callback_result(payload, token))],
-            usage_payload=self._usage_payload(job, usage, finished_at),
+            usage_payload=self._usage_payload(
+                job,
+                usage,
+                finished_at,
+                _redact_token(_nonempty_string(payload.get("model")) or "", token) or None,
+            ),
         )
         if final_state is None:
             # Lost the terminal race (duplicate delivery / reaper). Normally a no-op — but if
@@ -763,11 +870,51 @@ class JobManager:
         thread.start()
         return thread
 
-    def _usage_payload(self, job: dict[str, Any], usage: dict[str, int] | None, finished_at: str | None) -> dict[str, Any]:
+    def _usage_payload(
+        self,
+        job: dict[str, Any],
+        usage: dict[str, int] | None,
+        finished_at: str | None,
+        worker_model: str | None = None,
+    ) -> dict[str, Any]:
         """Build the usage_events row for one terminal job. `status` is patched to the FINAL
         terminal state by apply_job_terminal_result when used in the atomic apply path."""
         context = self.db.workflow_context_for_job(job["id"])
         seconds = elapsed_seconds(job.get("started_at"), finished_at)
+        requested_model = _nonempty_string(job.get("model"))
+        effective_model = worker_model or requested_model
+        metadata: dict[str, Any] = {
+            "measures": {
+                "workflow_run_count": 0,
+                "job_count": 1,
+                "budget_units": 0,
+                "wall_seconds": seconds,
+                # Full usage payload (cached/creation/reasoning counts included).
+                **(usage or {}),
+            },
+            "byok_token_counts_billable": False,
+        }
+        if effective_model:
+            metadata["effective_model"] = effective_model
+            metadata["effective_model_source"] = "worker" if worker_model else "requested"
+            # Cost estimation is best-effort observability, exactly like T1a token capture — it
+            # must NEVER break the usage row. Critically, this payload is built INSIDE the T3
+            # atomic terminal apply (apply_worker_callback / reaper / dispatch-failure pass it
+            # straight into apply_job_terminal_result), so an exception escaping here would abort
+            # that whole transaction and leave the job wedged non-terminal — not merely drop a
+            # cost field. Compute into a local dict and merge only on success; any failure records
+            # the token/metering row (T1a) with no cost fields.
+            try:
+                pricing = _pricing_for_worker_model(self.db.get_worker(job.get("worker_id") or ""), effective_model)
+                cost_meta: dict[str, Any] = {}
+                if pricing:
+                    cost_meta["pricing_snapshot"] = pricing
+                    estimate = _estimate_cost_usd(usage, pricing)
+                    if estimate is not None:
+                        cost_meta.update(estimate)
+                metadata.update(cost_meta)
+            except Exception:
+                LOGGER.exception("cost estimation failed for job %s; recording usage without estimate", job.get("id"))
         return {
             "idempotency_key": f"job:{job['id']}",
             "kind": "job",
@@ -780,28 +927,20 @@ class JobManager:
             "seconds": seconds,
             "started_at": job.get("started_at"),
             "finished_at": finished_at,
-            "model": job.get("model") or None,
+            "model": effective_model,
             "tokens_prompt": usage.get("prompt_tokens") if usage else None,
             "tokens_output": usage.get("completion_tokens") if usage else None,
-            "metadata": {
-                "measures": {
-                    "workflow_run_count": 0,
-                    "job_count": 1,
-                    "budget_units": 0,
-                    "wall_seconds": seconds,
-                    # Full usage payload (cached/creation/reasoning counts included).
-                    **(usage or {}),
-                },
-                "byok_token_counts_billable": False,
-            },
+            "metadata": metadata,
         }
 
-    def _record_job_usage(self, job_id: str, usage: dict[str, int] | None = None) -> None:
+    def _record_job_usage(
+        self, job_id: str, usage: dict[str, int] | None = None, effective_model: str | None = None
+    ) -> None:
         try:
             job = self.db.get_job(job_id)
             if not job or job.get("state") not in TERMINAL_STATES:
                 return
-            self.db.emit_usage_event(self._usage_payload(job, usage, job.get("finished_at")))
+            self.db.emit_usage_event(self._usage_payload(job, usage, job.get("finished_at"), effective_model))
         except Exception:
             LOGGER.exception("usage metering failed for job %s", job_id)
 
