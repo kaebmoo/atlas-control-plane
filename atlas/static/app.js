@@ -70,6 +70,28 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
+// T4: only ever surface an "Open worker UI" link for an http(s) URL. A worker-reported
+// external_access.ui_url is untrusted — a `javascript:`/`file:`/`data:` scheme in an href is an
+// XSS/exfil vector, so anything that does not parse as http/https yields "" (link not rendered).
+function safeHttpUrl(value) {
+  if (typeof value !== "string") return "";
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+// T4 worker-contract version range Atlas has actually tested (docs/specs/thclaws-worker-contract.md).
+// A worker reporting anything else gets an advisory version-mismatch warning in its card.
+const CONTRACT_TESTED_VERSIONS = new Set(["0.85.0"]);
+const CONTRACT_TESTED_RANGE = "0.85.0";
+
+function versionOutsideContract(version) {
+  return Boolean(version) && !CONTRACT_TESTED_VERSIONS.has(version);
+}
+
 function statusClass(value) {
   // Whitelist to a safe CSS-class token: the result flows into class="status ${...}", so any
   // character outside [A-Za-z0-9-] (e.g. a quote) could break out of the attribute and inject
@@ -420,7 +442,7 @@ function applyRoleGate() {
   if (auditNav) auditNav.hidden = !["admin", "auditor"].includes(role);
   const usageNav = document.querySelector('.nav-item[data-view="usage"]');
   if (usageNav) usageNav.hidden = !["admin", "auditor"].includes(role);
-  for (const node of document.querySelectorAll(".edit-worker, .delete-worker, .edit-workspace, .delete-workspace")) node.disabled = !admin;
+  for (const node of document.querySelectorAll(".edit-worker, .delete-worker, .edit-workspace, .delete-workspace, .sync-mode-select")) node.disabled = !admin;
   for (const node of document.querySelectorAll(".poll-worker, .approve-approval, .reject-approval, .choose-approval, .fire-trigger, .toggle-trigger, .delete-trigger, .apply-worker-suggestion")) node.disabled = !operator;
   if (auditNav?.hidden && document.querySelector("#view-audit.is-active")) showView("overview");
   if (usageNav?.hidden && document.querySelector("#view-usage.is-active")) showView("overview");
@@ -544,6 +566,25 @@ function renderWorkers() {
   list.innerHTML = state.workers.map((worker) => {
     const tags = (worker.tags || []).map((tag) => `<span class="wc-tag">${escapeHtml(tag)}</span>`).join("");
     const seen = worker.last_seen_at ? `เห็นล่าสุด ${formatTime(worker.last_seen_at)}` : "ยังไม่เคยเห็น";
+    // T4 advisory surfaces. All worker-reported values escaped/scheme-checked before render.
+    const info = worker.agent_info || {};
+    const agent = info.agent || {};
+    const syncMode = worker.sync_mode || "disabled";
+    const busyState = info.busy === true ? "busy" : info.busy === false ? "free" : "unknown";
+    const busyBadge = syncMode !== "disabled"
+      ? `<span class="wc-busy" data-busy="${busyState}">busy: ${busyState}${info.busy_checked_at ? ` · ${escapeHtml(formatTime(info.busy_checked_at))}` : ""}</span>`
+      : "";
+    const uiUrl = safeHttpUrl((agent.external_access || {}).ui_url);
+    const uiLink = uiUrl ? `<a class="wc-ui-link" href="${escapeHtml(uiUrl)}" target="_blank" rel="noopener">Open worker UI ↗</a>` : "";
+    const skills = Array.isArray(agent.skills) ? agent.skills : [];
+    const skillChips = skills.slice(0, 20).map((skill) => `<span class="wc-skill" title="${escapeHtml(String((skill && skill.when_to_use) || ""))}">${escapeHtml(String((skill && skill.name) || "skill"))}</span>`).join("");
+    const skillsBlock = skillChips ? `<div class="wc-skills" title="daemon-scoped, advisory">skills (daemon-scoped, advisory): ${skillChips}</div>` : "";
+    const workerVersion = String(agent.version || "");
+    const versionWarn = versionOutsideContract(workerVersion)
+      ? `<div class="wc-version-warn" data-version-warn="1">⚠ worker version ${escapeHtml(workerVersion)} outside contract-tested range (${escapeHtml(CONTRACT_TESTED_RANGE)})</div>`
+      : "";
+    const syncOptions = ["disabled", "tunnel", "forward_auth"].map((mode) => `<option value="${mode}"${mode === syncMode ? " selected" : ""}>${mode}</option>`).join("");
+    const syncControl = `<label class="wc-sync-mode" data-sync-mode="${escapeHtml(syncMode)}">sync <select class="sync-mode-select" data-worker-id="${escapeHtml(worker.id)}">${syncOptions}</select></label>`;
     return `
     <article class="worker-card">
       <div class="wc-head">
@@ -558,6 +599,9 @@ function renderWorkers() {
         <span class="latency">${escapeHtml(seen)}</span>
       </div>
       <div class="wc-tags">${tags}</div>
+      ${versionWarn}
+      <div class="wc-advisory">${busyBadge}${syncControl}${uiLink}</div>
+      ${skillsBlock}
       <div class="wc-actions">
         <button class="secondary-btn poll-worker" data-worker-id="${escapeHtml(worker.id)}">Poll</button>
         <button class="secondary-btn edit-worker" data-worker-id="${escapeHtml(worker.id)}">แก้ไข</button>
@@ -1570,6 +1614,14 @@ async function pollWorker(workerId) {
   toast(`${worker?.name || "Worker"} is ${worker?.status || "unknown"}`);
 }
 
+// T4: enabling tunnel/forward_auth runs a server-side pre-enable sync probe; a rejected probe
+// (400) leaves the mode unchanged, so on any error we reload to snap the select back to truth.
+async function setSyncMode(workerId, mode) {
+  await api(`/api/workers/${workerId}/sync-mode`, { method: "POST", body: JSON.stringify({ sync_mode: mode }) });
+  await loadAll();
+  toast(`Sync mode → ${mode}`);
+}
+
 async function cancelSelectedJob() {
   if (!state.selectedJobId) return;
   await api(`/api/jobs/${state.selectedJobId}/cancel`, { method: "POST" });
@@ -1986,6 +2038,16 @@ async function deleteWorkspace(workspaceId) {
   toast("Workspace deleted");
   await loadAll();
 }
+
+document.addEventListener("change", async (event) => {
+  const syncSelect = event.target.closest(".sync-mode-select");
+  if (syncSelect) {
+    await setSyncMode(syncSelect.dataset.workerId, syncSelect.value).catch((error) => {
+      toast(error.message);
+      loadAll();  // rejected pre-enable probe left the mode unchanged; reset the select to truth.
+    });
+  }
+});
 
 document.addEventListener("click", async (event) => {
   if (event.target.closest("[data-close-modal]")) {

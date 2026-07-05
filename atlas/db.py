@@ -563,6 +563,19 @@ def _migration_008_non_terminal_jobs_index(conn: sqlite3.Connection) -> None:
     )
 
 
+# T4 allowed values for the operator-owned sync trust assertion. An enum, not a bare flag,
+# so the audit trail records WHICH approved deployment shape was asserted (contract doc).
+WORKER_SYNC_MODES = frozenset({"disabled", "tunnel", "forward_auth"})
+
+
+def _migration_009_worker_sync_mode(conn: sqlite3.Connection) -> None:
+    # T4 advisory sync surface: the OPERATOR-owned trust assertion for /workspace/sync/*
+    # (docs/specs/thclaws-worker-contract.md). A PERSISTENT column, never the agent_info blob —
+    # update_worker_status rewrites that blob wholesale on every poll, so an operator setting
+    # stored there would be silently erased. Default 'disabled' = Atlas makes no sync request.
+    _add_missing_columns(conn, "workers", {"sync_mode": "TEXT NOT NULL DEFAULT 'disabled'"})
+
+
 # Ordered, append-only migration steps. A step is either a SQL string (run via
 # executescript) or a callable(conn). The 1-based index is the schema version.
 # Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
@@ -579,6 +592,7 @@ MIGRATIONS: list[str | Any] = [
     _migration_006_async_jobs,
     _migration_007_callback_due_index,
     _migration_008_non_terminal_jobs_index,
+    _migration_009_worker_sync_mode,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -1895,6 +1909,25 @@ class Database:
         for worker in workers:
             worker["token"] = self._decrypt_worker_token(worker.get("token"))
         return workers
+
+    def set_worker_sync_mode(self, worker_id: str, mode: str) -> dict[str, Any] | None:
+        """Persist the operator-owned `sync_mode` on its own column (never the poll-rewritten
+        agent_info blob). Audited on a real change. Caller (app.py) runs the pre-enable probe
+        BEFORE calling this; this method only records the asserted mode."""
+        if mode not in WORKER_SYNC_MODES:
+            raise ValueError(f"invalid sync_mode: {mode!r}")
+        with self._lock, self.connect() as conn:
+            previous = conn.execute("SELECT sync_mode FROM workers WHERE id = ?", (worker_id,)).fetchone()
+            if previous is None:
+                return None
+            conn.execute(
+                "UPDATE workers SET sync_mode = ?, updated_at = ? WHERE id = ?",
+                (mode, now_iso(), worker_id),
+            )
+        old = previous["sync_mode"]
+        if old != mode:
+            self.audit("worker.sync_mode_changed", "worker", worker_id, {"old": old, "new": mode})
+        return self.get_worker(worker_id)
 
     def _encrypt_worker_token(self, token: Any) -> str | None:
         if token is None or token == "":

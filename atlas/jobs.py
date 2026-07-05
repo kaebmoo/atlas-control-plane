@@ -383,6 +383,20 @@ class JobManager:
                 if isinstance(prior, dict) and isinstance(prior.get("models"), list):
                     merged_info["models"] = prior["models"]
                     merged_info["models_checked_at"] = prior.get("models_checked_at")
+            # T4 advisory busy state. Probe /workspace/sync/stat ONLY when the operator has
+            # asserted an approved sync shape (tunnel/forward_auth) — sync/* is not Bearer-
+            # protected, so a `disabled` worker is never probed. This is poll-owned data, so the
+            # agent_info blob is the correct home here (unlike the operator-owned sync_mode
+            # column). Busy is real-time: any error → busy: null ("unknown"), NEVER carried
+            # forward like the pricing catalogue and never a routing blocker.
+            if worker.get("sync_mode", "disabled") != "disabled":
+                try:
+                    stat = client.sync_stat()
+                    stat_busy = stat.get("busy")
+                    merged_info["busy"] = stat_busy if isinstance(stat_busy, bool) else None
+                except ThClawsError:
+                    merged_info["busy"] = None
+                merged_info["busy_checked_at"] = now_iso()
             self.db.update_worker_status(worker_id, status, merged_info, None)
         except ThClawsError as exc:
             self.db.update_worker_status(worker_id, "offline", {}, str(exc))

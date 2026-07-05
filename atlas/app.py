@@ -19,12 +19,12 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
 from .config import Config
-from .db import ARTIFACT_KINDS, Database, new_id, now_iso
+from .db import ARTIFACT_KINDS, WORKER_SYNC_MODES, Database, new_id, now_iso
 from .jobs import JobManager, TERMINAL_STATES, verify_callback_token
 from .outbound import OutboundService, OutboundSettings
 from .packs import export_pack, import_pack, list_available_packs
 from .router import Router
-from .thclaws_client import redact_tool_payload_for_read
+from .thclaws_client import ThClawsClient, ThClawsError, redact_tool_payload_for_read
 from .usage import audit_csv, normalize_usage_range, summarize_usage, usage_csv
 from .workflow_templates import workflow_templates
 from .workflows import (
@@ -414,6 +414,33 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
         if len(parts) == 4 and parts[:2] == ["api", "workers"] and parts[3] == "poll" and method == "POST":
             self._json({"worker": _public_worker(runtime.jobs.poll_worker(parts[2]))})
+            return
+
+        if len(parts) == 4 and parts[:2] == ["api", "workers"] and parts[3] == "sync-mode" and method == "POST":
+            worker_id = parts[2]
+            worker = runtime.db.get_worker(worker_id)
+            if not worker:
+                raise FileNotFoundError()
+            mode = str((self._read_json() or {}).get("sync_mode") or "").strip()
+            if mode not in WORKER_SYNC_MODES:
+                raise ValueError(f"sync_mode must be one of {sorted(WORKER_SYNC_MODES)}")
+            # Enabling an approved shape MUST validate reachability through the SAME worker client
+            # path before persisting: an operator asserting 'tunnel'/'forward_auth' over a dead or
+            # misconfigured path is rejected here, not discovered later at collection time. This
+            # authenticated pre-enable transition is the ONLY caller that probes while the mode is
+            # still 'disabled' (the normal poll never probes a disabled worker). The probe proves
+            # reachability + response shape, NOT that the path is private — that stays the
+            # operator's asserted trust. A probe failure leaves the persisted mode unchanged.
+            if mode != "disabled":
+                client = ThClawsClient(worker["base_url"], worker.get("token"), timeout=runtime.jobs.request_timeout_seconds)
+                try:
+                    client.sync_stat()
+                except ThClawsError as exc:
+                    raise ValueError(f"sync probe failed; sync_mode unchanged: {exc}") from exc
+            updated = runtime.db.set_worker_sync_mode(worker_id, mode)
+            if not updated:
+                raise FileNotFoundError()
+            self._json({"worker": _public_worker(updated)})
             return
 
         if parts == ["api", "workspaces"]:
