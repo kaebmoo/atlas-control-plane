@@ -1090,7 +1090,9 @@ function renderWorkflowRuns() {
   });
   set("monNodeChips", (node) => { node.innerHTML = run ? renderNodeChips(run) : '<span class="hint">เลือก run เพื่อดูความคืบหน้าของโหนด</span>'; });
   set("workflowEventList", (node) => {
-    node.innerHTML = state.workflowEvents.slice(0, 14).map((event) => {
+    // Events arrive seq ASC (oldest→newest); show the most RECENT 14 so mid/late-run events
+    // (e.g. files_pushed) surface instead of only the run's first 14 setup events.
+    node.innerHTML = state.workflowEvents.slice(-14).map((event) => {
       const type = event.event_type || "";
       const dot = /completed|succeeded|granted/.test(type) ? "ok" : /running|started/.test(type) ? "run" : /failed|error|rejected/.test(type) ? "err" : "";
       // T6: surface the file-handoff push details (count/bytes/target) inline rather than only
@@ -1286,7 +1288,11 @@ async function loadUsage() {
   const tokensOutput = Number(totals.tokens_output ?? 0);
   $("#usageTokens").textContent = `${tokensPrompt.toLocaleString()} · ${tokensOutput.toLocaleString()}`;
   const estCost = Number(totals.estimated_cost_usd ?? 0);
-  $("#usageEstCost").textContent = estCost ? `$${estCost.toFixed(4)}` : "$0";
+  // Sub-cent estimates would round to "$0.0000" under toFixed(4) though they're non-zero;
+  // fall back to 2 significant figures below $0.0001 so a real tiny cost stays visible.
+  $("#usageEstCost").textContent = !estCost
+    ? "$0"
+    : `$${estCost >= 0.0001 ? estCost.toFixed(4) : estCost.toPrecision(2)}`;
   $("#usageMeta").textContent = (data.from || data.to)
     ? `ช่วง ${data.from || "…"} → ${data.to || "…"}`
     : "ทุกช่วงเวลา";
@@ -1364,8 +1370,15 @@ async function submitJob() {
   };
   // T5: optional collect_files (relative paths, comma-separated); T3: opt-in async callback.
   const collectFiles = $("#collectFilesInput").value.split(",").map((path) => path.trim()).filter(Boolean);
+  const asyncCallback = $("#jobExecutionCallback").checked;
+  // The server rejects this combination (the collection barrier is on the stream path); catch it
+  // client-side with a clear message instead of a round-trip to a 400.
+  if (asyncCallback && collectFiles.length) {
+    toast("Collect files ใช้ร่วมกับ Async (callback) ไม่ได้");
+    return;
+  }
   if (collectFiles.length) payload.collect_files = collectFiles;
-  if ($("#jobExecutionCallback").checked) payload.execution = "callback";
+  if (asyncCallback) payload.execution = "callback";
   if ($("#handoffEnabled").checked) {
     const handoffWorkspaceId = $("#handoffWorkspaceSelect").value || undefined;
     const handoffWorkerId = $("#handoffWorkerSelect").value || undefined;
@@ -1386,6 +1399,7 @@ async function submitJob() {
   state.events = [];
   $("#promptInput").value = "";
   $("#collectFilesInput").value = "";
+  $("#jobExecutionCallback").checked = false;  // don't silently carry async mode into the next job
   await loadAll();
   openJobStream(data.job.id);
   showView("jobs");

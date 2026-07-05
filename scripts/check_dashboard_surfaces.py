@@ -49,6 +49,10 @@ need('id="collectFilesInput"' in HTML, "job form missing #collectFilesInput")
 need('id="jobExecutionCallback"' in HTML, "job form missing #jobExecutionCallback toggle")
 need("payload.collect_files = collectFiles" in JS, "submitJob does not send collect_files")
 need('payload.execution = "callback"' in JS, "submitJob does not send execution: callback")
+# collect_files + callback is a server 400 — guard it client-side with a clear message.
+need("asyncCallback && collectFiles.length" in JS, "submitJob must guard collect_files + callback client-side")
+# the async toggle must reset after submit, or the next job silently inherits callback mode.
+need('$("#jobExecutionCallback").checked = false' in JS, "submitJob must reset the async toggle after submit")
 
 # --- T6: builder policy.file_handoff (default-off) + edge push_files ----------------------
 need('id="policyFileHandoffInput"' in HTML, "builder missing #policyFileHandoffInput toggle")
@@ -65,6 +69,10 @@ need("edge.push_files = pushFiles" in JS, "addBuilderEdge does not attach push_f
 need('type === "files_pushed"' in JS, "run timeline does not surface files_pushed detail")
 need("payload.count" in JS and "payload.bytes" in JS and "payload.target_worker_id" in JS,
      "files_pushed detail must show count/bytes/target")
+# the timeline must window to the LATEST events (seq ASC), else a late files_pushed on a long
+# run never shows (the first 14 are setup events). Pin slice(-14), reject the old slice(0, 14).
+need("state.workflowEvents.slice(-14)" in JS, "run timeline must show the most recent events, not the first 14")
+need("state.workflowEvents.slice(0, 14)" not in JS, "run timeline still slices the FIRST 14 events")
 
 # --- existing anchors must not regress (careless rewrite guard) ---------------------------
 need('id="usageBudgetUnits"' in HTML, "existing Usage marker regressed")
