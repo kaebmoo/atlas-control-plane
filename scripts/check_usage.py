@@ -29,6 +29,7 @@ from scripts.check_lib import request, request_json
 
 class MockThClawsHandler(BaseHTTPRequestHandler):
     output_rate = 4.0
+    models_fail = False
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -59,6 +60,10 @@ class MockThClawsHandler(BaseHTTPRequestHandler):
         elif self.path == "/v1/agent/info":
             payload = {"version": "0.85.0"}
         elif self.path == "/v1/models":
+            if self.models_fail:
+                # Transient pricing-discovery failure: the worker still serves health + info.
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
             payload = {
                 "object": "list",
                 "data": [
@@ -231,6 +236,34 @@ def main() -> None:
             runtime.jobs._record_job_usage(job_event["job_id"])
             runtime.workflows._record_workflow_usage(run["id"])
             assert len(runtime.db.list_usage_events()) == 2
+
+            # T1b hardening #2: cost estimation is best-effort and must NEVER raise out of
+            # _usage_payload — that payload is built inside the T3 atomic terminal apply, so an
+            # escaping exception would abort the whole transaction and wedge the job non-terminal.
+            # A cost failure drops only the cost fields; the T1a token/metering row survives.
+            # (Mutation: drop the try/except around the pricing block → this raises → check red.)
+            with mock.patch("atlas.jobs._estimate_cost_usd", side_effect=RuntimeError("pricing kaboom")):
+                isolated = runtime.jobs._usage_payload(job, measures, job["finished_at"], "priced-model")
+            assert isolated["tokens_prompt"] == 120 and isolated["tokens_output"] == 45, isolated
+            assert "estimated_cost_usd" not in isolated["metadata"], isolated
+            assert "pricing_snapshot" not in isolated["metadata"], isolated
+
+            # T1b hardening #3: a transient /v1/models failure must NOT drop the cached catalogue
+            # (update_worker_status rewrites agent_info wholesale). The prior catalogue is carried
+            # forward so pricing snapshots keep working until the next successful poll.
+            # (Mutation: remove the carry-forward branch → the catalogue is blanked → check red.)
+            before_models = runtime.db.get_worker(worker["id"])["agent_info"]["models"]
+            assert isinstance(before_models, list) and before_models, before_models
+            MockThClawsHandler.models_fail = True
+            try:
+                runtime.jobs.poll_worker(worker["id"])
+            finally:
+                MockThClawsHandler.models_fail = False
+            after_info = runtime.db.get_worker(worker["id"])["agent_info"]
+            assert after_info.get("models") == before_models, "transient /v1/models failure dropped the cached catalogue"
+            # And a real usage row still prices off the carried-forward catalogue.
+            still_priced = runtime.jobs._usage_payload(job, measures, job["finished_at"], "priced-model")
+            assert "estimated_cost_usd" in still_priced["metadata"], still_priced
 
             # B4: read-only run-count threshold alert; the Usage view reads the same data.
             ledger = runtime.db.list_usage_events()

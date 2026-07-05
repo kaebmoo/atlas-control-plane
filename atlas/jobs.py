@@ -373,9 +373,16 @@ class JobManager:
                 merged_info["models"] = client.list_models()
                 merged_info["models_checked_at"] = now_iso()
             except ThClawsError:
-                # Pricing discovery is advisory. A worker that can run jobs remains online;
-                # new usage rows simply have no pricing snapshot until a later poll succeeds.
-                pass
+                # Pricing discovery is advisory and a worker that can run jobs stays online. But
+                # update_worker_status rewrites agent_info WHOLESALE, so simply skipping here would
+                # DROP the last-known catalogue on a single transient /v1/models failure, blanking
+                # pricing snapshots until the next success. Carry the prior catalogue forward
+                # instead — stale pricing is fine (snapshots freeze at record time and the estimate
+                # is explicitly non-billable); only a successful poll replaces it.
+                prior = worker.get("agent_info")
+                if isinstance(prior, dict) and isinstance(prior.get("models"), list):
+                    merged_info["models"] = prior["models"]
+                    merged_info["models_checked_at"] = prior.get("models_checked_at")
             self.db.update_worker_status(worker_id, status, merged_info, None)
         except ThClawsError as exc:
             self.db.update_worker_status(worker_id, "offline", {}, str(exc))
@@ -890,12 +897,24 @@ class JobManager:
         if effective_model:
             metadata["effective_model"] = effective_model
             metadata["effective_model_source"] = "worker" if worker_model else "requested"
-            pricing = _pricing_for_worker_model(self.db.get_worker(job.get("worker_id") or ""), effective_model)
-            if pricing:
-                metadata["pricing_snapshot"] = pricing
-                estimate = _estimate_cost_usd(usage, pricing)
-                if estimate is not None:
-                    metadata.update(estimate)
+            # Cost estimation is best-effort observability, exactly like T1a token capture — it
+            # must NEVER break the usage row. Critically, this payload is built INSIDE the T3
+            # atomic terminal apply (apply_worker_callback / reaper / dispatch-failure pass it
+            # straight into apply_job_terminal_result), so an exception escaping here would abort
+            # that whole transaction and leave the job wedged non-terminal — not merely drop a
+            # cost field. Compute into a local dict and merge only on success; any failure records
+            # the token/metering row (T1a) with no cost fields.
+            try:
+                pricing = _pricing_for_worker_model(self.db.get_worker(job.get("worker_id") or ""), effective_model)
+                cost_meta: dict[str, Any] = {}
+                if pricing:
+                    cost_meta["pricing_snapshot"] = pricing
+                    estimate = _estimate_cost_usd(usage, pricing)
+                    if estimate is not None:
+                        cost_meta.update(estimate)
+                metadata.update(cost_meta)
+            except Exception:
+                LOGGER.exception("cost estimation failed for job %s; recording usage without estimate", job.get("id"))
         return {
             "idempotency_key": f"job:{job['id']}",
             "kind": "job",
