@@ -1013,23 +1013,30 @@ class WorkflowRunner:
                         # Outside the run lock: the bounded-but-blocking push (mirrors the
                         # unlocked _wait_for_job below), then the fast submit under the lock again.
                         if node_submit["do_push"]:
-                            # Budget gate BEFORE the push: a node that can't be afforded must
-                            # not write into the target worker's workspace first. The
-                            # authoritative check still runs under the lock in
-                            # _reserve_and_submit_job; this pre-check only fronts the side-effect.
+                            # Budget AND deadline gates BEFORE the push: a node that can't be
+                            # afforded — or a run already past max_minutes — must not write
+                            # into the target worker's workspace first. The authoritative
+                            # re-checks run under the lock below; these pre-checks only front
+                            # the side-effect.
                             _check_budget(policy, int(counters.get("budget_units_spent") or 0), _node_budget_units(node))
+                            _check_deadline(deadline)
                             self._push_files_to_worker(
                                 run, node, node_submit["payload"]["worker_id"], node_submit["pushes"], node_submit["files_dir"]
                             )
                         with self._thread_lock:
                             # Re-check under the lock: the push above ran UNLOCKED for up to the
-                            # collect deadline, and a cancel landing in that window has already
+                            # collect deadline. A cancel landing in that window has already
                             # finalized the run and cancelled its EXISTING node jobs — this job
                             # doesn't exist yet, so without the re-check it would be created
                             # (and submitted to the worker) for a cancelled run, only to be
-                            # reaped later by _wait_for_job.
+                            # reaped later by _wait_for_job. Raise _WorkflowCancelled (not a
+                            # generic error) so the node lands 'cancelled' like every other
+                            # cancel path, with no node_failed event. The run deadline gets the
+                            # same treatment: max_minutes expiring during the push must trip
+                            # HERE, before the downstream job is created and submitted.
                             if (self.db.get_workflow_run(run["id"]) or {}).get("state") == "cancelled":
-                                raise ValueError(f"workflow run {run['id']} was cancelled before node {node_key} submit")
+                                raise _WorkflowCancelled()
+                            _check_deadline(deadline)
                             job = self._reserve_and_submit_job(run, node, node_submit["payload"], policy, counters)
                             self.db.update_workflow_node(runtime_node["id"], job_id=job["id"])
                     if job:

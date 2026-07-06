@@ -358,7 +358,49 @@ def check_cancel_during_push_no_downstream_job(runtime: AtlasRuntime, a_id: str,
     assert not consumer or not consumer[0].get("job_id"), (
         f"downstream job {consumer[0].get('job_id')} was created for a cancelled run"
     )
-    print("  cancel during push: no downstream job created OK")
+    # The cancelled node must land 'cancelled', not 'failed' — the submit guard raises
+    # _WorkflowCancelled, not a generic error. (Mutation: raise ValueError instead → the node
+    # is written 'failed' and a node_failed event is emitted → red.)
+    assert consumer and consumer[0]["state"] == "cancelled", (
+        f"cancelled node landed as {consumer[0]['state'] if consumer else 'missing'}, expected 'cancelled'"
+    )
+    events = runtime.db.list_workflow_events(run_id)
+    node_failed = [e for e in events if e["event_type"] == "node_failed" and e.get("node_key") == "consumer"]
+    assert not node_failed, "a cancelled node must not emit node_failed"
+    print("  cancel during push: no downstream job, node cancelled (not failed) OK")
+
+
+def check_deadline_precedes_submit(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
+    # A run whose max_minutes deadline expires DURING the unlocked push must not then create
+    # and submit the downstream job — the deadline is re-checked under the lock before
+    # _reserve_and_submit_job. max_minutes is validated as a whole-minute integer (untestable
+    # in a gate), so we stub _check_deadline to trip only AFTER the push side-effect has
+    # happened — deterministic, no wall-clock race. (Mutation: drop the under-lock
+    # _check_deadline(deadline) → the consumer job is created and submitted even though the
+    # deadline expired mid-push → consumer node gets a job_id → red.)
+    _reset_b()
+    policy = {"file_handoff": True, "allowed_worker_ids": [a_id, b_id], "max_jobs": 10, "max_minutes": 1}
+    original = workflows_module._check_deadline
+
+    def trip_after_push(_deadline: object) -> None:
+        # Let every check pass until the push has run; the next check (the under-lock one, just
+        # before submit) is the one that must fire.
+        if WorkerB.push_calls >= 1:
+            raise workflows_module._WorkflowGuardTripped("workflow policy max_minutes exceeded")
+
+    workflows_module._check_deadline = trip_after_push
+    try:
+        run = runtime.workflows.run_graph(_graph(a_id, b_id), policy)
+    finally:
+        workflows_module._check_deadline = original
+    assert run["state"] == "failed", run["state"]
+    assert "max_minutes" in (run.get("error") or ""), run.get("error")
+    assert WorkerB.push_calls == 1, "the push (side effect) should have happened before the deadline trip"
+    consumer = [n for n in runtime.db.list_workflow_nodes(run["id"]) if n["node_key"] == "consumer"]
+    assert consumer and not consumer[0].get("job_id"), (
+        f"a downstream job was created after the deadline expired: {consumer and consumer[0].get('job_id')}"
+    )
+    print("  deadline expiring during push blocks the downstream submit OK")
 
 
 def check_artifact_iteration_unbounded(runtime: AtlasRuntime) -> None:
@@ -414,6 +456,7 @@ def main() -> None:
             check_budget_gate_precedes_push(runtime, worker_a["id"], worker_b["id"])
             check_batch_create_is_all_or_nothing(runtime)
             check_cancel_during_push_no_downstream_job(runtime, worker_a["id"], worker_b["id"])
+            check_deadline_precedes_submit(runtime, worker_a["id"], worker_b["id"])
             check_artifact_iteration_unbounded(runtime)
         finally:
             server_a.shutdown()

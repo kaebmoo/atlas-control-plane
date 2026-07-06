@@ -674,16 +674,27 @@ class Database:
         finally:
             _AUDIT_ACTOR.reset(token)
 
+    _AUDIT_INSERT = """
+        INSERT INTO audit_log(action, actor, resource_type, resource_id, details, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """
+
+    @staticmethod
+    def _audit_values(
+        action: str, resource_type: str, resource_id: str, details: Any = None, actor: str | None = None
+    ) -> tuple[Any, ...]:
+        return (
+            action,
+            actor or _AUDIT_ACTOR.get(),
+            resource_type,
+            resource_id,
+            encode_json(details or {}),
+            now_iso(),
+        )
+
     def audit(self, action: str, resource_type: str, resource_id: str, details: Any = None, actor: str | None = None) -> None:
-        actor = actor or _AUDIT_ACTOR.get()
         with self._lock, self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO audit_log(action, actor, resource_type, resource_id, details, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (action, actor, resource_type, resource_id, encode_json(details or {}), now_iso()),
-            )
+            conn.execute(self._AUDIT_INSERT, self._audit_values(action, resource_type, resource_id, details, actor))
 
     def list_audit(
         self,
@@ -1649,10 +1660,19 @@ class Database:
         all rows land in ONE transaction — so a mid-list failure can never publish a partial
         set (T5's collection atomicity depends on this)."""
         rows = [self._artifact_row(payload) for payload in payloads]
+        # Audit rows share the SAME transaction: an audit write failing AFTER the artifact
+        # rows committed would raise out of an already-published batch — the caller's failure
+        # handling (T5 reclaims the staged blobs) would then leave live rows pointing at
+        # deleted files.
         with self._lock, self.connect() as conn:
             conn.executemany(self._ARTIFACT_INSERT, rows)
-        for row in rows:
-            self.audit("artifact.create", "artifact", row[0], {"run_id": row[1], "key": row[3]})
+            conn.executemany(
+                self._AUDIT_INSERT,
+                [
+                    self._audit_values("artifact.create", "artifact", row[0], {"run_id": row[1], "key": row[3]})
+                    for row in rows
+                ],
+            )
         return [row[0] for row in rows]
 
     def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:

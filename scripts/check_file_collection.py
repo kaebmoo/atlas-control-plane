@@ -384,6 +384,44 @@ def check_partial_collection_is_atomic(runtime: AtlasRuntime, worker_id: str) ->
     print("  mid-collection failure publishes nothing (no rows, no orphan blobs) OK")
 
 
+def check_audit_failure_is_atomic(runtime: AtlasRuntime, worker_id: str) -> None:
+    # The artifact rows AND their audit rows must land in ONE transaction. If the audit write
+    # fails AFTER the artifact rows are committed (a separate transaction), _collect_files then
+    # reclaims the staged blobs and leaves live rows pointing at DELETED files. (Mutation: move
+    # the audit writes out of create_artifacts' transaction — per-row self.audit() — so the
+    # rows commit first; the audit failure then leaves them behind → red.)
+    import os
+
+    _reset_worker(MockWorker)
+    MockWorker.export_tar = _gzip_tar([("a.txt", b"one", "file"), ("b.txt", b"two", "file")])
+    blobs_before = set(os.listdir(runtime.upload_dir))
+    original = runtime.db._audit_values
+
+    def boom(action, *args, **kwargs):
+        # Only the collection's own audit row fails — unrelated audits (job/submit) still work,
+        # so the failure lands inside create_artifacts' transaction as intended.
+        if action == "artifact.create":
+            raise RuntimeError("simulated audit-log write failure")
+        return original(action, *args, **kwargs)
+
+    runtime.db._audit_values = boom  # type: ignore[method-assign]
+    try:
+        job = _submit(runtime, worker_id, ["a.txt", "b.txt"])
+        job = _wait_terminal(runtime, job["id"])
+    finally:
+        runtime.db._audit_values = original  # type: ignore[method-assign]
+    assert job["state"] == "succeeded", "collection failure must not change the job outcome"
+    assert "files.collection_failed" in _event_types(runtime, job["id"])
+    rows = [
+        art for art in runtime.db.list_artifacts(limit=1000)
+        if (art.get("metadata") or {}).get("source_job_id") == job["id"]
+    ]
+    assert not rows, f"audit failure left live artifact rows: {[art['key'] for art in rows]}"
+    blobs_after = set(os.listdir(runtime.upload_dir))
+    assert blobs_after == blobs_before, f"audit-failed collection leaked blobs: {blobs_after - blobs_before}"
+    print("  audit failure rolls back the artifact rows (one transaction) OK")
+
+
 def check_cancel_during_collection(runtime: AtlasRuntime, worker_id: str, handoff_worker_id: str) -> None:
     # A cancel landing while the collection barrier blocks must win: the job ends cancelled
     # and no handoff starts (mutation: drop the post-barrier is_cancel_requested re-check in
@@ -513,6 +551,7 @@ def main() -> None:
             check_corrupt_tar(runtime, worker["id"])
             check_db_error_isolated(runtime, worker["id"])
             check_partial_collection_is_atomic(runtime, worker["id"])
+            check_audit_failure_is_atomic(runtime, worker["id"])
             check_cancel_during_collection(runtime, worker["id"], handoff["id"])
             check_job_artifacts_route(runtime, api_base, worker["id"], token)
             check_barrier_ordering(runtime, worker["id"], handoff["id"])

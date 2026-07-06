@@ -445,6 +445,48 @@ def check_json_reads_are_bounded() -> None:
         assert elapsed < 2.0, f"drip-fed text body held the read for {elapsed:.2f}s (deadline not enforced)"
     finally:
         server.shutdown()
+
+    # Slow HEADERS, not slow body: urlopen() returns only AFTER the status line + headers are
+    # read, so a body-only bound doesn't cover a worker that dribbles the HEADER bytes — each
+    # per-recv socket timeout resets, pinning the open phase forever. The open-phase deadline
+    # (_urlopen_deadline) must bound this too. (Mutation: drop the `deadline=` arg on the
+    # get_json/get_text _request calls → the open phase runs unbounded → elapsed assertion red.)
+    class SlowHeaderHandler(BaseHTTPRequestHandler):
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+        def handle_one_request(self) -> None:
+            try:
+                self.raw_requestline = self.rfile.readline(65537)
+                if not self.raw_requestline:
+                    self.close_connection = True
+                    return
+                # Dribble header bytes, never completing the header block, slower than the
+                # client timeout; stop after ~3s so a regressed client fails on elapsed
+                # rather than hanging this check.
+                self.wfile.write(b"HTTP/1.1 200 OK\r\n")
+                for _ in range(60):
+                    self.wfile.write(b"X")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+
+    header_server = ThreadingHTTPServer(("127.0.0.1", 0), SlowHeaderHandler)
+    threading.Thread(target=header_server.serve_forever, daemon=True).start()
+    try:
+        client = ThClawsClient(f"http://127.0.0.1:{header_server.server_address[1]}", None, timeout=0.4)
+        for label, call in (("get_json", lambda: client.get_json("/v1/models")), ("get_text", lambda: client.get_text("/healthz"))):
+            started = time.monotonic()
+            try:
+                call()
+                raise AssertionError(f"slow-header {label} must not return a successful response")
+            except ThClawsError:
+                pass
+            elapsed = time.monotonic() - started
+            assert elapsed < 2.0, f"slow-header {label} held the open phase for {elapsed:.2f}s (open-phase deadline not enforced)"
+    finally:
+        header_server.shutdown()
     print("worker JSON reads are byte- and deadline-bounded OK")
 
 

@@ -4,6 +4,7 @@ import hashlib
 import http.client
 import json
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -66,6 +67,7 @@ class ThClawsClient:
         timeout: float | None = None,
         raw_body: bytes | None = None,
         content_type: str | None = None,
+        deadline: float | None = None,
     ) -> urllib.response.addinfourl:
         body = None
         headers = {"Accept": "application/json"}
@@ -80,7 +82,7 @@ class ThClawsClient:
             headers["Authorization"] = f"Bearer {self.token}"
         request = urllib.request.Request(f"{self.base_url}{path}", data=body, headers=headers, method=method)
         try:
-            return urllib.request.urlopen(request, timeout=self.timeout if timeout is None else timeout)  # nosec B310
+            return _urlopen_deadline(request, self.timeout if timeout is None else timeout, deadline)
         except urllib.error.HTTPError as exc:
             # BOUND the error-body read in BOTH bytes and time: a semi-trusted worker answering
             # an error with a huge or slow-dripped body would otherwise let an unbounded read
@@ -100,7 +102,9 @@ class ThClawsClient:
         # resets the socket timeout, so a semi-trusted worker could pin a poll thread or
         # exhaust memory from /healthz//v1/agent/info//v1/models.
         effective_timeout = self.timeout if timeout is None else timeout
-        with self._request("GET", path, timeout=effective_timeout) as response:
+        with self._request(
+            "GET", path, timeout=effective_timeout, deadline=time.monotonic() + effective_timeout
+        ) as response:
             body = _read_bounded(
                 response, _JSON_BODY_MAX_BYTES, time.monotonic() + effective_timeout
             ).decode("utf-8", errors="replace")
@@ -110,7 +114,7 @@ class ThClawsClient:
             raise ThClawsError(f"Invalid JSON from {path}: {body[:200]}") from exc
 
     def get_text(self, path: str) -> tuple[int, str]:
-        with self._request("GET", path) as response:
+        with self._request("GET", path, deadline=time.monotonic() + self.timeout) as response:
             body = _read_bounded(
                 response, _JSON_BODY_MAX_BYTES, time.monotonic() + self.timeout
             ).decode("utf-8", errors="replace")
@@ -231,8 +235,10 @@ class ThClawsClient:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ThClawsError("sync export exceeded its deadline")
+        # deadline covers the OPEN phase too — a header-dripping worker must not be able to
+        # hold the collection barrier past its deadline (the body read below shares it).
         response = self._request(
-            "POST", "/workspace/sync/export", payload=list(paths), timeout=min(self.timeout, remaining)
+            "POST", "/workspace/sync/export", payload=list(paths), timeout=min(self.timeout, remaining), deadline=deadline
         )
         try:
             return _read_bounded(response, max_bytes, deadline)
@@ -249,6 +255,7 @@ class ThClawsClient:
             timeout=min(self.timeout, remaining),
             raw_body=tar_bytes,
             content_type="application/gzip",
+            deadline=deadline,
         )
         try:
             body = _read_bounded(response, max_ack_bytes, deadline).decode("utf-8", errors="replace")
@@ -283,6 +290,9 @@ class ThClawsClient:
             max_tokens=max_tokens,
         )
         payload["stream"] = True
+        # No open-phase deadline here: stream_deadline governs the whole SSE lifetime inside
+        # iter_sse, and a deadline shorter than the stream would be wrong while a longer one
+        # adds nothing (headers arrive when the worker starts streaming).
         response = self._request("POST", "/agent/run", payload=payload, timeout=None)
         try:
             yield from iter_sse(response, stream_deadline=stream_deadline, max_total_bytes=max_total_bytes)
@@ -323,7 +333,13 @@ class ThClawsClient:
         # short request_timeout short and a long one bounded by the deadline.
         dispatch_timeout = min(self.timeout, _ACK_READ_DEADLINE_SECONDS)
         try:
-            with self._request("POST", "/agent/run", payload=payload, timeout=dispatch_timeout) as response:
+            with self._request(
+                "POST",
+                "/agent/run",
+                payload=payload,
+                timeout=dispatch_timeout,
+                deadline=time.monotonic() + dispatch_timeout,
+            ) as response:
                 status_code = response.getcode() or 0
                 if status_code != 202:
                     # The x_callback contract's ONLY acceptance signal is a 202 ACK. Any other
@@ -452,6 +468,95 @@ def _read_error_body(response: Any) -> str:
         truncated = True
     text = bytes(chunks).decode("utf-8", errors="replace")
     return text + "…[truncated]" if truncated else text
+
+
+def _urlopen_deadline(
+    request: urllib.request.Request, timeout: float, deadline: float | None
+) -> urllib.response.addinfourl:
+    """urlopen with an optional WALL-CLOCK bound over the whole OPEN phase — connect, status
+    line, and headers. urllib applies `timeout` per socket recv, so a worker dripping one
+    status/header byte per tick resets it forever and pins the calling thread (poll loop,
+    collection barrier, dispatch) before any body-read bound can apply. When `deadline` is
+    set, a timer force-closes the captured connection at the deadline; the in-flight read
+    fails and surfaces as ThClawsError. The timer covers ONLY the open phase (cancelled on
+    return) — body reads are separately bounded by _read_bounded/iter_sse, so a long-lived
+    SSE response is unaffected once its headers have arrived."""
+    if deadline is None:
+        return urllib.request.urlopen(request, timeout=timeout)  # nosec B310
+
+    connections: list[http.client.HTTPConnection] = []
+
+    class _CaptureHTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+            def factory(host: str, **kwargs: Any) -> http.client.HTTPConnection:
+                conn = http.client.HTTPConnection(host, **kwargs)
+                connections.append(conn)
+                return conn
+
+            return self.do_open(factory, req)  # type: ignore[arg-type]
+
+    class _CaptureHTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+            def factory(host: str, **kwargs: Any) -> http.client.HTTPSConnection:
+                conn = http.client.HTTPSConnection(host, **kwargs)
+                connections.append(conn)
+                return conn
+
+            # Forward the handler's own TLS context + hostname check so capturing the
+            # connection can't silently drop certificate verification (do_open passes these
+            # straight to the factory's kwargs, exactly as the stock HTTPSHandler does).
+            return self.do_open(  # type: ignore[arg-type]
+                factory,
+                req,
+                context=getattr(self, "_context", None),
+                check_hostname=getattr(self, "_check_hostname", None),
+            )
+
+    guard = threading.Lock()
+    settled = False
+    expired = threading.Event()
+
+    def _expire() -> None:
+        with guard:
+            if settled:
+                return  # open() already returned/failed — never touch a live/handed-off socket
+            expired.set()
+            for conn in connections:
+                sock = getattr(conn, "sock", None)
+                if sock is not None:
+                    # shutdown() BEFORE close(): a bare close() on an fd another thread is
+                    # blocked reading does NOT wake that recv() (POSIX — the fd stays
+                    # referenced), so the header read would hang until the worker finally
+                    # gives up. shutdown(SHUT_RDWR) forces the stalled recv to return.
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+
+    timer = threading.Timer(max(0.001, deadline - time.monotonic()), _expire)
+    timer.daemon = True
+    timer.start()
+    try:
+        opener = urllib.request.build_opener(_CaptureHTTPHandler, _CaptureHTTPSHandler)
+        response = opener.open(request, timeout=timeout)  # nosec B310
+    except Exception as exc:
+        with guard:
+            settled = True
+        if expired.is_set():
+            raise ThClawsError("worker response exceeded its deadline before the headers arrived") from exc
+        raise
+    finally:
+        timer.cancel()
+    with guard:
+        settled = True
+        raced = expired.is_set()  # timer fired in the return↔settle window: socket is already dead
+    if raced:
+        raise ThClawsError("worker response exceeded its deadline before the headers arrived")
+    return response
 
 
 def _read_bounded(response: urllib.response.addinfourl, max_bytes: int, deadline: float) -> bytes:
