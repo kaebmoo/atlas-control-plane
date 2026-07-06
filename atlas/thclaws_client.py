@@ -290,10 +290,13 @@ class ThClawsClient:
             max_tokens=max_tokens,
         )
         payload["stream"] = True
-        # No open-phase deadline here: stream_deadline governs the whole SSE lifetime inside
-        # iter_sse, and a deadline shorter than the stream would be wrong while a longer one
-        # adds nothing (headers arrive when the worker starts streaming).
-        response = self._request("POST", "/agent/run", payload=payload, timeout=None)
+        # Bound the OPEN phase (connect + status line + headers) by the SAME stream_deadline,
+        # not just the body: iter_sse only starts checking the deadline AFTER _request returns,
+        # so a worker dripping header bytes would otherwise hang here, before the stream, with
+        # no bound (the per-recv timeout resets on every drip). The _urlopen_deadline watchdog
+        # is cancelled the instant the headers arrive, so it never touches the long-lived
+        # streaming body — once streaming starts, iter_sse's stream_deadline governs.
+        response = self._request("POST", "/agent/run", payload=payload, timeout=None, deadline=stream_deadline)
         try:
             yield from iter_sse(response, stream_deadline=stream_deadline, max_total_bytes=max_total_bytes)
         finally:
