@@ -168,7 +168,19 @@ def _terminal_payload(job_id: str, status: str = "succeeded", summary: str = "fi
 def _submit_callback_job(runtime: AtlasRuntime, worker_base: str, prompt: str = "hi") -> dict[str, Any]:
     worker = runtime.db.upsert_worker({"base_url": worker_base, "name": f"mock-{prompt[:12]}"})
     job = runtime.jobs.submit({"prompt": prompt, "worker_id": worker["id"], "execution": "callback"})
-    _wait(lambda: job["id"] in CAPTURED, message="x_callback dispatch")
+    # Wait for the dispatch to be FULLY processed, not merely captured. The mock writes CAPTURED
+    # BEFORE it sends the 202 ACK, so `job_id in CAPTURED` can win while Atlas is still reading
+    # the ACK and persisting thclaws_session_id / callback_deadline_at — a caller reading those
+    # right after would flake on None. `callback_dispatched` is the LAST write of the dispatch
+    # path (after the session binding), so it is the settled marker; CAPTURED is already set by
+    # the time it fires, so callers that read the envelope stay safe.
+    _wait(
+        lambda: any(
+            event["event_type"] == "callback_dispatched"
+            for event in runtime.db.get_job_events_after(job["id"], 0, limit=1000)
+        ),
+        message="x_callback dispatch",
+    )
     return runtime.db.get_job(job["id"]) or job
 
 

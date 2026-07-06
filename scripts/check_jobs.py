@@ -340,6 +340,58 @@ def check_stream_deadline_bytedrip(db: Database) -> None:
         mock.server_close()
 
 
+class SlowHeaderStreamHandler(BaseHTTPRequestHandler):
+    """Mock worker that drips the STATUS LINE / HEADER bytes and never completes the header
+    block — so urlopen() blocks in the open phase, BEFORE iter_sse can start checking the
+    deadline. Only the open-phase watchdog can cut this."""
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def handle_one_request(self) -> None:
+        try:
+            self.raw_requestline = self.rfile.readline(65537)
+            if not self.raw_requestline:
+                self.close_connection = True
+                return
+            self.wfile.write(b"HTTP/1.1 200 OK\r\n")
+            for _ in range(200):  # ~20s of dribbling — outlasts the test's patience window
+                self.wfile.write(b"X")
+                self.wfile.flush()
+                time.sleep(0.1)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # connection closed by the watchdog
+
+
+def check_stream_deadline_header_drip(db: Database) -> None:
+    """A worker dripping the RESPONSE HEADERS (not the body) must also be cut by the stream
+    deadline — the open phase of run_agent_stream is bounded by stream_deadline. (Mutation:
+    drop `deadline=stream_deadline` on run_agent_stream's _request → the open phase runs
+    unbounded, the job never leaves 'running' within the window → red.)"""
+    mock = ThreadingHTTPServer(("127.0.0.1", 0), SlowHeaderStreamHandler)
+    threading.Thread(target=mock.serve_forever, daemon=True).start()
+    try:
+        host, port = mock.server_address
+        worker = db.upsert_worker({"base_url": f"http://{host}:{port}", "name": "hdrdrip"})
+        manager = JobManager(db, request_timeout_seconds=5)
+        manager.max_stream_seconds = 0.3
+        job = manager.submit({"prompt": "x", "worker_id": worker["id"]})
+        start = time.monotonic()
+        while time.monotonic() < start + 8:
+            current = db.get_job(job["id"])
+            if current and current["state"] in {"succeeded", "failed", "cancelled"}:
+                break
+            time.sleep(0.02)
+        elapsed = time.monotonic() - start
+        final = db.get_job(job["id"])
+        assert final["state"] == "failed", f"header-drip must fail, got {final['state']}"
+        assert elapsed < 4, f"open-phase deadline must cut the header drip promptly; took {elapsed:.2f}s"
+        _await_threads_drained(manager)
+    finally:
+        mock.shutdown()
+        mock.server_close()
+
+
 # Planted ONLY in tool/skill input+output — the fields T2 projects away and must never persist.
 STRUCTURED_MARKER = "planted-tool-payload-marker-a1b2c3d4e5f6"
 
@@ -790,6 +842,7 @@ def main() -> None:
         check_comment_flood_bounded(Database(Path(tmp) / "comment.sqlite"))
         check_legacy_tool_payload_redacted_on_read(Path(tmp))
         check_stream_deadline_bytedrip(Database(Path(tmp) / "drip.sqlite"))
+        check_stream_deadline_header_drip(Database(Path(tmp) / "hdrdrip.sqlite"))
         check_reconcile_cancelled(Database(Path(tmp) / "reconcancel.sqlite"))
         check_submit_routing_failure_no_orphan(Database(Path(tmp) / "orphan.sqlite"))
         check_poll_worker_health(Database(Path(tmp) / "health.sqlite"))

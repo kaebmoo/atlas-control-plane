@@ -105,6 +105,7 @@ class WorkerB(_Base):
     push_calls = 0
     trash_calls = 0
     push_status = 200
+    push_delay = 0.0
 
     def do_POST(self) -> None:
         cls = type(self)
@@ -114,6 +115,8 @@ class WorkerB(_Base):
             self._stream_ok()
         elif self.path == "/workspace/sync/push":
             cls.push_calls += 1
+            if cls.push_delay:
+                time.sleep(cls.push_delay)
             if cls.push_status != 200:
                 self.send_error(cls.push_status)
                 return
@@ -131,6 +134,7 @@ def _reset_b() -> None:
     WorkerB.push_calls = 0
     WorkerB.trash_calls = 0
     WorkerB.push_status = 200
+    WorkerB.push_delay = 0.0
 
 
 def _members(tar_bytes: bytes) -> dict[str, bytes]:
@@ -288,6 +292,134 @@ def check_hostile_artifact_rejected(runtime: AtlasRuntime, a_id: str, b_id: str)
     print("  hostile artifact (out-of-store content / traversal relpath) rejected OK")
 
 
+def check_budget_gate_precedes_push(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
+    # An unaffordable node must be rejected BEFORE its files are pushed into the target
+    # worker's workspace — the push is a side effect on another machine, not something
+    # _wait_for_job can undo. max_budget_units=1 lets the collector run and exhausts the
+    # budget before the consumer. (Mutation: drop the _check_budget pre-check in front of
+    # _push_files_to_worker → WorkerB receives the tar before the node fails → red.)
+    _reset_b()
+    policy = {"file_handoff": True, "allowed_worker_ids": [a_id, b_id], "max_jobs": 10, "max_budget_units": 1}
+    run = runtime.workflows.run_graph(_graph(a_id, b_id), policy)
+    assert run["state"] == "failed", run["state"]
+    assert "budget" in (run.get("error") or ""), run.get("error")
+    assert WorkerB.push_calls == 0, "files were pushed to the worker before the budget rejection"
+    print("  budget gate precedes the push side-effect OK")
+
+
+def check_batch_create_is_all_or_nothing(runtime: AtlasRuntime) -> None:
+    # create_artifacts validates EVERY payload before any row is written — an invalid entry
+    # anywhere in the list publishes nothing. (Mutation: validate/insert row-by-row → the
+    # first row survives → red.)
+    bad_batch = [
+        {"key": "batch.ok", "kind": "text", "content": "fine"},
+        {"key": "", "kind": "text", "content": "invalid: empty key"},
+    ]
+    try:
+        runtime.db.create_artifacts(bad_batch)
+        raise AssertionError("invalid payload in a batch must raise")
+    except ValueError:
+        pass
+    leaked = [art for art in runtime.db.iter_artifacts() if art["key"] == "batch.ok"]
+    assert not leaked, "a batch with an invalid entry published its earlier rows"
+    print("  create_artifacts is all-or-nothing OK")
+
+
+def check_cancel_during_push_no_downstream_job(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
+    # A cancel landing while the UNLOCKED push blocks must prevent the downstream job from
+    # ever being created — not create-then-reap. (Mutation: drop the cancelled re-check under
+    # the lock before _reserve_and_submit_job → the consumer job appears → red.)
+    _reset_b()
+    WorkerB.push_delay = 1.0
+    policy = {"file_handoff": True, "allowed_worker_ids": [a_id, b_id], "max_jobs": 10}
+    result: dict = {}
+
+    def run_it() -> None:
+        try:
+            result["run"] = runtime.workflows.run_graph(_graph(a_id, b_id), policy)
+        except Exception as exc:  # surfaced below; the thread must never die silently
+            result["error"] = exc
+
+    thread = threading.Thread(target=run_it)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and WorkerB.push_calls == 0:
+        time.sleep(0.02)
+    assert WorkerB.push_calls == 1, "push never started"
+    running = [row for row in runtime.db.list_workflow_runs(limit=10) if row["state"] == "running"]
+    assert running, "no running run to cancel"
+    run_id = running[0]["id"]
+    runtime.workflows.cancel_run(run_id)  # lands inside WorkerB's 1.0s push delay
+    thread.join(timeout=30)
+    assert not thread.is_alive(), "runner thread wedged after cancel-during-push"
+    run_row = runtime.db.get_workflow_run(run_id)
+    assert run_row and run_row["state"] == "cancelled", run_row and run_row["state"]
+    consumer = [n for n in runtime.db.list_workflow_nodes(run_id) if n["node_key"] == "consumer"]
+    assert not consumer or not consumer[0].get("job_id"), (
+        f"downstream job {consumer[0].get('job_id')} was created for a cancelled run"
+    )
+    # The cancelled node must land 'cancelled', not 'failed' — the submit guard raises
+    # _WorkflowCancelled, not a generic error. (Mutation: raise ValueError instead → the node
+    # is written 'failed' and a node_failed event is emitted → red.)
+    assert consumer and consumer[0]["state"] == "cancelled", (
+        f"cancelled node landed as {consumer[0]['state'] if consumer else 'missing'}, expected 'cancelled'"
+    )
+    events = runtime.db.list_workflow_events(run_id)
+    node_failed = [e for e in events if e["event_type"] == "node_failed" and e.get("node_key") == "consumer"]
+    assert not node_failed, "a cancelled node must not emit node_failed"
+    print("  cancel during push: no downstream job, node cancelled (not failed) OK")
+
+
+def check_deadline_precedes_submit(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
+    # A run whose max_minutes deadline expires DURING the unlocked push must not then create
+    # and submit the downstream job — the deadline is re-checked under the lock before
+    # _reserve_and_submit_job. max_minutes is validated as a whole-minute integer (untestable
+    # in a gate), so we stub _check_deadline to trip only AFTER the push side-effect has
+    # happened — deterministic, no wall-clock race. (Mutation: drop the under-lock
+    # _check_deadline(deadline) → the consumer job is created and submitted even though the
+    # deadline expired mid-push → consumer node gets a job_id → red.)
+    _reset_b()
+    policy = {"file_handoff": True, "allowed_worker_ids": [a_id, b_id], "max_jobs": 10, "max_minutes": 1}
+    original = workflows_module._check_deadline
+
+    def trip_after_push(_deadline: object) -> None:
+        # Let every check pass until the push has run; the next check (the under-lock one, just
+        # before submit) is the one that must fire.
+        if WorkerB.push_calls >= 1:
+            raise workflows_module._WorkflowGuardTripped("workflow policy max_minutes exceeded")
+
+    workflows_module._check_deadline = trip_after_push
+    try:
+        run = runtime.workflows.run_graph(_graph(a_id, b_id), policy)
+    finally:
+        workflows_module._check_deadline = original
+    assert run["state"] == "failed", run["state"]
+    assert "max_minutes" in (run.get("error") or ""), run.get("error")
+    assert WorkerB.push_calls == 1, "the push (side effect) should have happened before the deadline trip"
+    consumer = [n for n in runtime.db.list_workflow_nodes(run["id"]) if n["node_key"] == "consumer"]
+    assert consumer and not consumer[0].get("job_id"), (
+        f"a downstream job was created after the deadline expired: {consumer and consumer[0].get('job_id')}"
+    )
+    print("  deadline expiring during push blocks the downstream submit OK")
+
+
+def check_artifact_iteration_unbounded(runtime: AtlasRuntime) -> None:
+    # The push glob resolution and the artifact routes iterate ALL artifacts via rowid keyset
+    # paging — no fixed window. Prove the iterator crosses its batch boundary where the old
+    # windowed read truncates. (Mutation: drop iter_artifacts' keyset loop → ≤ one batch of
+    # 500 comes back → red.)
+    total = 1200  # > 2 batches of 500; cheap: one transaction, text artifacts, no fsync
+    # run_id/job_id stay NULL (both are FK-enforced); the probe keys identify our rows.
+    runtime.db.create_artifacts(
+        [{"key": f"probe.{i}", "kind": "text", "content": "x"} for i in range(total)]
+    )
+    seen = [art["key"] for art in runtime.db.iter_artifacts() if art["key"].startswith("probe.")]
+    assert len(seen) == total, f"iterator truncated: {len(seen)} of {total}"
+    assert seen[0] == "probe.0" and seen[-1] == f"probe.{total - 1}", "keyset paging broke ordering"
+    assert len(runtime.db.list_artifacts(limit=1000)) == 1000, "windowed read behaviour changed (limit no longer applies)"
+    print("  iter_artifacts pages past any fixed window OK")
+
+
 def main() -> None:
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -321,6 +453,11 @@ def main() -> None:
             check_runtime_guard(runtime, worker_a["id"], worker_b["id"])
             check_push_failure_fails_edge(runtime, worker_a["id"], worker_b["id"])
             check_hostile_artifact_rejected(runtime, worker_a["id"], worker_b["id"])
+            check_budget_gate_precedes_push(runtime, worker_a["id"], worker_b["id"])
+            check_batch_create_is_all_or_nothing(runtime)
+            check_cancel_during_push_no_downstream_job(runtime, worker_a["id"], worker_b["id"])
+            check_deadline_precedes_submit(runtime, worker_a["id"], worker_b["id"])
+            check_artifact_iteration_unbounded(runtime)
         finally:
             server_a.shutdown()
             server_b.shutdown()

@@ -674,16 +674,27 @@ class Database:
         finally:
             _AUDIT_ACTOR.reset(token)
 
+    _AUDIT_INSERT = """
+        INSERT INTO audit_log(action, actor, resource_type, resource_id, details, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """
+
+    @staticmethod
+    def _audit_values(
+        action: str, resource_type: str, resource_id: str, details: Any = None, actor: str | None = None
+    ) -> tuple[Any, ...]:
+        return (
+            action,
+            actor or _AUDIT_ACTOR.get(),
+            resource_type,
+            resource_id,
+            encode_json(details or {}),
+            now_iso(),
+        )
+
     def audit(self, action: str, resource_type: str, resource_id: str, details: Any = None, actor: str | None = None) -> None:
-        actor = actor or _AUDIT_ACTOR.get()
         with self._lock, self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO audit_log(action, actor, resource_type, resource_id, details, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (action, actor, resource_type, resource_id, encode_json(details or {}), now_iso()),
-            )
+            conn.execute(self._AUDIT_INSERT, self._audit_values(action, resource_type, resource_id, details, actor))
 
     def list_audit(
         self,
@@ -1592,7 +1603,9 @@ class Database:
             ).fetchall()
         return [row_to_dict(row) or {} for row in rows]
 
-    def create_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _artifact_row(self, payload: dict[str, Any]) -> tuple[Any, ...]:
+        """Validate/normalize one artifact payload into its INSERT row. The single validation
+        home for both the one-shot and the batch creation paths."""
         artifact_id = payload.get("id") or new_id("art")
         now = now_iso()
         key = payload.get("key")
@@ -1618,26 +1631,49 @@ class Database:
                     f"use one of {sorted(ARTIFACT_CLASSIFICATIONS)}"
                 )
             metadata["classification"] = classification
+        return (
+            artifact_id,
+            payload.get("run_id"),
+            payload.get("job_id"),
+            key,
+            kind,
+            content,
+            encode_json(metadata),
+            now,
+            now,
+        )
+
+    _ARTIFACT_INSERT = """
+        INSERT INTO artifacts(id, run_id, job_id, key, kind, content, metadata, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+    def create_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        row = self._artifact_row(payload)
         with self._lock, self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO artifacts(id, run_id, job_id, key, kind, content, metadata, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    artifact_id,
-                    payload.get("run_id"),
-                    payload.get("job_id"),
-                    key,
-                    kind,
-                    content,
-                    encode_json(metadata),
-                    now,
-                    now,
-                ),
+            conn.execute(self._ARTIFACT_INSERT, row)
+        self.audit("artifact.create", "artifact", row[0], {"run_id": payload.get("run_id"), "key": row[3]})
+        return self.get_artifact(row[0]) or {}
+
+    def create_artifacts(self, payloads: list[dict[str, Any]]) -> list[str]:
+        """All-or-nothing batch insert: every payload validates BEFORE any row is written, and
+        all rows land in ONE transaction — so a mid-list failure can never publish a partial
+        set (T5's collection atomicity depends on this)."""
+        rows = [self._artifact_row(payload) for payload in payloads]
+        # Audit rows share the SAME transaction: an audit write failing AFTER the artifact
+        # rows committed would raise out of an already-published batch — the caller's failure
+        # handling (T5 reclaims the staged blobs) would then leave live rows pointing at
+        # deleted files.
+        with self._lock, self.connect() as conn:
+            conn.executemany(self._ARTIFACT_INSERT, rows)
+            conn.executemany(
+                self._AUDIT_INSERT,
+                [
+                    self._audit_values("artifact.create", "artifact", row[0], {"run_id": row[1], "key": row[3]})
+                    for row in rows
+                ],
             )
-        self.audit("artifact.create", "artifact", artifact_id, {"run_id": payload.get("run_id"), "key": key})
-        return self.get_artifact(artifact_id) or {}
+        return [row[0] for row in rows]
 
     def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -1677,6 +1713,41 @@ class Database:
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [row_to_dict(row) or {} for row in rows]
+
+    def iter_artifacts(
+        self,
+        run_id: str | None = None,
+        job_id: str | None = None,
+        kind: str | None = None,
+        batch: int = 500,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield EVERY matching artifact (insertion order), paging by rowid keyset — for
+        consumers that must never be silently truncated by a fixed LIMIT window (the T6 push
+        glob resolution, the per-job collected-files route). `list_artifacts` stays the
+        windowed newest-first read for display surfaces."""
+        where = ["rowid > ?"]
+        params: list[Any] = []
+        if run_id:
+            where.append("run_id = ?")
+            params.append(run_id)
+        if job_id:
+            where.append("job_id = ?")
+            params.append(job_id)
+        if kind:
+            where.append("kind = ?")
+            params.append(kind)
+        # WHERE pieces are fixed literals chosen above; every value binds via params.
+        sql = f"SELECT rowid AS _rowid, * FROM artifacts WHERE {' AND '.join(where)} ORDER BY rowid LIMIT ?"  # nosec B608
+        last_rowid = 0
+        while True:
+            with self.connect() as conn:
+                rows = conn.execute(sql, [last_rowid, *params, batch]).fetchall()
+            for row in rows:
+                data = row_to_dict(row) or {}
+                last_rowid = data.pop("_rowid", last_rowid)
+                yield data
+            if len(rows) < batch:
+                return
 
     def purge_artifacts(
         self,
