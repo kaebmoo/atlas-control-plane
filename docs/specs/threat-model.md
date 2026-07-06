@@ -48,8 +48,9 @@ foot-gun; re-open trigger: any externally-sourced pack. Reflected in `ops/deploy
 ## Accepted residual risks under this model
 
 Not fixed because the model makes them unreachable / out-of-threat. Each: rationale → trigger that
-turns it into real work. **Owner of all five accepted risks: Pornthep Nivatyakul** (named sign-off,
-2026-06-30 — real accountability, not an auto-assigned name).
+turns it into real work. **Owner of all six accepted risks: Pornthep Nivatyakul** (named sign-off,
+2026-06-30; DNS risk #6 added 2026-07-06 under the same owner — real accountability, not an
+auto-assigned name).
 
 1. **`claim_trigger_dedupe` is in-process atomic only** (RLock, no UNIQUE constraint). Fine
    under one-process-per-DB. → *Trigger:* multi-process/shared-volume deployment → add a
@@ -66,6 +67,16 @@ turns it into real work. **Owner of all five accepted risks: Pornthep Nivatyakul
    add an OS file lock around the env read-modify-write.
 5. **`max_minutes` counts paused / human-wait wall time** (intended total-wall budget). →
    *Trigger:* if it must be active-compute only → subtract paused intervals.
+6. **Worker-hostname DNS resolution (`getaddrinfo`) is bounded only by the OS resolver**, not by
+   Atlas. The open-phase watchdog (`_urlopen_deadline`, `atlas/thclaws_client.py`) force-closes a
+   worker's socket once its deadline passes, but a `getaddrinfo` that hangs blocks the caller with
+   no socket to close. Rationale: a semi-trusted worker cannot lengthen its OWN resolution without
+   also controlling the operator's DNS resolver (a strictly larger compromise, outside this worker
+   trust boundary); IP / tunnel-address workers skip resolution entirely, and the actual
+   worker-controlled vector — a drip-fed status-line/header read on the connected socket — IS
+   bounded by the watchdog. → *Trigger:* workers addressed by attacker-influenced hostnames, OR a
+   hard per-call wall-clock SLA that must include name resolution → resolve in a bounded helper
+   thread (or pre-resolve with a timeout) and connect to the resulting IP.
 
 ## Targeted review log (DoD #6)
 

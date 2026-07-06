@@ -494,9 +494,9 @@ def _urlopen_deadline(
 
     NOT bounded here: getaddrinfo() itself. A DNS lookup that hangs blocks in the caller with
     no socket to close, so it is bounded only by the system resolver's own timeout — a
-    malicious worker cannot extend that without also controlling DNS. Accepted risk (see
-    docs/specs/threat-model.md); the worker-controlled vector (a drip-fed header read) IS
-    bounded."""
+    malicious worker cannot extend that without also controlling DNS. Accepted risk #6 in
+    docs/specs/threat-model.md (§ Accepted residual risks — owner, rationale, re-open trigger);
+    the worker-controlled vector (a drip-fed header read) IS bounded."""
     if deadline is None:
         return urllib.request.urlopen(request, timeout=timeout)  # nosec B310
 
