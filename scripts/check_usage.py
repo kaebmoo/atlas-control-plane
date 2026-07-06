@@ -487,6 +487,38 @@ def check_json_reads_are_bounded() -> None:
             assert elapsed < 2.0, f"slow-header {label} held the open phase for {elapsed:.2f}s (open-phase deadline not enforced)"
     finally:
         header_server.shutdown()
+
+    # Slow DNS: the socket is created only AFTER the deadline has already passed, so a one-shot
+    # deadline timer (which fires once, during resolution, finds no socket, and gives up) would
+    # let the post-resolution header read run unbounded. The polling watchdog must close the
+    # socket that appears late. Inject a slow resolver by patching socket.getaddrinfo (the numeric
+    # 127.0.0.1 still goes through it). (Mutation: revert _urlopen_deadline to a one-shot
+    # threading.Timer → the late socket escapes → elapsed hits the server's full dribble → red.)
+    import socket as _socket
+
+    dns_server = ThreadingHTTPServer(("127.0.0.1", 0), SlowHeaderHandler)
+    threading.Thread(target=dns_server.serve_forever, daemon=True).start()
+    real_getaddrinfo = _socket.getaddrinfo
+
+    def slow_getaddrinfo(*args: object, **kwargs: object) -> object:
+        time.sleep(0.5)  # resolution slower than the 0.2s deadline → socket appears post-deadline
+        return real_getaddrinfo(*args, **kwargs)
+
+    _socket.getaddrinfo = slow_getaddrinfo  # type: ignore[assignment]
+    try:
+        client = ThClawsClient(f"http://127.0.0.1:{dns_server.server_address[1]}", None, timeout=0.2)
+        started = time.monotonic()
+        try:
+            client.get_json("/v1/models")
+            raise AssertionError("slow-DNS + slow-header must not return a successful response")
+        except ThClawsError:
+            pass
+        elapsed = time.monotonic() - started
+        # Bounded by DNS (~0.5s) + one poll tick, NOT the ~6s the server dribbles for.
+        assert elapsed < 2.0, f"slow-DNS open phase not bounded: took {elapsed:.2f}s (late socket escaped the watchdog)"
+    finally:
+        _socket.getaddrinfo = real_getaddrinfo  # type: ignore[assignment]
+        dns_server.shutdown()
     print("worker JSON reads are byte- and deadline-bounded OK")
 
 

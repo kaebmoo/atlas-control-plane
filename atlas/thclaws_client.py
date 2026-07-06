@@ -476,14 +476,27 @@ def _read_error_body(response: Any) -> str:
 def _urlopen_deadline(
     request: urllib.request.Request, timeout: float, deadline: float | None
 ) -> urllib.response.addinfourl:
-    """urlopen with an optional WALL-CLOCK bound over the whole OPEN phase — connect, status
-    line, and headers. urllib applies `timeout` per socket recv, so a worker dripping one
-    status/header byte per tick resets it forever and pins the calling thread (poll loop,
-    collection barrier, dispatch) before any body-read bound can apply. When `deadline` is
-    set, a timer force-closes the captured connection at the deadline; the in-flight read
-    fails and surfaces as ThClawsError. The timer covers ONLY the open phase (cancelled on
-    return) — body reads are separately bounded by _read_bounded/iter_sse, so a long-lived
-    SSE response is unaffected once its headers have arrived."""
+    """urlopen with an optional WALL-CLOCK bound over the OPEN phase — connect, status line,
+    and headers. urllib applies `timeout` PER socket recv, so a worker dripping one status/
+    header byte per tick resets it forever and pins the calling thread (poll loop, collection
+    barrier, dispatch) before any body-read bound can apply. When `deadline` is set, a
+    background watcher force-closes the connection's socket once the deadline passes; the
+    in-flight read fails and surfaces as ThClawsError.
+
+    The watcher POLLS rather than firing once. The socket may not exist yet when the deadline
+    passes (DNS/connect still in progress), and a one-shot close would then close NOTHING and
+    give up — the socket that appears a moment later would run its header read unbounded. So
+    the watcher re-closes whatever socket exists on each tick until the open phase settles: a
+    socket that materializes AFTER the deadline is still cut within one interval. It touches
+    the socket ONLY after the deadline AND only until the response is handed back, so a
+    successfully-opened (not-expired) response — including a long-lived SSE stream — is never
+    disturbed; body reads stay bounded separately by _read_bounded/iter_sse.
+
+    NOT bounded here: getaddrinfo() itself. A DNS lookup that hangs blocks in the caller with
+    no socket to close, so it is bounded only by the system resolver's own timeout — a
+    malicious worker cannot extend that without also controlling DNS. Accepted risk (see
+    docs/specs/threat-model.md); the worker-controlled vector (a drip-fed header read) IS
+    bounded."""
     if deadline is None:
         return urllib.request.urlopen(request, timeout=timeout)  # nosec B310
 
@@ -515,22 +528,24 @@ def _urlopen_deadline(
                 check_hostname=getattr(self, "_check_hostname", None),
             )
 
-    guard = threading.Lock()
-    settled = False
+    settled = threading.Event()
     expired = threading.Event()
 
-    def _expire() -> None:
-        with guard:
-            if settled:
-                return  # open() already returned/failed — never touch a live/handed-off socket
-            expired.set()
-            for conn in connections:
+    def _watch() -> None:
+        remaining = deadline - time.monotonic()
+        if remaining > 0 and settled.wait(remaining):
+            return  # open phase finished before the deadline — never touch the socket
+        expired.set()
+        # Keep closing whatever socket exists until the open phase settles. This is the part a
+        # one-shot timer got wrong: at the deadline the socket may still be None (DNS/connect
+        # in flight); it appears a moment later and must still be cut.
+        while not settled.wait(0.05):
+            for conn in list(connections):
                 sock = getattr(conn, "sock", None)
                 if sock is not None:
-                    # shutdown() BEFORE close(): a bare close() on an fd another thread is
-                    # blocked reading does NOT wake that recv() (POSIX — the fd stays
-                    # referenced), so the header read would hang until the worker finally
-                    # gives up. shutdown(SHUT_RDWR) forces the stalled recv to return.
+                    # shutdown() BEFORE close(): a bare close() does NOT wake a recv() blocked
+                    # in another thread (POSIX — the fd stays referenced); shutdown(SHUT_RDWR)
+                    # forces the stalled header read to return.
                     try:
                         sock.shutdown(socket.SHUT_RDWR)
                     except OSError:
@@ -540,25 +555,21 @@ def _urlopen_deadline(
                     except OSError:
                         pass
 
-    timer = threading.Timer(max(0.001, deadline - time.monotonic()), _expire)
-    timer.daemon = True
-    timer.start()
+    watcher = threading.Thread(target=_watch, name="thclaws-open-deadline", daemon=True)
+    watcher.start()
     try:
         opener = urllib.request.build_opener(_CaptureHTTPHandler, _CaptureHTTPSHandler)
         response = opener.open(request, timeout=timeout)  # nosec B310
     except Exception as exc:
-        with guard:
-            settled = True
+        settled.set()
         if expired.is_set():
-            raise ThClawsError("worker response exceeded its deadline before the headers arrived") from exc
+            raise ThClawsError("worker response exceeded its deadline during the open phase") from exc
         raise
-    finally:
-        timer.cancel()
-    with guard:
-        settled = True
-        raced = expired.is_set()  # timer fired in the return↔settle window: socket is already dead
-    if raced:
-        raise ThClawsError("worker response exceeded its deadline before the headers arrived")
+    # A returned response is only handed back when NOT expired, so the watcher (which closes
+    # sockets only after the deadline) never disturbs a live/streaming socket.
+    settled.set()
+    if expired.is_set():
+        raise ThClawsError("worker response exceeded its deadline during the open phase")
     return response
 
 
