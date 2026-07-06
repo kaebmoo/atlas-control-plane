@@ -1022,6 +1022,14 @@ class WorkflowRunner:
                                 run, node, node_submit["payload"]["worker_id"], node_submit["pushes"], node_submit["files_dir"]
                             )
                         with self._thread_lock:
+                            # Re-check under the lock: the push above ran UNLOCKED for up to the
+                            # collect deadline, and a cancel landing in that window has already
+                            # finalized the run and cancelled its EXISTING node jobs — this job
+                            # doesn't exist yet, so without the re-check it would be created
+                            # (and submitted to the worker) for a cancelled run, only to be
+                            # reaped later by _wait_for_job.
+                            if (self.db.get_workflow_run(run["id"]) or {}).get("state") == "cancelled":
+                                raise ValueError(f"workflow run {run['id']} was cancelled before node {node_key} submit")
                             job = self._reserve_and_submit_job(run, node, node_submit["payload"], policy, counters)
                             self.db.update_workflow_node(runtime_node["id"], job_id=job["id"])
                     if job:
@@ -1431,13 +1439,11 @@ class WorkflowRunner:
         selected: list[tuple[str, bytes, str | None]] = []  # (arcname, data, sha256)
         seen_keys: set[str] = set()
         total = 0
-        candidates = self.db.list_artifacts(run_id=run["id"], kind="file_ref", limit=1000)
-        if len(candidates) >= 1000:
-            # The enumeration window is full, so older file_refs may have been truncated —
-            # fail loudly rather than silently push an incomplete set downstream.
-            # ponytail: 1000-row window; paginate list_artifacts if real runs ever hit this.
-            raise ValueError("file handoff cannot enumerate the run's file_ref artifacts (over 1000)")
-        for art in candidates:
+        # iter_artifacts pages by rowid keyset, so the glob resolution sees EVERY file_ref in
+        # the run — no fixed window to overflow (a multi-node run can legitimately exceed any
+        # constant: N nodes × the per-collection cap). The selection itself stays bounded by
+        # the max_files/max_bytes caps below.
+        for art in self.db.iter_artifacts(run_id=run["id"], kind="file_ref"):
             key = art.get("key") or ""
             if key in seen_keys or not any(fnmatch.fnmatch(key, pattern) for pattern in patterns):
                 continue

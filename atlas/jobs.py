@@ -143,12 +143,23 @@ def _estimate_cost_usd(usage: dict[str, int] | None, pricing: dict[str, Any]) ->
         return {"estimated_cost_usd": 0.0, "estimate": True, "pricing_partial": False}
 
     cached = usage.get("cached_input_tokens", 0)
+    completion = usage.get("completion_tokens", 0)
+    reasoning = usage.get("reasoning_output_tokens", 0)
+    # Wire semantics (verified against the thClaws source, both providers): `prompt_tokens`
+    # reaches api_v1 already NORMALIZED TO THE UNCACHED PORTION (openai_responses.rs subtracts
+    # cached_tokens before filling Usage.input_tokens; Anthropic's input_tokens excludes cache
+    # reads natively), and `completion_tokens` INCLUDES the reasoning_output_tokens subset
+    # (OpenAI bills reasoning inside output_tokens). So: price prompt AS-IS — subtracting
+    # cached here would discount the cache twice — and carve reasoning OUT of completion so a
+    # distinct reasoning rate never prices those tokens twice. NOTE this deliberately does NOT
+    # mirror thClaws' own compute_cost_usd, whose TokenUsage convention (prompt includes
+    # cached) does not match what its api_v1 layer actually emits.
     token_rates = (
-        (max(0, usage.get("prompt_tokens", 0) - cached), "input_per_mtok", None),
+        (usage.get("prompt_tokens", 0), "input_per_mtok", None),
         (cached, "cached_input_per_mtok", "input_per_mtok"),
         (usage.get("cache_creation_input_tokens", 0), "cache_creation_per_mtok", None),
-        (usage.get("completion_tokens", 0), "output_per_mtok", None),
-        (usage.get("reasoning_output_tokens", 0), "reasoning_per_mtok", "output_per_mtok"),
+        (max(0, completion - reasoning), "output_per_mtok", None),
+        (reasoning, "reasoning_per_mtok", "output_per_mtok"),
     )
     total = 0.0
     priced = False
@@ -1057,28 +1068,43 @@ class JobManager:
             node_key = context.get("node_key")
             run_id = context.get("run_id")
             files_meta: list[dict[str, Any]] = []
-            for relpath, data in members:
-                opaque_id, sha256 = store_bytes(self.upload_dir, data)
-                key = f"files.{node_key}.{relpath}" if node_key else f"files.{relpath}"
-                self.db.create_artifact(
-                    {
-                        "run_id": run_id,
-                        "job_id": job_id,
-                        "key": key,
-                        "kind": "file_ref",
-                        "content": opaque_id,
-                        "metadata": {
-                            "relpath": relpath,
-                            "sha256": sha256,
-                            "size": len(data),
-                            "source_job_id": job_id,
-                            "source_worker_id": worker.get("id"),
-                        },
-                    }
-                )
-                # Structural metadata only (relpath/sha/bytes) — never file contents, matching
-                # T2's storage discipline. The bytes live in the opaque-id upload store.
-                files_meta.append({"relpath": relpath, "sha256": sha256, "bytes": len(data)})
+            # Publish ALL-OR-NOTHING: stage every blob + row first, then commit the rows in one
+            # transaction (create_artifacts). Per-file create_artifact would leave the first
+            # files' artifacts live when a later file fails — a partial set that T6 push globs
+            # and {artifact.*} templating would then treat as the complete collection.
+            staged: list[dict[str, Any]] = []
+            blob_paths: list[Path] = []
+            try:
+                for relpath, data in members:
+                    opaque_id, sha256 = store_bytes(self.upload_dir, data)
+                    blob_paths.append(self.upload_dir / opaque_id)
+                    key = f"files.{node_key}.{relpath}" if node_key else f"files.{relpath}"
+                    staged.append(
+                        {
+                            "run_id": run_id,
+                            "job_id": job_id,
+                            "key": key,
+                            "kind": "file_ref",
+                            "content": opaque_id,
+                            "metadata": {
+                                "relpath": relpath,
+                                "sha256": sha256,
+                                "size": len(data),
+                                "source_job_id": job_id,
+                                "source_worker_id": worker.get("id"),
+                            },
+                        }
+                    )
+                    # Structural metadata only (relpath/sha/bytes) — never file contents, matching
+                    # T2's storage discipline. The bytes live in the opaque-id upload store.
+                    files_meta.append({"relpath": relpath, "sha256": sha256, "bytes": len(data)})
+                self.db.create_artifacts(staged)
+            except Exception:
+                # No artifact row was committed (single txn) — reclaim the staged blobs so a
+                # failed collection leaves no orphan files in the upload store.
+                for blob in blob_paths:
+                    blob.unlink(missing_ok=True)
+                raise
             self._collection_event(job_id, "files.collected", {"count": len(files_meta), "requested": requested, "files": files_meta})
         except Exception as exc:
             # Failure isolation, same discipline as the T1b cost-estimation block: collection

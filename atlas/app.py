@@ -521,9 +521,9 @@ class AtlasHandler(BaseHTTPRequestHandler):
             # can't surface them. Mirror it per job so the dashboard can list + download them.
             if not runtime.db.get_job(parts[2]):
                 raise FileNotFoundError()
-            # limit=1000 comfortably clears the collect_files cap (ATLAS_SYNC_MAX_FILES, default
-            # 200) — the default 100 would silently drop the oldest files past 100 with no signal.
-            self._json({"artifacts": [_public_artifact(artifact) for artifact in runtime.db.list_artifacts(job_id=parts[2], limit=1000)]})
+            # iter_artifacts pages by rowid — the full set, so no fixed LIMIT can silently
+            # drop collected files (the count is already bounded by the collection caps).
+            self._json({"artifacts": [_public_artifact(artifact) for artifact in runtime.db.iter_artifacts(job_id=parts[2])]})
             return
 
         if parts == ["api", "workflows"]:
@@ -667,9 +667,9 @@ class AtlasHandler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "workflow-runs"] and parts[3] == "artifacts" and method == "GET":
             if not runtime.db.get_workflow_run(parts[2]):
                 raise FileNotFoundError()
-            # Same rationale as the per-job route: default 100 would silently truncate a run's
-            # artifacts (a workflow node can collect up to ATLAS_SYNC_MAX_FILES too).
-            self._json({"artifacts": [_public_artifact(artifact) for artifact in runtime.db.list_artifacts(run_id=parts[2], limit=1000)]})
+            # Same rationale as the per-job route: any fixed LIMIT silently truncates a run
+            # whose nodes together collected more than the window (N nodes × the per-node cap).
+            self._json({"artifacts": [_public_artifact(artifact) for artifact in runtime.db.iter_artifacts(run_id=parts[2])]})
             return
 
         if len(parts) == 4 and parts[:2] == ["api", "workflow-runs"] and parts[3] == "files" and method == "POST":

@@ -191,7 +191,13 @@ def main() -> None:
             assert job_event["model"] == "priced-model"
             assert job_event["metadata"]["effective_model_source"] == "worker"
             assert job_event["metadata"]["pricing_snapshot"]["output_per_mtok"] == 4.0
-            assert job_event["metadata"]["estimated_cost_usd"] == 0.000462
+            # Wire semantics (see _estimate_cost_usd): prompt_tokens is ALREADY uncached and
+            # completion_tokens INCLUDES reasoning, so:
+            #   120×2 (input) + 10×0.2 (cached) + 5×3 (cache write)
+            #   + (45−9)×4 (output minus reasoning) + 9×5 (reasoning) = 446 → $0.000446.
+            # (Mutation: re-subtract cached from prompt, or price the full completion plus
+            # reasoning — the old double-count — and this exact value goes red.)
+            assert job_event["metadata"]["estimated_cost_usd"] == 0.000446
             assert job_event["metadata"]["estimate"] is True
             assert job_event["metadata"]["pricing_partial"] is False
             assert run_event["idempotency_key"] == f"run:{run['id']}"
@@ -207,13 +213,13 @@ def main() -> None:
             assert totals["jobs"] == run["counters"]["jobs_started"]
             assert totals["budget_units"] == run["counters"]["budget_units_spent"]
             assert totals["tokens_prompt"] == 120 and totals["tokens_output"] == 45
-            assert totals["estimated_cost_usd"] == 0.000462
+            assert totals["estimated_cost_usd"] == 0.000446
 
             # A later catalogue refresh changes the live rate but MUST NOT re-price history:
             # summarize_usage reads only the event snapshot above.
             MockThClawsHandler.output_rate = 400.0
             runtime.jobs.poll_worker(worker["id"])
-            assert summarize_usage(runtime.db.list_usage_events())["estimated_cost_usd"] == 0.000462
+            assert summarize_usage(runtime.db.list_usage_events())["estimated_cost_usd"] == 0.000446
 
             job = runtime.db.get_job(job_event["job_id"])
             unknown = runtime.jobs._usage_payload(job, measures, job["finished_at"], "unknown-model")
@@ -221,7 +227,9 @@ def main() -> None:
             assert "pricing_snapshot" not in unknown["metadata"]
             assert "estimated_cost_usd" not in unknown["metadata"]
             partial = runtime.jobs._usage_payload(job, measures, job["finished_at"], "partial-model")
-            assert partial["metadata"]["estimated_cost_usd"] == 0.00024
+            # input-rate-only model: 120×2 (prompt, NOT re-discounted) + 10×2 (cached falls
+            # back to the input rate) = 260 → $0.00026; output/reasoning unpriced → partial.
+            assert partial["metadata"]["estimated_cost_usd"] == 0.00026
             assert partial["metadata"]["pricing_partial"] is True
             # Semi-trusted catalogue numbers must never overflow into Infinity or suppress
             # the usage row. They remain an immutable raw snapshot but produce no estimate.
@@ -366,6 +374,7 @@ def main() -> None:
             assert not verify_signed_usage_export_file(export_path, "usage-signing-secret")
 
             check_metering_failure_is_non_fatal(runtime, base_url, definition["id"], tokens["admin"])
+            check_json_reads_are_bounded()
             assert len(runtime.db.list_usage_events()) == 2
         finally:
             server.shutdown()
@@ -384,6 +393,50 @@ def create_role_tokens(runtime: AtlasRuntime) -> dict[str, str]:
         user = runtime.db.create_user(role, f"{role}-password", role)
         _, tokens[role] = runtime.db.create_api_token(user["id"], f"{role} usage check")
     return tokens
+
+
+def check_json_reads_are_bounded() -> None:
+    """The control-plane JSON reads (healthz / agent info / models) must be bounded in WALL
+    CLOCK, not just per-recv socket timeout: a worker dripping one byte per tick resets the
+    socket timeout on every chunk, so an unbounded read pins the poll thread for as long as
+    the worker keeps dripping. (Mutation: revert get_json to a bare response.read() → the
+    client only returns when the server stops after ~3s → the elapsed assertion goes red.)"""
+    from atlas.thclaws_client import ThClawsClient, ThClawsError
+
+    class DripHandler(BaseHTTPRequestHandler):
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+        def do_GET(self) -> None:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            try:
+                # Drip forever from the client's perspective, but stop after ~3s so a
+                # regressed (unbounded) client fails the elapsed assertion instead of
+                # hanging this check forever.
+                for _ in range(60):
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), DripHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = ThClawsClient(f"http://127.0.0.1:{server.server_address[1]}", None, timeout=0.5)
+        started = time.monotonic()
+        try:
+            client.get_json("/v1/models")
+            raise AssertionError("a dripped JSON body must not parse as a successful response")
+        except ThClawsError:
+            pass
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0, f"drip-fed JSON body held the read for {elapsed:.2f}s (deadline not enforced)"
+    finally:
+        server.shutdown()
+    print("worker JSON reads are byte- and deadline-bounded OK")
 
 
 def check_metering_failure_is_non_fatal(runtime: AtlasRuntime, base_url: str, definition_id: str, token: str) -> None:

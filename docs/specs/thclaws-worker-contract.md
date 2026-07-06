@@ -124,6 +124,33 @@ names must remain forward-compatible: Atlas stores/renders them generically and
 must not crash. Tool and skill `input`/`output` payloads are never persisted by
 Atlas; only the structural projection defined in the threat model is stored.
 
+### `usage` field semantics (pinned for cost estimation)
+
+The api_v1 layer maps `prompt_tokens` from the canonical `Usage.input_tokens`
+(`api_v1/agent.rs`, `chat.rs`, `callback.rs`), and every provider normalizes
+that field to the **UNCACHED input portion** before it gets there:
+`providers/openai_responses.rs` subtracts `cached_tokens` explicitly
+("Subtract cached from total_input so the canonical `Usage.input_tokens` is
+the UNCACHED new portion"), and Anthropic's native `input_tokens` already
+excludes cache reads/writes. `completion_tokens` **INCLUDES** the
+`reasoning_output_tokens` subset (OpenAI reports reasoning inside
+`output_tokens`; the provider passes it through verbatim).
+
+Consequences for any consumer pricing these fields (Atlas
+`_estimate_cost_usd`):
+
+- price `prompt_tokens` **as-is** — subtracting `cached_input_tokens` again
+  double-discounts the cache;
+- price `max(0, completion_tokens - reasoning_output_tokens)` at the output
+  rate and `reasoning_output_tokens` at the reasoning rate (falling back to
+  the output rate) — pricing the full completion **plus** reasoning counts
+  those tokens twice.
+
+NOTE: thClaws' own `compute_cost_usd` documents the opposite convention for
+its internal `TokenUsage` ("prompt includes cached") and its ledger feeds
+these same api_v1-shaped fields into it — a known upstream inconsistency.
+Atlas deliberately prices by the wire semantics above, not by that port.
+
 ## `x_callback` async dispatch and callback contract
 
 `POST /agent/run` accepts an optional `x_callback` object (`api_v1/agent.rs`,

@@ -18,6 +18,10 @@ _NOT_ACCEPTED_REASONS = (ConnectionRefusedError, socket.gaierror)
 # Cap on an HTTP ERROR body read in _request: an error response is a short message, so a
 # larger body from a semi-trusted worker is a memory/thread-pin vector, not real content.
 _ERROR_BODY_MAX_BYTES = 64 * 1024
+# Cap for the small JSON control-plane bodies (healthz / agent info / model catalogue). The
+# catalogue is the biggest legitimate payload (hundreds of models × a pricing block) — still
+# well under 1 MiB; 8 MiB leaves generous headroom while bounding a hostile body.
+_JSON_BODY_MAX_BYTES = 8 * 1024 * 1024
 # Wall-clock bound on that read: a byte cap alone doesn't stop a slow-drip body (each byte
 # resets the socket timeout), so read in chunks and stop at this deadline too.
 _ERROR_BODY_READ_DEADLINE_SECONDS = 10.0
@@ -91,8 +95,15 @@ class ThClawsClient:
             ) from exc
 
     def get_json(self, path: str, timeout: float | None = None) -> Any:
-        with self._request("GET", path, timeout=timeout) as response:
-            body = response.read().decode("utf-8", errors="replace")
+        # Bounded like every other worker read (same class fix as sync/ACK/error bodies): a
+        # bare response.read() has NO size cap and NO wall-clock bound — each drip-fed chunk
+        # resets the socket timeout, so a semi-trusted worker could pin a poll thread or
+        # exhaust memory from /healthz//v1/agent/info//v1/models.
+        effective_timeout = self.timeout if timeout is None else timeout
+        with self._request("GET", path, timeout=effective_timeout) as response:
+            body = _read_bounded(
+                response, _JSON_BODY_MAX_BYTES, time.monotonic() + effective_timeout
+            ).decode("utf-8", errors="replace")
         try:
             return json.loads(body or "{}")
         except json.JSONDecodeError as exc:
@@ -100,7 +111,9 @@ class ThClawsClient:
 
     def get_text(self, path: str) -> tuple[int, str]:
         with self._request("GET", path) as response:
-            body = response.read().decode("utf-8", errors="replace")
+            body = _read_bounded(
+                response, _JSON_BODY_MAX_BYTES, time.monotonic() + self.timeout
+            ).decode("utf-8", errors="replace")
             status = response.getcode() or 0
         return status, body
 

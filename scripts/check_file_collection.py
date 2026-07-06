@@ -330,20 +330,58 @@ def check_db_error_isolated(runtime: AtlasRuntime, worker_id: str) -> None:
     # narrow _collect_files's except back to a typed tuple -> sqlite3.Error escapes -> red.
     _reset_worker(MockWorker)
     MockWorker.export_tar = _gzip_tar([("r.md", b"content", "file")])
-    original = runtime.db.create_artifact
+    original = runtime.db.create_artifacts
 
     def boom(*_args, **_kwargs):
         raise sqlite3.OperationalError("database is locked")
 
-    runtime.db.create_artifact = boom  # type: ignore[method-assign]
+    runtime.db.create_artifacts = boom  # type: ignore[method-assign]
     try:
         job = _submit(runtime, worker_id, ["r.md"])
         job = _wait_terminal(runtime, job["id"])
         assert job["state"] == "succeeded", "a DB error during collection must not fail the job"
         assert "files.collection_failed" in _event_types(runtime, job["id"])
     finally:
-        runtime.db.create_artifact = original  # type: ignore[method-assign]
+        runtime.db.create_artifacts = original  # type: ignore[method-assign]
     print("  DB error during collection isolated; job still succeeds OK")
+
+
+def check_partial_collection_is_atomic(runtime: AtlasRuntime, worker_id: str) -> None:
+    # A failure PARTWAY through storing a multi-file collection must publish NOTHING: artifact
+    # rows land in one transaction and staged blobs are reclaimed. (Mutation: revert
+    # _collect_files to per-file create_artifact → the first file's artifact survives → red.)
+    import os
+
+    import atlas.jobs as jobs_module
+
+    _reset_worker(MockWorker)
+    MockWorker.export_tar = _gzip_tar([("a.txt", b"first", "file"), ("b.txt", b"second", "file")])
+    original = jobs_module.store_bytes
+    calls = {"n": 0}
+
+    def flaky_store(upload_dir, data):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("simulated disk full on the second file")
+        return original(upload_dir, data)
+
+    blobs_before = set(os.listdir(runtime.upload_dir))
+    jobs_module.store_bytes = flaky_store
+    try:
+        job = _submit(runtime, worker_id, ["a.txt", "b.txt"])
+        job = _wait_terminal(runtime, job["id"])
+    finally:
+        jobs_module.store_bytes = original
+    assert job["state"] == "succeeded", "collection failure must not change the job outcome"
+    assert "files.collection_failed" in _event_types(runtime, job["id"])
+    partial = [
+        art for art in runtime.db.list_artifacts(limit=1000)
+        if (art.get("metadata") or {}).get("source_job_id") == job["id"]
+    ]
+    assert not partial, f"partial collection published artifacts: {[art['key'] for art in partial]}"
+    blobs_after = set(os.listdir(runtime.upload_dir))
+    assert blobs_after == blobs_before, f"failed collection leaked blobs: {blobs_after - blobs_before}"
+    print("  mid-collection failure publishes nothing (no rows, no orphan blobs) OK")
 
 
 def check_cancel_during_collection(runtime: AtlasRuntime, worker_id: str, handoff_worker_id: str) -> None:
@@ -474,6 +512,7 @@ def main() -> None:
             check_deadline(runtime, worker["id"])
             check_corrupt_tar(runtime, worker["id"])
             check_db_error_isolated(runtime, worker["id"])
+            check_partial_collection_is_atomic(runtime, worker["id"])
             check_cancel_during_collection(runtime, worker["id"], handoff["id"])
             check_job_artifacts_route(runtime, api_base, worker["id"], token)
             check_barrier_ordering(runtime, worker["id"], handoff["id"])
