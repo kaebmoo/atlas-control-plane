@@ -434,6 +434,15 @@ def check_json_reads_are_bounded() -> None:
             pass
         elapsed = time.monotonic() - started
         assert elapsed < 2.0, f"drip-fed JSON body held the read for {elapsed:.2f}s (deadline not enforced)"
+        # get_text (the health() path) shares the same bound — a drip on /healthz must not
+        # pin the poll thread either. (Mutation: revert get_text to response.read() → red.)
+        started = time.monotonic()
+        try:
+            client.get_text("/healthz")
+        except ThClawsError:
+            pass
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0, f"drip-fed text body held the read for {elapsed:.2f}s (deadline not enforced)"
     finally:
         server.shutdown()
     print("worker JSON reads are byte- and deadline-bounded OK")

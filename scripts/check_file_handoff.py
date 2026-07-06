@@ -292,6 +292,39 @@ def check_hostile_artifact_rejected(runtime: AtlasRuntime, a_id: str, b_id: str)
     print("  hostile artifact (out-of-store content / traversal relpath) rejected OK")
 
 
+def check_budget_gate_precedes_push(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
+    # An unaffordable node must be rejected BEFORE its files are pushed into the target
+    # worker's workspace — the push is a side effect on another machine, not something
+    # _wait_for_job can undo. max_budget_units=1 lets the collector run and exhausts the
+    # budget before the consumer. (Mutation: drop the _check_budget pre-check in front of
+    # _push_files_to_worker → WorkerB receives the tar before the node fails → red.)
+    _reset_b()
+    policy = {"file_handoff": True, "allowed_worker_ids": [a_id, b_id], "max_jobs": 10, "max_budget_units": 1}
+    run = runtime.workflows.run_graph(_graph(a_id, b_id), policy)
+    assert run["state"] == "failed", run["state"]
+    assert "budget" in (run.get("error") or ""), run.get("error")
+    assert WorkerB.push_calls == 0, "files were pushed to the worker before the budget rejection"
+    print("  budget gate precedes the push side-effect OK")
+
+
+def check_batch_create_is_all_or_nothing(runtime: AtlasRuntime) -> None:
+    # create_artifacts validates EVERY payload before any row is written — an invalid entry
+    # anywhere in the list publishes nothing. (Mutation: validate/insert row-by-row → the
+    # first row survives → red.)
+    bad_batch = [
+        {"key": "batch.ok", "kind": "text", "content": "fine"},
+        {"key": "", "kind": "text", "content": "invalid: empty key"},
+    ]
+    try:
+        runtime.db.create_artifacts(bad_batch)
+        raise AssertionError("invalid payload in a batch must raise")
+    except ValueError:
+        pass
+    leaked = [art for art in runtime.db.iter_artifacts() if art["key"] == "batch.ok"]
+    assert not leaked, "a batch with an invalid entry published its earlier rows"
+    print("  create_artifacts is all-or-nothing OK")
+
+
 def check_cancel_during_push_no_downstream_job(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
     # A cancel landing while the UNLOCKED push blocks must prevent the downstream job from
     # ever being created — not create-then-reap. (Mutation: drop the cancelled re-check under
@@ -378,6 +411,8 @@ def main() -> None:
             check_runtime_guard(runtime, worker_a["id"], worker_b["id"])
             check_push_failure_fails_edge(runtime, worker_a["id"], worker_b["id"])
             check_hostile_artifact_rejected(runtime, worker_a["id"], worker_b["id"])
+            check_budget_gate_precedes_push(runtime, worker_a["id"], worker_b["id"])
+            check_batch_create_is_all_or_nothing(runtime)
             check_cancel_during_push_no_downstream_job(runtime, worker_a["id"], worker_b["id"])
             check_artifact_iteration_unbounded(runtime)
         finally:
