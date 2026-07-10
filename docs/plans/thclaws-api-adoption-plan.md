@@ -1373,3 +1373,11 @@ Part B — chat-completions for builder previews (benchmark-gated):
 - thClaws: a secret-safe tool-payload projection (redacted-at-source event
   payloads with a defined schema) — prerequisite for any persistent payload
   preview in T2's timeline.
+- thClaws: atomic `POST /v1/inputs` (stage-then-rename the whole batch). Today
+  it writes per-file with no transaction, so a worker-side IO error mid-batch —
+  or a lost response after a complete write — leaves files behind. ACCEPTED as
+  designed: Atlas pre-validation makes every upstream limit unreachable, and
+  residue is confined to the unique `inputs/incoming/<run>/<node>/` prefix that
+  no job is ever dispatched to read (T9b close-out). Nice-to-have only — even
+  an atomic write cannot fix the lost-response case, so the containment
+  argument stays load-bearing either way.
