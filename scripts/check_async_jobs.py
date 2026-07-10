@@ -91,8 +91,14 @@ def _start_mock_worker() -> tuple[ThreadingHTTPServer, str]:
     return mock, f"http://{host}:{port}"
 
 
+# Every AtlasRuntime starts a perpetual callback-reaper daemon; track them all so main() can
+# stop them before the TemporaryDirectory exits — a sweep firing mid-rmtree re-creates the
+# SQLite file and fails teardown with "Directory not empty" (the old intermittent flake).
+_RUNTIMES: list[AtlasRuntime] = []
+
+
 def _make_runtime(tmp: Path, name: str) -> AtlasRuntime:
-    return AtlasRuntime(
+    runtime = AtlasRuntime(
         Config(
             host="127.0.0.1",
             port=0,
@@ -106,6 +112,8 @@ def _make_runtime(tmp: Path, name: str) -> AtlasRuntime:
             callback_timeout_seconds=1800,  # non-default on purpose: asserts Config reaches JobManager
         )
     )
+    _RUNTIMES.append(runtime)
+    return runtime
 
 
 def _start_atlas(runtime: AtlasRuntime) -> tuple[AtlasHttpServer, str]:
@@ -532,6 +540,7 @@ def check_restart_preserves_callback_pending(tmp: Path) -> None:
             public_base_url="http://atlas.invalid",
         )
     )
+    _RUNTIMES.append(runtime2)
     server2, _base2 = _start_atlas(runtime2)
     try:
         survived = runtime2.db.get_job(job_id)
@@ -2293,6 +2302,13 @@ def main() -> None:
         check_callback_reject_closes_connection(tmp)
         check_resolved_handoff_replay_idempotent(tmp)
         check_submit_and_graph_validation(tmp)
+        # Stop every runtime's reaper daemon BEFORE the tempdir exits; a straggler still alive
+        # here would race the rmtree (see _RUNTIMES). Assert the kill actually took.
+        for runtime in _RUNTIMES:
+            runtime.close()
+        assert not any(
+            t.name == "atlas-callback-reaper" and t.is_alive() for t in threading.enumerate()
+        ), "a callback reaper survived runtime.close()"
     print("async jobs check ok")
 
 

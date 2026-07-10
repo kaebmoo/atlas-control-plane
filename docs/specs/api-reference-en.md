@@ -146,7 +146,7 @@ Every error uses one JSON shape:
 | GET | `/api/jobs/{job_id}` | Job detail |
 | POST | `/api/jobs/{job_id}/cancel` | Best-effort cancellation |
 | GET | `/api/jobs/{job_id}/events?after=0` | Replay/follow SSE |
-| GET | `/api/jobs/{job_id}/artifacts` | Collected files for the job (T5 `file_ref` artifacts) |
+| GET | `/api/jobs/{job_id}/artifacts` | Collected frozen Job Artifacts for the job (T9a `file_ref` artifacts) |
 | POST | `/api/worker-callbacks/{job_id}` | Worker-only terminal delivery for `execution: "callback"` jobs (signed callback token, not user auth) |
 
 ### Workflow definitions and AI builder
@@ -362,7 +362,7 @@ Requirements and bounds:
   the remote job's terminal result lands on the job row. Check that outcome
   before authorizing retry — retry always submits a new job.
 
-### File collection (`collect_files`, T5)
+### Frozen Job Artifacts (`collect_files`, T9a)
 
 A job (or a workflow worker/manager node) can collect real output files from its
 worker after the run finishes, instead of passing only assistant text downstream.
@@ -372,29 +372,31 @@ Add an explicit list of relative paths:
 {"prompt": "Write the report", "worker_id": "wrk_reporter", "collect_files": ["reports/out.md", "data/summary.csv"]}
 ```
 
-After the worker stream ends, Atlas fetches exactly those paths via
-`POST /workspace/sync/export` (a gzip tar of just the listed files), validates
-them through a strict tar filter (rejects absolute paths, `..` traversal,
-symlinks, and non-regular members; enforces `ATLAS_SYNC_MAX_FILES` /
-`ATLAS_SYNC_MAX_BYTES` caps while streaming, which also bounds a decompression
-bomb), and stores each as a `file_ref` artifact downloadable via the artifact
-API. Behaviour and bounds:
+Atlas forwards these thClaws glob patterns on `/agent/run` (stream and
+`execution:"callback"`). After successful completion it reads the frozen
+session manifest from `GET /v1/sessions/{sid}/artifacts?workspace_dir=...` and
+each member from `GET /v1/sessions/{sid}/artifacts/{aid}?workspace_dir=...`.
+It validates unique ids/paths after POSIX normalization, safe relative paths (including control-character rejection), non-negative sizes,
+lowercase SHA-256 values, the 256-file/300-MiB aggregate caps, and `skipped[]`.
+Each downloaded body must have a matching `x-sha256` header, exact length, and
+local SHA-256 before it is stored as a `file_ref` artifact:
 
-- **Gated on the worker's `sync_mode`.** `/workspace/sync/*` is not Bearer-authed,
-  so a worker whose operator has not asserted an approved shape
-  (`tunnel`/`forward_auth`) is never called — the job records a
-  `files.collection_skipped` event instead. Absent `collect_files` = no sync
-  call at all (zero behaviour change).
+- **No sync fallback.** Job Artifacts use the worker Bearer API; Atlas never
+  calls `/workspace/sync/export` and never consults `sync_mode`. An old or
+  non-conforming worker records `files.collection_failed` and the job remains
+  successful.
 - **Pre-terminal barrier.** Collection resolves *before* the `succeeded` state is
   written, so downstream handoff and workflow nodes always observe a settled
   artifact set. The barrier is deadline-bounded by `ATLAS_COLLECT_DEADLINE_SECONDS`
   (default 120 s).
-- **Failure-isolated.** Collection never changes the job outcome — a deadline,
-  cap, hostile tar, or network error records a `files.collection_failed` event
-  (audited with counts only, never file contents) and the job still reaches
-  `succeeded`. Export `409 workspace busy` responses are retried a bounded number
-  of times.
-- Paths must be relative with no `..`. Not supported with `execution: "callback"`.
+- **Failure-isolated and atomic.** Collection never changes the job outcome — a
+  deadline, cap, malformed manifest, skipped entry, or integrity mismatch
+  records `files.collection_failed` (audit contains counts only), and a job
+  still reaches `succeeded`. Rows and opaque blobs publish all-or-nothing.
+- An empty manifest with no `skipped[]` is a valid zero-file result. A job
+  without `collect_files` makes no Artifact API request. Callback collection
+  runs outside the terminal DB transaction and continued sessions are
+  serialized by a durable worker/workspace/session lease.
 
 ### Handoff
 
@@ -486,10 +488,10 @@ remain valid. `DELETE` removes the definition and its triggers. Historical runs
 remain, while their `workflow_definition_id` may become null according to the
 foreign-key behavior.
 
-### File handoff between nodes (`push_files`, T6)
+### File handoff between nodes (`push_files`, T9b)
 
-An edge can push previously-collected files (see `collect_files`, T5) into the
-**next** worker's workspace before the downstream node's job starts — so a
+An edge can hand previously-collected files (see `collect_files`, T9a) to the
+**next** worker before the downstream node's job starts — so a
 Coder→Reviewer or Reporter→Anchor chain hands over real deliverables, not just
 text. Opt-in per workflow:
 
@@ -510,15 +512,24 @@ text. Opt-in per workflow:
   save time (validation error) AND as a runtime guard. Off by default.
 - `push_files` is a list of artifact-key glob patterns, matched against the run's
   collected `file_ref` artifacts (keyed `files.<node_key>.<relpath>`).
-- **Additive only.** Files land under `incoming/<run_id>/<node_key>/…` in the
-  target worker; Atlas never calls a trash/replace/delete option, so a push can
-  never clobber the target's own files. The downstream prompt's `{files_dir}`
-  token is substituted with that incoming prefix.
-- Reuses the T5 sync caps (`ATLAS_SYNC_MAX_FILES`/`ATLAS_SYNC_MAX_BYTES`) and the
-  target worker's `sync_mode` gate (a disabled target fails the edge). The
-  outgoing tar has deterministic member order and normalized mtimes (reproducible
-  bytes for the `files.pushed` audit). A `409 workspace busy` is retried; any
-  other push failure fails the edge loudly.
+- **Additive and jailed.** Atlas sends the files through the worker's
+  Bearer-authenticated `POST /v1/inputs`; they land under
+  `inputs/incoming/<run_id>/<node_key>/…` — inside thClaws's default `inputs/`
+  destination jail — and the API has no delete/replace semantics, so a handoff
+  can never clobber the target's own files. The downstream prompt's
+  `{files_dir}` token is substituted with that prefix.
+- Capped at min(`ATLAS_SYNC_MAX_FILES`/`ATLAS_SYNC_MAX_BYTES`, thClaws's
+  100-file / 64-MiB input limits), validated before anything is sent. Exactly
+  ONE request per edge — the upstream API has no transaction or idempotency
+  key — and Atlas requires a `written[]` acknowledgment matching every file's
+  size and SHA-256 before the `files.pushed` audit and the downstream job. Any
+  transport or acknowledgment failure fails the edge loudly. Workspace sync,
+  tar, and `sync_mode` are not used: a handoff works on a sync-`disabled`
+  worker.
+- The handoff shares the collection deadline (`ATLAS_COLLECT_DEADLINE_SECONDS`,
+  default 120 s). A near-cap batch (tens of MiB) over a slow link can need
+  more — raise the env var; the deadline bounds the whole request including
+  the acknowledgment read.
 
 ### Validate, Explain, and Repair
 

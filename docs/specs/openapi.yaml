@@ -558,7 +558,7 @@ paths:
     get:
       tags: [Jobs]
       operationId: listJobArtifacts
-      summary: List artifacts collected for a job (T5)
+      summary: List artifacts collected for a job (T9a)
       description: |
         The job's collected `file_ref` artifacts (from `collect_files`). A standalone job's
         collected files are keyed to the job (run_id NULL), so this per-job list surfaces them
@@ -1912,14 +1912,15 @@ components:
           type: array
           items: {type: string}
           description: |
-            T5 selective collection: explicit relative paths to fetch from the
-            worker via POST /workspace/sync/export after the job's stream ends,
-            stored as file_ref artifacts. Requires the worker's sync_mode to be an
-            approved shape (tunnel/forward_auth); a disabled worker yields a
-            files.collection_skipped event. Collection is failure-isolated — it
-            never changes the job outcome, only delays the succeeded write until it
-            resolves. Not supported with execution:"callback". Paths must be relative
-            with no "..". Absent = no collection (no sync call).
+            T9a frozen Job Artifacts: bounded thClaws glob patterns forwarded to
+            /agent/run on stream and execution:"callback". After successful worker
+            completion Atlas reads the Bearer-authenticated frozen session manifest
+            and snapshots, verifies safe unique ids/paths, 256-file/300-MiB caps,
+            skipped[], x-sha256, exact length, and local SHA-256, then publishes
+            file_ref artifacts all-or-nothing before succeeded. Collection is
+            failure-isolated and never calls workspace sync or consults sync_mode.
+            An empty manifest is valid; absent collect_files makes no Artifact API
+            request. Patterns must be bounded relative glob strings.
       additionalProperties: true
 
     Job:
@@ -1952,7 +1953,7 @@ components:
         collect_files:
           type: [array, 'null']
           items: {type: string}
-          description: T5 selective-collection path list (see JobCreate.collect_files); null when no collection is requested
+          description: T9a bounded glob patterns forwarded to thClaws Job Artifacts (see JobCreate.collect_files); null when no collection is requested
         created_at: {type: string, format: date-time}
         started_at: {type: [string, 'null'], format: date-time}
         finished_at: {type: [string, 'null'], format: date-time}

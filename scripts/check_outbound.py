@@ -390,6 +390,7 @@ def main() -> None:
             status, failed_listed = request_json(base_url, "GET", "/api/deliveries?status=blocked")
             assert status == 200 and {d["id"] for d in failed_listed["deliveries"]} >= {blocked_seed["id"], delivery_d["id"]}
         finally:
+            runtime.close()  # stop the reaper daemon before the tempdir exits
             server.shutdown()
             server.server_close()
             server_thread.join(timeout=2)

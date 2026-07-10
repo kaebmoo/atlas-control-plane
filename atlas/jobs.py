@@ -9,13 +9,14 @@ import math
 import os
 import threading
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from .db import Database, now_iso
 from .router import Router
-from .sync_files import SyncFileError, _reject_unsafe_path, safe_extract_tar, store_bytes
+from .sync_files import SyncFileError, _reject_unsafe_path, store_bytes
 from .thclaws_client import (
     SseEvent,
     ThClawsClient,
@@ -32,7 +33,14 @@ from .usage import elapsed_seconds
 
 TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
 JOB_EXECUTION_MODES = {"stream", "callback"}
-# T5: default cap on how many paths a job/node may collect.
+# T9a caps must never exceed the pinned thClaws Job Artifact limits.
+UPSTREAM_ARTIFACT_MAX_FILES = 256
+UPSTREAM_ARTIFACT_MAX_BYTES = 300 * 1024 * 1024
+# T9b input-placement caps, pinned to thClaws POST /v1/inputs (api_v1/artifacts.rs
+# MAX_INPUT_FILES / MAX_INPUT_TOTAL_BYTES; its 96 MiB JSON body limit is implied by the
+# 64 MiB decoded cap plus base64 overhead on Atlas-shaped batches).
+UPSTREAM_INPUT_MAX_FILES = 100
+UPSTREAM_INPUT_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_SYNC_MAX_FILES = 200
 
 
@@ -41,6 +49,29 @@ def sync_max_files_cap() -> int:
     graph save-time validation and the runtime submit path — two reads of the same value, so
     a graph that saves cleanly can never fail submit purely because the caps diverged."""
     return int(os.getenv("ATLAS_SYNC_MAX_FILES", str(DEFAULT_SYNC_MAX_FILES)))
+
+
+def artifact_max_files_cap() -> int:
+    return min(int(os.getenv("ATLAS_ARTIFACT_MAX_FILES", str(UPSTREAM_ARTIFACT_MAX_FILES))), UPSTREAM_ARTIFACT_MAX_FILES)
+
+
+class ArtifactCollectionError(ValueError):
+    """A semi-trusted worker's Job Artifact manifest or bytes violate the pinned contract."""
+
+
+class CallbackSessionPending(RuntimeError):
+    """The worker callback arrived before the async dispatch ACK bookkeeping persisted its sid."""
+
+
+@dataclass
+class _CollectedFiles:
+    rows: list[dict[str, Any]]
+    blobs: list[Path]
+    event: dict[str, Any]
+
+    def cleanup(self) -> None:
+        for blob in self.blobs:
+            blob.unlink(missing_ok=True)
 # thClaws CallbackPayload.status vocabulary — the full terminal enum, pinned in
 # docs/specs/thclaws-worker-contract.md against crates/core/src/api_v1/callback.rs.
 # "succeeded"/"cancelled" become the job's terminal state directly; "failed" is the worker's own
@@ -94,28 +125,40 @@ def _nonempty_string(value: Any) -> str | None:
 
 
 def _validate_collect_files(value: Any, max_files: int) -> list[str] | None:
-    """T5: normalize a job's `collect_files` request to a list of non-empty relative paths, or
-    None when absent. This bounds the REQUEST (count, string shape); the response tar is where
-    the real trust boundary is enforced (safe_extract_tar). Absolute / '..' paths are rejected
-    here too — a collect request should name outputs in the workspace, never escape it."""
+    """Validate bounded, workspace-relative thClaws globset patterns without expanding them."""
     if value is None:
         return None
     if not isinstance(value, list):
-        raise ValueError("collect_files must be a list of relative paths")
+        raise ValueError("collect_files must be a list of relative glob patterns")
     if len(value) > max_files:
         raise ValueError(f"collect_files exceeds the {max_files}-path cap")
     paths: list[str] = []
     for item in value:
         if not isinstance(item, str) or not item.strip():
             raise ValueError("collect_files entries must be non-empty strings")
+        pattern = item.strip()
+        if len(pattern) > 4096:
+            raise ValueError("collect_files entries must be at most 4096 characters")
+        if any(ord(char) < 0x20 or ord(char) == 0x7F for char in pattern):
+            raise ValueError("collect_files patterns must not contain control characters")
         try:
-            # Same validator the tar-ingestion side uses (sync_files is the single home for
-            # the path-safety rule), so the request-side and extraction-side checks can't drift.
-            path = _reject_unsafe_path(item.strip())
+            # The existing relative-path jail is deliberately used only as a shape validator:
+            # thClaws owns glob semantics, Atlas must not normalize or expand the pattern.
+            _reject_unsafe_path(pattern)
         except SyncFileError as exc:
-            raise ValueError(f"collect_files path must be relative and contain no '..': {item!r}") from exc
-        paths.append(path)
+            raise ValueError(f"collect_files pattern must be relative and contain no '..': {item!r}") from exc
+        paths.append(pattern)
     return paths or None
+
+
+def _validate_artifact_path(value: Any, *, skipped: bool = False) -> str:
+    label = "skipped path" if skipped else "path"
+    if not isinstance(value, str) or not value or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise ArtifactCollectionError(f"artifact manifest has an unsafe {label}")
+    try:
+        return _reject_unsafe_path(value)
+    except SyncFileError as exc:
+        raise ArtifactCollectionError(f"artifact manifest has an unsafe {label}") from exc
 
 
 def _pricing_for_worker_model(worker: dict[str, Any] | None, model: str) -> dict[str, Any] | None:
@@ -277,14 +320,19 @@ class JobManager:
         self.db = db
         self.router = Router(db)
         self.request_timeout_seconds = request_timeout_seconds
-        # T5 file collection: where collected artifacts land (the opaque-id upload store) and the
-        # bounds on a worker-supplied tar. The deadline caps the pre-terminal collection barrier
-        # so a hung export can never hold a job non-terminal; the byte/file caps bound a hostile
-        # or oversized transfer (a decompression bomb aborts against sync_max_bytes while streaming).
+        # T9a Job Artifact collection is bounded before any semi-trusted byte reaches the upload
+        # store. The legacy sync caps remain for T6 only; collection never consults sync_mode.
         self.upload_dir = upload_dir
         self.collect_deadline_seconds = float(os.getenv("ATLAS_COLLECT_DEADLINE_SECONDS", "120"))
+        # Worker/Atlas clock-skew tolerance for the manifest freshness check: a worker whose
+        # clock trails Atlas by more than this fails every collection as "stale".
+        self.artifact_skew_seconds = float(os.getenv("ATLAS_ARTIFACT_CLOCK_SKEW_SECONDS", "300"))
         self.sync_max_bytes = int(os.getenv("ATLAS_SYNC_MAX_BYTES", str(64 * 1024 * 1024)))
         self.sync_max_files = sync_max_files_cap()
+        self.artifact_max_bytes = min(
+            int(os.getenv("ATLAS_ARTIFACT_MAX_BYTES", str(UPSTREAM_ARTIFACT_MAX_BYTES))), UPSTREAM_ARTIFACT_MAX_BYTES
+        )
+        self.artifact_max_files = artifact_max_files_cap()
         # Backstops for a slow-dribbling / runaway worker on the (deadline-less) standalone-job
         # path: an overall wall-clock bound and a total-output cap. Generous defaults; override
         # via env. Workflow jobs additionally get the policy max_minutes deadline.
@@ -312,6 +360,8 @@ class JobManager:
         self.trigger_service: Any = None
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.RLock()
+        self._reaper_stop: threading.Event | None = None
+        self._reaper_thread: threading.Thread | None = None
 
     def submit(self, payload: dict[str, Any], *, explicit_id: str | None = None) -> dict[str, Any]:
         # explicit_id is a PRIVATE parameter (keyword-only, never read from `payload`): it lets
@@ -338,15 +388,8 @@ class JobManager:
             if not self.secret_key:
                 raise ValueError("execution 'callback' requires ATLAS_SECRET_KEY (signs the callback token)")
 
-        # T5 selective collection is opt-in per job. Validated here so a bad path list is a 400,
-        # not a silent no-op or a mid-run crash. None when absent -> zero behavior change.
-        collect_files = _validate_collect_files(payload.get("collect_files"), self.sync_max_files)
-        if collect_files and execution == "callback":
-            # The collection barrier lives on the stream success path (between [DONE] and the
-            # succeeded write); a callback job terminal-izes remotely, off that path. Reject the
-            # combination rather than silently skip collection.
-            # ponytail: wire collection into apply_worker_callback if async collection is ever needed.
-            raise ValueError("collect_files is not supported with execution 'callback'")
+        # T9a forwards these bounded upstream glob patterns on both stream and callback paths.
+        collect_files = _validate_collect_files(payload.get("collect_files"), self.artifact_max_files)
 
         conversation_id = payload.get("conversation_id")
         # Resolve routing and handoff BEFORE creating a conversation, so a failure here
@@ -492,6 +535,10 @@ class JobManager:
         the DB is orphaned — its thread is gone but the row says it is in flight. Fail those
         jobs so callers see a terminal state and usage is recorded, instead of a job wedged
         'running' forever. Idempotent: only touches non-terminal jobs with no live thread."""
+        # No collector thread survives a restart either: a collection_inflight flag orphaned by
+        # a crash mid-download would make claim_session_lease's backstop keep a terminal
+        # owner's lease forever, wedging every waiter on that session.
+        self.db.clear_stale_collection_inflight()
         for job in self.db.list_non_terminal_jobs():
             if (job.get("execution") or "stream") == "callback" and job.get("callback_deadline_at"):
                 # Callback-pending jobs are legitimately in flight on a REMOTE worker — the
@@ -507,12 +554,14 @@ class JobManager:
             if job.get("cancel_requested"):
                 # The user cancelled it before its thread observed the request; honor that as a
                 # terminal 'cancelled', not 'failed' (which would mislabel the outcome + usage).
-                self.db.update_job(job["id"], state="cancelled", finished_at=now_iso())
+                self.db.update_job(job["id"], state="cancelled", collection_inflight=0, finished_at=now_iso())
+                self.db.release_session_lease(job["id"])
                 self.db.append_job_event(job["id"], "state", {"state": "cancelled", "reason": "atlas_restarted"})
                 self.db.audit("job.cancelled", "job", job["id"])
             else:
                 error = "Atlas restarted while the job was in flight"
-                self.db.update_job(job["id"], state="failed", error=error, finished_at=now_iso())
+                self.db.update_job(job["id"], state="failed", error=error, collection_inflight=0, finished_at=now_iso())
+                self.db.release_session_lease(job["id"])
                 self.db.append_job_event(job["id"], "state", {"state": "failed", "reason": "atlas_restarted"})
                 self.db.audit("job.failed", "job", job["id"], {"error": error})
             self._record_job_usage(job["id"])
@@ -555,7 +604,7 @@ class JobManager:
         worker = self.db.get_worker(job["worker_id"])
         workspace = self.db.get_workspace(job["workspace_id"]) if job.get("workspace_id") else None
         if not worker:
-            self.db.update_job(job_id, state="failed", error="Worker disappeared", finished_at=now_iso())
+            self.db.update_job(job_id, state="failed", error="Worker disappeared", collection_inflight=0, finished_at=now_iso())
             self.db.append_job_event(job_id, "error", {"error": "Worker disappeared"})
             self._record_job_usage(job_id)
             with self._lock:
@@ -567,7 +616,7 @@ class JobManager:
         # write would still open the worker stream (a remote side effect on a cancelled job).
         if not self.db.try_start_job(job_id):
             if self.db.is_cancel_requested(job_id):
-                self.db.update_job(job_id, state="cancelled", finished_at=now_iso())
+                self.db.update_job(job_id, state="cancelled", collection_inflight=0, finished_at=now_iso())
                 self.db.append_job_event(job_id, "state", {"state": "cancelled"})
                 self.db.audit("job.cancelled", "job", job_id)
                 self._record_job_usage(job_id)
@@ -575,6 +624,21 @@ class JobManager:
                 self._threads.pop(job_id, None)
             return
         self.db.append_job_event(job_id, "state", {"state": "running"})
+        # A continued session shares thClaws's mutable session-scoped artifact snapshot. Claim
+        # before dispatch; a later continuation waits rather than overwriting this run before
+        # the pre-terminal collector copies its frozen bytes.
+        if job.get("thclaws_session_id"):
+            try:
+                self._wait_for_session_lease(job_id, worker, workspace, job["thclaws_session_id"])
+            except _JobCancelled:
+                self.db.update_job(job_id, state="cancelled", collection_inflight=0, finished_at=now_iso())
+                self.db.release_session_lease(job_id)
+                self.db.append_job_event(job_id, "state", {"state": "cancelled"})
+                self.db.audit("job.cancelled", "job", job_id)
+                self._record_job_usage(job_id)
+                with self._lock:
+                    self._threads.pop(job_id, None)
+                return
         client = ThClawsClient(worker["base_url"], worker.get("token"), timeout=self.request_timeout_seconds)
         if (job.get("execution") or "stream") == "callback":
             # Fire-and-forget: handled OUTSIDE the stream path's try/finally on purpose. The
@@ -589,6 +653,7 @@ class JobManager:
         stream_deadline = time.monotonic() + self.max_stream_seconds
         usage: dict[str, int] | None = None
         effective_model: str | None = None
+        collected: _CollectedFiles | None = None
         try:
             # max_total_bytes bounds the CUMULATIVE raw worker output in iter_sse, at the byte
             # source — so every wire byte counts (data, framing/whitespace padding, comment and
@@ -599,6 +664,7 @@ class JobManager:
                 system=NO_ASK_SYSTEM_PROMPT,
                 model=job.get("model") or None,
                 session_id=job.get("thclaws_session_id") or None,
+                collect_files=job.get("collect_files") or None,
                 stream_deadline=stream_deadline,
                 max_total_bytes=self.max_output_bytes,
             ):
@@ -653,27 +719,53 @@ class JobManager:
             # write, because 'succeeded' is what triggers _maybe_start_handoff and workflow-node
             # progression — anything published after it races the downstream consumer. Collection
             # is failure-isolated (never changes the job outcome) and deadline-bounded inside.
-            self._collect_files(job_id, job, worker, workspace, client)
+            collected = self._collect_files(job_id, job, worker, workspace, client)
             # Re-check AFTER the barrier: collection can block for up to the collect deadline,
             # and a cancel landing in that window must not be overwritten by the succeeded
             # write below (which would also trigger handoff for a cancelled job).
             if self.db.is_cancel_requested(job_id):
                 raise _JobCancelled()
-            self.db.update_job(job_id, state="succeeded", finished_at=now_iso())
-            self.db.append_job_event(job_id, "state", {"state": "succeeded"})
-            self.db.audit("job.succeeded", "job", job_id)
-            self._maybe_start_handoff(job_id)
+            finished_at = now_iso()
+            final = self.db.apply_job_terminal_result(
+                job_id,
+                "succeeded",
+                finished_at=finished_at,
+                events=[("files.collected", collected.event)] if collected else None,
+                artifacts=collected.rows if collected else None,
+                collection_complete=bool(job.get("collect_files")),
+            )
+            if final == "succeeded":
+                self._maybe_start_handoff(job_id)
+            elif final is None:
+                # Lost the terminal race: apply's early return cleared neither our
+                # collection_inflight flag nor the session lease, and the winner's transaction
+                # skipped the lease release while our flag was up. Drop both explicitly or the
+                # backstop's inflight guard blocks the session's waiters forever.
+                if collected:
+                    collected.cleanup()
+                if job.get("collect_files"):
+                    self.db.set_collection_inflight(job_id, False)
+                self.db.release_session_lease(job_id)
+            elif collected:
+                collected.cleanup()
         except _JobCancelled:
-            self.db.update_job(job_id, state="cancelled", finished_at=now_iso())
+            if collected:
+                collected.cleanup()
+            self.db.update_job(job_id, state="cancelled", collection_inflight=0, finished_at=now_iso())
+            self.db.release_session_lease(job_id)
             self.db.append_job_event(job_id, "state", {"state": "cancelled"})
             self.db.audit("job.cancelled", "job", job_id)
         except Exception as exc:
+            if collected:
+                collected.cleanup()
             if self.db.is_cancel_requested(job_id):
-                self.db.update_job(job_id, state="cancelled", finished_at=now_iso())
+                self.db.update_job(job_id, state="cancelled", collection_inflight=0, finished_at=now_iso())
+                self.db.release_session_lease(job_id)
                 self.db.append_job_event(job_id, "state", {"state": "cancelled"})
                 self.db.audit("job.cancelled", "job", job_id)
                 return
-            self.db.update_job(job_id, state="failed", error=str(exc), finished_at=now_iso())
+            self.db.update_job(job_id, state="failed", error=str(exc), collection_inflight=0, finished_at=now_iso())
+            self.db.release_session_lease(job_id)
             self.db.append_job_event(job_id, "error", {"error": str(exc)})
             self.db.audit("job.failed", "job", job_id, {"error": str(exc)})
         finally:
@@ -734,6 +826,8 @@ class JobManager:
         conversation's binding — the handoff worker is a transient post-processor, not the
         conversation's owner. Only the originating job writes the binding."""
         job_id = job["id"]
+        self._wait_for_session_lease(job_id, worker, workspace, session_id)
+        job["thclaws_session_id"] = session_id
         self.db.update_job(job_id, thclaws_session_id=session_id)
         if job.get("conversation_id") and not job.get("parent_job_id"):
             self.db.upsert_session_binding(
@@ -743,6 +837,25 @@ class JobManager:
                 session_id,
             )
         self.db.append_job_event(job_id, "session", {"session_id": session_id})
+
+    def _wait_for_session_lease(
+        self, job_id: str, worker: dict[str, Any], workspace: dict[str, Any] | None, session_id: str
+    ) -> None:
+        """Wait for the durable session scope without issuing a second upstream turn early."""
+        waiting = False
+        delay = 0.05
+        while not self.db.claim_session_lease(worker["id"], workspace.get("id") if workspace else None, session_id, job_id):
+            if self.db.is_cancel_requested(job_id):
+                raise _JobCancelled()
+            if not waiting:
+                self.db.append_job_event(job_id, "session_lease_waiting", {"session_id": session_id})
+                waiting = True
+            time.sleep(delay)
+            # A callback job can hold the lease for hours; each claim attempt issues the global
+            # terminal-lease sweep, so back off instead of hammering SQLite every 50ms.
+            delay = min(delay * 2, 1.0)
+        if waiting:
+            self.db.append_job_event(job_id, "session_lease_acquired", {"session_id": session_id})
 
     def _dispatch_callback(
         self,
@@ -779,6 +892,7 @@ class JobManager:
                 system=NO_ASK_SYSTEM_PROMPT,
                 model=job.get("model") or None,
                 session_id=job.get("thclaws_session_id") or None,
+                collect_files=job.get("collect_files") or None,
             )
         except ThClawsError as exc:
             # Redact FIRST: a ThClawsError carries the worker/proxy response body, which can
@@ -826,6 +940,10 @@ class JobManager:
             raise FileNotFoundError()
         if (job.get("execution") or "stream") != "callback":
             raise ValueError("job does not use callback execution")
+        # A duplicate delivery after terminalization is an idempotent no-op. Keep processing
+        # the payload only far enough to preserve T3's replay-handoff recovery, but never fetch
+        # a mutable continued-session snapshot again after the lease was released.
+        already_terminal = job.get("state") in TERMINAL_STATES
         body_run_id = payload.get("run_id")
         if not (isinstance(body_run_id, str) and body_run_id == job_id):
             # The documented payload REQUIRES run_id == the Atlas job id (real thClaws always
@@ -869,6 +987,44 @@ class JobManager:
         # worker-controlled and could echo the LIVE callback token, so redact before storage.
         summary = _redact_token(raw_summary, token) if isinstance(raw_summary, str) and raw_summary else None
         finished_at = now_iso()
+        # Collection deliberately happens BEFORE (and OUTSIDE) T3's terminal DB transaction.
+        # A duplicate callback/reaper may win the terminal race while bytes are downloading;
+        # the loser reclaims its staged blobs and publishes no rows.
+        collected: _CollectedFiles | None = None
+        # True iff OUR _collect_files call raised the job's collection_inflight flag (it sets
+        # the flag only when collect_files is nonempty). Gates the losing-side cleanup below:
+        # a delivery that never collected must not drop a CONCURRENT collector's flag or lease.
+        attempted_collection = False
+        if state == "succeeded" and not already_terminal:
+            if job.get("collect_files") and not job.get("thclaws_session_id"):
+                # thClaws can POST the callback immediately after its 202 ACK. The dispatch
+                # thread persists that ACK's session_id just after the HTTP call returns, so a
+                # callback handler that wins the scheduling race must wait briefly rather than
+                # terminalize success without collecting. A retryable 503 below preserves the
+                # worker's delivery envelope if bookkeeping is still unavailable.
+                wait_until = time.monotonic() + min(self.collect_deadline_seconds, 5.0)
+                while time.monotonic() < wait_until:
+                    refreshed = self.db.get_job(job_id)
+                    if refreshed and refreshed.get("thclaws_session_id"):
+                        job = refreshed
+                        break
+                    if refreshed and refreshed.get("state") in TERMINAL_STATES:
+                        already_terminal = True
+                        break
+                    time.sleep(0.01)
+                if not job.get("thclaws_session_id") and not already_terminal:
+                    raise CallbackSessionPending("callback arrived before dispatch session binding; retry")
+            if not already_terminal:
+                worker = self.db.get_worker(job["worker_id"])
+                workspace = self.db.get_workspace(job["workspace_id"]) if job.get("workspace_id") else None
+                if worker:
+                    client = ThClawsClient(worker["base_url"], worker.get("token"), timeout=self.request_timeout_seconds)
+                    attempted_collection = bool(job.get("collect_files"))
+                    collected = self._collect_files(job_id, job, worker, workspace, client, redact_tokens=(token,))
+                elif job.get("collect_files"):
+                    self._collection_event(
+                        job_id, "files.collection_failed", {"error": "Worker disappeared", "requested": len(job["collect_files"])}
+                    )
         # ONE transaction applies the terminal state + summary text (stored regardless of
         # outcome, matching stream semantics) + the structural callback_result event (tool
         # NAMES and counters only — the callback shape carries no tool input/output, per T2's
@@ -877,21 +1033,46 @@ class JobManager:
         # non-terminal, so the retry re-applies everything instead of hitting an
         # already-terminal job and losing the result. A racing cancel atomically wins inside
         # the same UPDATE (the worker has no cancel endpoint, so its result arrives anyway).
-        final_state = self.db.apply_job_terminal_result(
-            job_id,
-            state,
-            finished_at=finished_at,
-            error=error,
-            summary=summary,
-            events=[("callback_result", _project_callback_result(payload, token))],
-            usage_payload=self._usage_payload(
-                job,
-                usage,
-                finished_at,
-                _redact_token(_nonempty_string(payload.get("model")) or "", token) or None,
-            ),
-        )
+        try:
+            final_state = self.db.apply_job_terminal_result(
+                job_id,
+                state,
+                finished_at=finished_at,
+                error=error,
+                summary=summary,
+                events=[
+                    ("callback_result", _project_callback_result(payload, token)),
+                    *([("files.collected", collected.event)] if collected else []),
+                ],
+                usage_payload=self._usage_payload(
+                    job,
+                    usage,
+                    finished_at,
+                    _redact_token(_nonempty_string(payload.get("model")) or "", token) or None,
+                ),
+                artifacts=collected.rows if collected else None,
+                collection_complete=bool(job.get("collect_files")),
+            )
+        except Exception:
+            if collected:
+                collected.cleanup()
+            if attempted_collection:
+                # The job stays non-terminal (the worker's retry re-applies) and the lease
+                # stays OURS so that retry re-collects the un-mutated snapshot — but drop the
+                # inflight flag: if the reaper wins before the retry lands, its transaction
+                # can then release the lease instead of wedging the session until restart.
+                self.db.set_collection_inflight(job_id, False)
+            raise
+        if collected and final_state != "succeeded":
+            collected.cleanup()
         if final_state is None:
+            if attempted_collection:
+                # Lost the terminal race while our collection flag was up (e.g. the reaper won
+                # mid-download): the winner's transaction deliberately skipped the lease
+                # release under that flag, so the loser clears the flag and releases the lease
+                # itself — this is what un-blocks the session's waiters.
+                self.db.set_collection_inflight(job_id, False)
+                self.db.release_session_lease(job_id)
             # Lost the terminal race (duplicate delivery / reaper). Normally a no-op — but if
             # Atlas crashed after the terminal commit and BEFORE _maybe_start_handoff, the job
             # is succeeded with a configured-but-UNRESOLVED handoff, and the worker's retry is
@@ -946,20 +1127,32 @@ class JobManager:
 
     def start_callback_reaper(self, interval_seconds: float | None = None) -> threading.Thread:
         """Background sweep for callback jobs that never call back. Daemon thread, hermetic to
-        this manager; checks call reap_callback_jobs() directly for determinism."""
+        this manager; checks call reap_callback_jobs() directly for determinism. Stoppable via
+        stop_callback_reaper(): a sweep firing during a check's TemporaryDirectory teardown
+        re-creates the just-deleted SQLite file mid-rmtree ("Directory not empty" flake)."""
         interval = float(os.getenv("ATLAS_CALLBACK_REAPER_INTERVAL_SECONDS", "5")) if interval_seconds is None else interval_seconds
+        stop = threading.Event()
 
         def _loop() -> None:
-            while True:
-                time.sleep(interval)
+            while not stop.wait(interval):
                 try:
                     self.reap_callback_jobs()
                 except Exception:
                     LOGGER.exception("callback reaper sweep failed")
 
         thread = threading.Thread(target=_loop, name="atlas-callback-reaper", daemon=True)
+        self._reaper_stop = stop
+        self._reaper_thread = thread
         thread.start()
         return thread
+
+    def stop_callback_reaper(self) -> None:
+        """Stop the background sweep and wait for it to exit (bounded): after this returns no
+        sweep will touch the DB file again, so test teardown can safely remove it."""
+        if self._reaper_stop is not None:
+            self._reaper_stop.set()
+        if self._reaper_thread is not None:
+            self._reaper_thread.join(timeout=10)
 
     def _usage_payload(
         self,
@@ -1042,40 +1235,48 @@ class JobManager:
         worker: dict[str, Any],
         workspace: dict[str, Any] | None,
         client: ThClawsClient,
-    ) -> None:
-        """T5 pre-terminal collection: fetch the job's explicit `collect_files` list from the
-        worker via POST /workspace/sync/export and store each file as a `file_ref` artifact.
-        Failure-isolated — every outcome (collected / skipped / failed) leaves the job on its
-        way to `succeeded`; only the *timing* of the succeeded write waits for this to resolve.
-        Bounded by ATLAS_COLLECT_DEADLINE_SECONDS so a hung export never wedges the job."""
+        redact_tokens: tuple[str | None, ...] = (),
+    ) -> _CollectedFiles | None:
+        """Stage frozen Job Artifact bytes for atomic terminal publication; never use sync."""
         paths = job.get("collect_files")
         if not paths:
-            return  # no config -> no sync call at all (zero behavior change)
+            return None
         requested = len(paths)
         try:
-            if worker.get("sync_mode", "disabled") == "disabled":
-                # sync/* is not Bearer-protected; a disabled worker is never called. A skip, not
-                # an error — the operator has not asserted an approved shape for this worker.
-                self._collection_event(job_id, "files.collection_skipped", {"reason": "sync_mode_disabled", "requested": requested})
-                return
+            self.db.set_collection_inflight(job_id, True)
             if self.upload_dir is None:
                 self._collection_event(job_id, "files.collection_failed", {"error": "no upload store configured", "requested": requested})
-                return
+                return None
+            session_id = job.get("thclaws_session_id")
+            if not isinstance(session_id, str) or not session_id:
+                raise ArtifactCollectionError("worker completed without a session id for artifact lookup")
             deadline = time.monotonic() + self.collect_deadline_seconds
-            raw = client.sync_export(paths, deadline=deadline, max_bytes=self.sync_max_bytes)
-            members = safe_extract_tar(raw, max_files=self.sync_max_files, max_bytes=self.sync_max_bytes)
+            manifest = client.artifact_manifest(
+                session_id,
+                workspace.get("workspace_dir") if workspace else None,
+                deadline=deadline,
+                max_bytes=min(self.artifact_max_bytes, 8 * 1024 * 1024),
+            )
+            started_at = (self.db.get_job(job_id) or job).get("started_at")
+            members = self._validate_artifact_manifest(manifest, session_id, started_at)
             context = self.db.workflow_context_for_job(job_id)
             node_key = context.get("node_key")
             run_id = context.get("run_id")
             files_meta: list[dict[str, Any]] = []
-            # Publish ALL-OR-NOTHING: stage every blob + row first, then commit the rows in one
-            # transaction (create_artifacts). Per-file create_artifact would leave the first
-            # files' artifacts live when a later file fails — a partial set that T6 push globs
-            # and {artifact.*} templating would then treat as the complete collection.
             staged: list[dict[str, Any]] = []
             blob_paths: list[Path] = []
             try:
-                for relpath, data in members:
+                for artifact_id, relpath, size, sha256 in members:
+                    data, header_sha256 = client.artifact_bytes(
+                        session_id,
+                        artifact_id,
+                        workspace.get("workspace_dir") if workspace else None,
+                        deadline=deadline,
+                        max_bytes=size,
+                    )
+                    actual_sha256 = hashlib.sha256(data).hexdigest()
+                    if header_sha256 != sha256 or len(data) != size or actual_sha256 != sha256:
+                        raise ArtifactCollectionError(f"artifact {artifact_id!r} integrity mismatch")
                     opaque_id, sha256 = store_bytes(self.upload_dir, data)
                     blob_paths.append(self.upload_dir / opaque_id)
                     key = f"files.{node_key}.{relpath}" if node_key else f"files.{relpath}"
@@ -1098,14 +1299,15 @@ class JobManager:
                     # Structural metadata only (relpath/sha/bytes) — never file contents, matching
                     # T2's storage discipline. The bytes live in the opaque-id upload store.
                     files_meta.append({"relpath": relpath, "sha256": sha256, "bytes": len(data)})
-                self.db.create_artifacts(staged)
             except Exception:
-                # No artifact row was committed (single txn) — reclaim the staged blobs so a
-                # failed collection leaves no orphan files in the upload store.
                 for blob in blob_paths:
                     blob.unlink(missing_ok=True)
                 raise
-            self._collection_event(job_id, "files.collected", {"count": len(files_meta), "requested": requested, "files": files_meta})
+            return _CollectedFiles(
+                staged,
+                blob_paths,
+                {"count": len(files_meta), "requested": requested, "files": files_meta},
+            )
         except Exception as exc:
             # Failure isolation, same discipline as the T1b cost-estimation block: collection
             # NEVER changes the job outcome. This catch is deliberately BROAD — a narrow typed
@@ -1113,11 +1315,87 @@ class JobManager:
             # audit writes escape to _run's handler and flip the job to `failed`, contradicting
             # the "job still reaches succeeded" guarantee (threat-model + plan). The failure event
             # is itself best-effort so a broken DB can't re-raise out of the handler either.
-            LOGGER.exception("file collection failed for job %s", job_id)
+            safe_error = str(exc)
+            for secret in (worker.get("token"), *redact_tokens):
+                if secret:
+                    safe_error = safe_error.replace(str(secret), "[redacted-token]")
+            LOGGER.error("file collection failed for job %s: %s", job_id, safe_error)
             try:
-                self._collection_event(job_id, "files.collection_failed", {"error": str(exc), "requested": requested})
+                self._collection_event(job_id, "files.collection_failed", {"error": safe_error, "requested": requested})
             except Exception:
                 LOGGER.exception("failed to record files.collection_failed for job %s", job_id)
+            return None
+
+    def _validate_artifact_manifest(
+        self, manifest: Any, session_id: str, not_before: str | None = None
+    ) -> list[tuple[str, str, int, str]]:
+        """Validate every semi-trusted manifest member before downloading any snapshot bytes."""
+        if not isinstance(manifest, dict) or manifest.get("session_id") != session_id:
+            raise ArtifactCollectionError("artifact manifest session_id mismatch")
+        collected_at = manifest.get("collected_at")
+        artifacts = manifest.get("artifacts")
+        # thClaws omits `skipped` entirely when nothing was skipped (serde skip_serializing_if
+        # on ArtifactManifest — the normal case): absent means empty. A PRESENT non-list value
+        # still fails the isinstance gate below.
+        skipped = manifest.get("skipped", [])
+        patterns = manifest.get("patterns")
+        if not isinstance(collected_at, str) or not collected_at:
+            raise ArtifactCollectionError("artifact manifest collected_at is required")
+        try:
+            collected_time = datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
+            if collected_time.tzinfo is None:
+                raise ValueError("collected_at must include a timezone")
+            if not_before:
+                started_time = datetime.fromisoformat(str(not_before).replace("Z", "+00:00"))
+                # Worker and Atlas clocks can differ slightly; reject only an obviously stale
+                # prior snapshot while allowing a small deployment clock skew
+                # (ATLAS_ARTIFACT_CLOCK_SKEW_SECONDS, default 5 minutes).
+                if started_time.tzinfo is None or collected_time + timedelta(seconds=self.artifact_skew_seconds) < started_time:
+                    raise ValueError("manifest predates job dispatch")
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ArtifactCollectionError("artifact manifest collected_at is invalid or stale") from exc
+        if not isinstance(artifacts, list) or not isinstance(skipped, list) or not isinstance(patterns, list):
+            raise ArtifactCollectionError("artifact manifest patterns/artifacts/skipped must be lists")
+        if len(patterns) > self.artifact_max_files or any(
+            not isinstance(pattern, str) or not pattern or len(pattern) > 4096 for pattern in patterns
+        ):
+            raise ArtifactCollectionError("artifact manifest has invalid patterns")
+        if len(artifacts) > self.artifact_max_files:
+            raise ArtifactCollectionError("artifact manifest exceeds the file cap")
+        ids: set[str] = set()
+        paths: set[str] = set()
+        total = 0
+        members: list[tuple[str, str, int, str]] = []
+        for item in artifacts:
+            if not isinstance(item, dict):
+                raise ArtifactCollectionError("artifact manifest member must be an object")
+            artifact_id, path, size, sha256 = item.get("id"), item.get("path"), item.get("size"), item.get("sha256")
+            if not isinstance(artifact_id, str) or not artifact_id or len(artifact_id) > 128 or not all(
+                char.isascii() and (char.isalnum() or char in "-_") for char in artifact_id
+            ):
+                raise ArtifactCollectionError("artifact manifest has an unsafe id")
+            if not isinstance(path, str) or not path or not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                raise ArtifactCollectionError("artifact manifest has an invalid path or size")
+            normalized_path = _validate_artifact_path(path)
+            if not isinstance(sha256, str) or len(sha256) != 64 or any(char not in "0123456789abcdef" for char in sha256):
+                raise ArtifactCollectionError("artifact manifest has an invalid sha256")
+            if artifact_id in ids or normalized_path in paths:
+                raise ArtifactCollectionError("artifact manifest has duplicate ids or paths")
+            total += size
+            if total > self.artifact_max_bytes:
+                raise ArtifactCollectionError("artifact manifest exceeds the byte cap")
+            ids.add(artifact_id)
+            paths.add(normalized_path)
+            members.append((artifact_id, normalized_path, size, sha256))
+        skipped_paths: set[str] = set()
+        for path in skipped:
+            normalized_path = _validate_artifact_path(path, skipped=True)
+            if normalized_path in skipped_paths or normalized_path in paths:
+                raise ArtifactCollectionError("artifact manifest has duplicate skipped paths")
+            skipped_paths.add(normalized_path)
+        if skipped_paths:
+            raise ArtifactCollectionError("artifact manifest reports skipped files")
+        return members
 
     def _collection_event(self, job_id: str, event_type: str, payload: dict[str, Any]) -> None:
         """One place for both the job-timeline event and the audit row. The audit carries COUNTS

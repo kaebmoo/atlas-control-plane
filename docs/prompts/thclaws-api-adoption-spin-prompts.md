@@ -1,13 +1,13 @@
 # thClaws API Adoption — Autonomous Spin Prompts (with Claude review loop)
 
-Ready-to-run prompts that drive Claude Code through the **approved-now**
-milestones of [../plans/thclaws-api-adoption-plan.md](../plans/thclaws-api-adoption-plan.md)
-— **T0 → T1a → T2 → T3** — committing each milestone only after the gate is
-green AND an independent Claude review pass reports no unresolved actionable
-findings.
+Ready-to-run prompts for the active milestones of
+[../plans/thclaws-api-adoption-plan.md](../plans/thclaws-api-adoption-plan.md).
+T0–T6 are complete and their prompts below are retained as execution history.
+Run **T9a → T9b** next, one PR at a time, only after the gate is green and an
+independent Claude review pass reports no unresolved actionable findings.
 
-> T1b/T4 run only after their stated preconditions; T5–T8 are DEFERRED in the
-> plan and are NOT in scope for this driver. Do not implement them.
+> Do not reimplement T5/T6's sync/tar path or add a compatibility fallback.
+> T9 replaces it with thClaws Job Artifacts (v0.88.0+).
 
 The plan file is the source of truth. These prompts only scope, sequence, and
 set the stop conditions.
@@ -93,7 +93,7 @@ probes). Never weaken a check or suppress an error to get to green.
 
 ---
 
-## Milestone drivers (run one at a time, in order)
+## Historical milestone drivers (completed; do not rerun)
 
 ### T0 — Worker contract spike (docs only; no core code)
 
@@ -203,7 +203,7 @@ skip-signature mutation → red. Close out per the loop.
 
 ---
 
-## After all four milestones
+## Legacy branch close-out (completed milestones)
 
 ```text
 Run the branch-level review before opening the PR:
@@ -221,3 +221,87 @@ Fix findings through the per-milestone loop, then open the PR (CI runs gate
 + lint as required checks). T1b and T4 get their own driver prompts only
 after T1a lands and T0's contract doc defines sync_mode gating semantics.
 ```
+
+---
+
+## Active milestone drivers (run one at a time, in order)
+
+### T9a — Collect frozen Job Artifacts
+
+~~~text
+Apply the Shared Preamble. Execute T9a from the adoption plan against thClaws
+>= v0.88.0.
+
+Replace, do not supplement, T5 collection:
+- Forward collect_files as thClaws glob patterns on BOTH stream and x_callback
+  agent-run calls.
+- After successful worker completion and BEFORE Atlas writes succeeded, use
+  jobs.thclaws_session_id plus resolved workspace_dir to read the frozen
+  manifest and each declared artifact. Never call workspace sync export and do
+  not consult sync_mode for collection.
+- Treat manifest and bytes as semi-trusted. Validate ids, unique jailed paths,
+  non-negative sizes, lowercase 64-hex SHA-256 values, aggregate limits, and
+  skipped[]. For every download require x-sha256, actual length, and local SHA
+  to equal the manifest before opaque-store staging. Publish file_ref rows all
+  at once or not at all.
+- Empty non-skipped manifest is valid zero-file collection. Any skipped[] or
+  malformed/mismatched member is visible and failure-isolated, never partial
+  success.
+- Do NOT put worker network I/O inside T3's callback terminal transaction.
+  Add a pre-terminal callback-success collection phase; prove duplicate callback
+  and callback-vs-reaper convergence is still correct.
+- Atlas reuses thClaws session ids for conversation continuity while upstream
+  uses that id as the artifact scope. Add a durable worker/workspace/session
+  lease from dispatch through collection/terminalization so a later continued
+  turn cannot overwrite the previous snapshot. Cover crash, cancel, and worker
+  failure recovery; an in-memory-only lock is insufficient.
+
+Remove obsolete sync-export and dead tar-ingestion only after all callers are
+gone; sync_mode remains solely for T4's advisory busy probe.
+
+Mandatory checks: forwarding and correct session/workspace lookup; frozen bytes
+after live-file mutation; malformed/duplicate manifest, unsafe path, caps,
+skipped[], hash/header/length mismatch, and short/oversized reads publish
+nothing; stream/callback barrier ordering; no-collect zero request; old worker
+no sync fallback; and two continued-session jobs cannot interleave collection.
+Mutation-test forwarding, local SHA comparison, atomic publication, callback
+barrier ordering, and session lease enforcement. Update contract, threat model,
+OpenAPI, EN/TH docs, gate, and PROGRESS; close out through the Shared Preamble.
+~~~
+
+### T9b — Handoff through Bearer-authenticated inputs
+
+~~~text
+Apply the Shared Preamble. Execute T9b only after T9a is merged and green.
+
+Replace T6 tar/sync push with POST /v1/inputs:
+- Keep policy.file_handoff and edge push_files as save-time and runtime guards;
+  resolve only already-verified file_ref artifacts.
+- Revalidate upload-store containment and every relative path. Target only
+  inputs/incoming/<run_id>/<node_key>/<relpath>; never use a caller destination
+  or write .git/.thclaws.
+- Send one request only: <=100 files, <=64 MiB decoded, <=96 MiB JSON. Do not
+  batch or blindly retry an ambiguous write; upstream has no input transaction
+  or idempotency key. A failure creates no downstream job.
+- Require exactly one written[] acknowledgement per submitted path with matching
+  path, size, and SHA-256 before audit and downstream dispatch.
+- files_dir points to inputs/incoming/<run_id>/<node_key>. Remove final
+  sync-push/tar callers; sync_mode=disabled must not block this path.
+
+Mandatory two-worker checks: exact bytes at B; normal Bearer auth; zero sync
+calls; policy guards; unsafe/out-of-store source; 100-file and 64-MiB bounds;
+malformed/missing/mismatched acknowledgements; transport failure; and no false
+audit/downstream job in every failure case. Mutation-test runtime policy,
+acknowledgement hash, prefix containment, and single-request cap. Update
+contract, threat model, EN/TH docs, gate, and PROGRESS.
+~~~
+
+## Branch close-out
+
+~~~text
+Run gate and lint unpiped. Then use an INDEPENDENT Claude review over
+git diff main...HEAD against AGENTS.md and the T9 milestone. Trace stream and
+callback paths end to end; verify token handling, manifest/byte/input
+acknowledgement validation, races, API compatibility, mutation coverage, and
+EN/TH parity. Fix actionable findings and repeat until a clean review.
+~~~

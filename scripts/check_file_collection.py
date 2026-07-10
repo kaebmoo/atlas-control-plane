@@ -556,6 +556,7 @@ def main() -> None:
             check_job_artifacts_route(runtime, api_base, worker["id"], token)
             check_barrier_ordering(runtime, worker["id"], handoff["id"])
         finally:
+            runtime.close()  # stop the reaper daemon before the tempdir exits
             api_server.shutdown()
             mock.shutdown()
 

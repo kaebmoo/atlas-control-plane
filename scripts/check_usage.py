@@ -377,6 +377,7 @@ def main() -> None:
             check_json_reads_are_bounded()
             assert len(runtime.db.list_usage_events()) == 2
         finally:
+            runtime.close()  # stop the reaper daemon before the tempdir exits
             server.shutdown()
             server.server_close()
             server_thread.join(timeout=2)

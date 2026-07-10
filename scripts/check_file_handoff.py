@@ -1,24 +1,30 @@
-"""T6 — file handoff (push to the next worker). Hermetic checks with TWO mock thClaws workers:
-a collector (A) whose export supplies files, and a consumer (B) whose /workspace/sync/push
-captures the pushed tar. Covers the end-to-end push, the {files_dir} prompt substitution, the
-additive `incoming/<run_id>/<node_key>/` layout, the policy.file_handoff opt-in (save-time
-validator AND runtime guard), push-failure fails the edge, and trash/replace never called.
+"""T9b — file handoff (Bearer-authenticated POST /v1/inputs to the next worker). Hermetic
+checks with TWO mock thClaws workers: a collector (A) whose Job Artifact snapshot supplies
+files, and a consumer (B) whose /v1/inputs captures the decoded batch. Covers the end-to-end
+handoff (ONE request, byte-identical files under `inputs/incoming/<run_id>/<node_key>/`), the
+{files_dir} prompt substitution, the written[] acknowledgment validation, the min(sync,
+upstream-100-file/64-MiB) caps, the policy.file_handoff opt-in (save-time validator AND
+runtime guard), transport/ack failure fails the edge, sync_mode no longer gating the handoff,
+and legacy /workspace/sync/* never called.
 
 Mutation targets (break the code -> this file goes red):
 - drop the runtime `policy.file_handoff` guard in the _execute_run node loop (do_push =
-  bool(pushes)) -> a push happens with no policy -> check_runtime_guard sees B receive a tar.
+  bool(pushes)) -> a push happens with no policy -> check_runtime_guard sees B receive files.
 - remove the push_files/file_handoff save-time check in validate_workflow_graph
   -> check_validation_no_policy stops raising.
 - drop the upload-store containment check in _push_files_to_worker
   -> check_hostile_artifact_rejected reads an out-of-store file and pushes it.
+- omit the written[] size/sha validation -> check_ack_validation's wrong_sha run succeeds.
+- drop the `inputs/incoming/...` prefix -> check_end_to_end's exact-path assert fails.
+- batch into a second POST -> check_end_to_end's single-request assert fails.
 """
 
 from __future__ import annotations
 
-import io
+import base64
+import hashlib
 import json
 import sys
-import tarfile
 import threading
 import time
 from http import HTTPStatus
@@ -35,16 +41,6 @@ from atlas.config import Config
 from atlas.workflows import validate_workflow_graph
 
 A_FILE = b"deliverable-produced-by-A\n"
-
-
-def _gzip_tar(members: list[tuple[str, bytes]]) -> bytes:
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for name, data in members:
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-    return buffer.getvalue()
 
 
 class _Base(BaseHTTPRequestHandler):
@@ -79,33 +75,54 @@ class _Base(BaseHTTPRequestHandler):
 
 
 class WorkerA(_Base):
-    """Collector: its export supplies A_FILE as out.md."""
+    """Collector: its frozen Job Artifact supplies A_FILE as out.md."""
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
         _ = self.rfile.read(length) if length else b""
         if self.path == "/agent/run":
-            self._stream_ok()
-        elif self.path == "/workspace/sync/export":
-            tar = _gzip_tar([("out.md", A_FILE)])
             self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/gzip")
-            self.send_header("Content-Length", str(len(tar)))
+            self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
-            self.wfile.write(tar)
+            self.wfile.write(b'event: session\ndata: {"id":"sess-a"}\n\n')
+            self.wfile.write(b'event: text\ndata: {"text": "ok"}\n\n')
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
+    def do_GET(self) -> None:
+        import hashlib
+
+        if self.path.startswith("/v1/sessions/sess-a/artifacts/"):
+            body = A_FILE
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("x-sha256", hashlib.sha256(body).hexdigest())
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/v1/sessions/sess-a/artifacts"):
+            # No `skipped` key: real thClaws omits it when empty (serde skip_serializing_if).
+            self._json({"session_id": "sess-a", "collected_at": "2099-01-01T00:00:00Z", "patterns": ["out.md"], "artifacts": [{"id": "a1", "path": "out.md", "size": len(A_FILE), "sha256": hashlib.sha256(A_FILE).hexdigest()}]})
+            return
+        super().do_GET()
+
 
 class WorkerB(_Base):
-    """Consumer: captures pushed tars; records forbidden trash/replace calls; push can be forced
-    to fail."""
+    """Consumer: captures decoded /v1/inputs batches (path -> bytes) + the Bearer header;
+    records forbidden legacy /workspace/sync/* calls; the inputs call can be forced to fail
+    (push_status) or to return a corrupted acknowledgment (ack_mode)."""
 
-    pushed_tars: list = []
-    push_calls = 0
-    trash_calls = 0
+    received: dict = {}
+    push_calls = 0  # /v1/inputs requests — end-to-end asserts EXACTLY one (no batching)
+    sync_calls = 0  # /workspace/sync/* requests — MUST stay 0 (legacy transport retired)
+    auth_headers: list = []
+    workspace_dirs: list = []
     push_status = 200
     push_delay = 0.0
+    ack_mode = "ok"  # ok | wrong_sha | missing | extra | duplicate | not_json
 
     def do_POST(self) -> None:
         cls = type(self)
@@ -113,36 +130,55 @@ class WorkerB(_Base):
         body = self.rfile.read(length) if length else b""
         if self.path == "/agent/run":
             self._stream_ok()
-        elif self.path == "/workspace/sync/push":
+        elif self.path == "/v1/inputs":
             cls.push_calls += 1
+            cls.auth_headers.append(self.headers.get("Authorization"))
             if cls.push_delay:
                 time.sleep(cls.push_delay)
             if cls.push_status != 200:
                 self.send_error(cls.push_status)
                 return
-            cls.pushed_tars.append(body)
-            self._json({"ok": True})
-        elif self.path in ("/workspace/sync/trash", "/workspace/sync/replace"):
-            cls.trash_calls += 1  # MUST stay 0 — Atlas never clobbers the target
+            request = json.loads(body)
+            cls.workspace_dirs.append(request.get("workspace_dir"))
+            written = []
+            batch: dict = {}
+            for entry in request.get("files") or []:
+                data = base64.b64decode(entry["content_base64"])
+                batch[entry["path"]] = data
+                written.append({"path": entry["path"], "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+            cls.received = batch
+            if cls.ack_mode == "not_json":
+                payload = b"NOT JSON"
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if cls.ack_mode == "wrong_sha" and written:
+                written[0]["sha256"] = "0" * 64
+            elif cls.ack_mode == "missing" and written:
+                written = written[1:]
+            elif cls.ack_mode == "extra":
+                written.append({"path": "inputs/unexpected.txt", "size": 1, "sha256": "0" * 64})
+            elif cls.ack_mode == "duplicate" and written:
+                written.append(dict(written[0]))
+            self._json({"workspace_dir": "/tmp/b-workspace", "written": written})
+        elif self.path.startswith("/workspace/sync/"):
+            cls.sync_calls += 1  # MUST stay 0 — handoff never touches legacy sync
             self._json({"ok": True})
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
 
 def _reset_b() -> None:
-    WorkerB.pushed_tars = []
+    WorkerB.received = {}
     WorkerB.push_calls = 0
-    WorkerB.trash_calls = 0
+    WorkerB.sync_calls = 0
+    WorkerB.auth_headers = []
+    WorkerB.workspace_dirs = []
     WorkerB.push_status = 200
     WorkerB.push_delay = 0.0
-
-
-def _members(tar_bytes: bytes) -> dict[str, bytes]:
-    out = {}
-    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
-        for member in tar.getmembers():
-            out[member.name] = tar.extractfile(member).read()
-    return out
+    WorkerB.ack_mode = "ok"
 
 
 def _graph(a_id: str, b_id: str, push_files=("files.collector.*",)) -> dict:
@@ -162,26 +198,26 @@ def check_end_to_end(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
     run = runtime.workflows.run_graph(_graph(a_id, b_id), policy)
     assert run["state"] == "succeeded", run.get("error")
 
-    # B received exactly one push, byte-identical to A's out.md, under incoming/<run>/consumer/.
+    # B received EXACTLY one /v1/inputs request (upstream has no idempotency key — a second
+    # batch is a mutation target), byte-identical to A's out.md, under the inputs/ jail prefix.
     assert WorkerB.push_calls == 1, WorkerB.push_calls
-    assert len(WorkerB.pushed_tars) == 1
-    members = _members(WorkerB.pushed_tars[0])
-    arcname = f"incoming/{run['id']}/consumer/out.md"
-    assert arcname in members, list(members)
-    assert members[arcname] == A_FILE, "pushed bytes must be byte-identical to A's file"
+    dest = f"inputs/incoming/{run['id']}/consumer/out.md"
+    assert dest in WorkerB.received, list(WorkerB.received)
+    assert WorkerB.received[dest] == A_FILE, "handed-off bytes must be byte-identical to A's file"
 
-    # trash/replace never called (additive-only).
-    assert WorkerB.trash_calls == 0, "Atlas must never call trash/replace"
+    # the normal worker Bearer authenticates the inputs call; legacy sync is never touched.
+    assert WorkerB.auth_headers[-1] == "Bearer b-token", WorkerB.auth_headers
+    assert WorkerB.sync_calls == 0, "Atlas must never call /workspace/sync/* for a handoff"
 
-    # the consumer job's prompt carries {files_dir} substituted to the incoming prefix.
+    # the consumer job's prompt carries {files_dir} substituted to the inputs prefix.
     consumer_node = next(n for n in runtime.db.list_workflow_nodes(run["id"]) if n["node_key"] == "consumer")
     consumer_job = runtime.db.get_job(consumer_node["job_id"])
-    assert f"incoming/{run['id']}/consumer" in consumer_job["prompt"], consumer_job["prompt"]
+    assert f"inputs/incoming/{run['id']}/consumer" in consumer_job["prompt"], consumer_job["prompt"]
 
     # files.pushed audited before the downstream job (count/bytes/target).
     pushed = [row for row in runtime.db.list_audit() if row["action"] == "files.pushed"]
     assert pushed and pushed[0]["details"]["target_worker_id"] == b_id and pushed[0]["details"]["count"] == 1
-    print("  end-to-end: A -> push -> B byte-identical; {files_dir} substituted; trash never called OK")
+    print("  end-to-end: A -> ONE /v1/inputs -> B byte-identical; {files_dir} substituted; sync never called OK")
 
 
 def check_validation_no_policy(a_id: str, b_id: str) -> None:
@@ -202,16 +238,11 @@ def check_validation_no_policy(a_id: str, b_id: str) -> None:
         raise AssertionError("non-boolean file_handoff must be rejected")
     except ValueError:
         pass
-    # collect_files + execution:"callback" is a submit-time rejection; the save-time
-    # cross-check must catch it too, or the graph saves cleanly and fails on every run
-    # (mutation: drop the cross-check in validate_workflow_graph -> no raise -> red).
+    # T9a supports collection on callback jobs; graph validation must preserve that
+    # combination rather than retaining T5's old rejection.
     graph = _graph(a_id, b_id)
     graph["nodes"][0]["execution"] = "callback"
-    try:
-        validate_workflow_graph(graph, {"file_handoff": True, "allowed_worker_ids": [a_id, b_id]})
-        raise AssertionError("collect_files with execution 'callback' must be rejected at save time")
-    except ValueError as exc:
-        assert "callback" in str(exc), exc
+    validate_workflow_graph(graph, {"file_handoff": True, "allowed_worker_ids": [a_id, b_id]})
     print("  save-time validation: push_files requires policy.file_handoff OK")
 
 
@@ -272,7 +303,7 @@ def check_hostile_artifact_rejected(runtime: AtlasRuntime, a_id: str, b_id: str)
         {"run_id": run["id"], "key": "files.evil.a", "kind": "file_ref", "content": "../secret.txt", "metadata": {"relpath": "a"}}
     )
     try:
-        runtime.workflows._push_files_to_worker(run_row, node, b_id, [{"from": "evil", "push_files": ["files.evil.a"]}], "incoming/x")
+        runtime.workflows._push_files_to_worker(run_row, node, b_id, [{"from": "evil", "push_files": ["files.evil.a"]}], "inputs/incoming/x")
         raise AssertionError("out-of-store content path must be rejected")
     except ValueError:
         pass
@@ -284,12 +315,123 @@ def check_hostile_artifact_rejected(runtime: AtlasRuntime, a_id: str, b_id: str)
         {"run_id": run["id"], "key": "files.evil.b", "kind": "file_ref", "content": opaque, "metadata": {"relpath": "../escape"}}
     )
     try:
-        runtime.workflows._push_files_to_worker(run_row, node, b_id, [{"from": "evil", "push_files": ["files.evil.b"]}], "incoming/x")
+        runtime.workflows._push_files_to_worker(run_row, node, b_id, [{"from": "evil", "push_files": ["files.evil.b"]}], "inputs/incoming/x")
         raise AssertionError("traversal relpath must be rejected")
     except ValueError:
         pass
     assert WorkerB.push_calls == 0
     print("  hostile artifact (out-of-store content / traversal relpath) rejected OK")
+
+
+def check_ack_validation(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
+    # The written[] acknowledgment is the worker's word that every byte landed: a corrupted
+    # sha, a missing entry, an unexpected extra, or a non-JSON body must all fail the edge
+    # BEFORE the success audit and the downstream job. (Mutation: skip the size/sha
+    # comparison in _push_files_to_worker -> the wrong_sha run succeeds -> red.)
+    policy = {"file_handoff": True, "allowed_worker_ids": [a_id, b_id], "max_jobs": 10}
+    for mode in ("wrong_sha", "missing", "extra", "duplicate", "not_json"):
+        _reset_b()
+        WorkerB.ack_mode = mode
+        run = runtime.workflows.run_graph(_graph(a_id, b_id), policy)
+        assert run["state"] == "failed", (mode, run["state"])
+        consumer = [n for n in runtime.db.list_workflow_nodes(run["id"]) if n["node_key"] == "consumer"]
+        assert consumer and not consumer[0].get("job_id"), (
+            f"{mode}: downstream job dispatched despite an unverified acknowledgment"
+        )
+        pushed = [
+            row
+            for row in runtime.db.list_audit()
+            if row["action"] == "files.pushed" and row["resource_id"] == run["id"]
+        ]
+        assert not pushed, f"{mode}: files.pushed audited for an unverified handoff"
+    print("  malformed written[] acks (sha/missing/extra/duplicate/non-JSON) fail the edge, no dispatch OK")
+
+
+def check_input_caps(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
+    # The batch is capped at min(Atlas sync caps, upstream 100-file/64-MiB input limits) and
+    # validated BEFORE the single POST: upstream writes files one at a time, so a mid-batch
+    # 413 would leave partial residue. 101 files trips the UPSTREAM constant even though the
+    # Atlas sync cap (default 200) allows more; the byte cap shares the same min() and is
+    # exercised through the env-tunable knob.
+    from atlas.sync_files import store_bytes
+
+    policy = {"file_handoff": True, "allowed_worker_ids": [a_id, b_id], "max_jobs": 10}
+    run = runtime.workflows.run_graph(_graph(a_id, b_id), policy)
+    run_row = runtime.db.get_workflow_run(run["id"])
+    node = {"id": "consumer"}
+    assert runtime.jobs.sync_max_files > 100, "precondition: the Atlas cap must exceed upstream's"
+    opaque, _ = store_bytes(runtime.jobs.upload_dir, b"tiny")
+    runtime.db.create_artifacts(
+        [
+            {"run_id": run["id"], "key": f"files.many.{i}", "kind": "file_ref", "content": opaque, "metadata": {"relpath": f"f{i}"}}
+            for i in range(101)
+        ]
+    )
+    _reset_b()
+    try:
+        runtime.workflows._push_files_to_worker(
+            run_row, node, b_id, [{"from": "many", "push_files": ["files.many.*"]}], "inputs/incoming/x"
+        )
+        raise AssertionError("101 files must trip the upstream 100-file input cap")
+    except ValueError as exc:
+        assert "cap" in str(exc), exc
+    assert WorkerB.push_calls == 0, "an over-cap batch must never be sent"
+
+    original = runtime.jobs.sync_max_bytes
+    runtime.jobs.sync_max_bytes = 10  # < len(A_FILE): the byte arm of the same min() gate
+    try:
+        _reset_b()
+        run2 = runtime.workflows.run_graph(_graph(a_id, b_id), policy)
+        assert run2["state"] == "failed", run2["state"]
+        assert WorkerB.push_calls == 0, "an over-cap batch must never be sent"
+    finally:
+        runtime.jobs.sync_max_bytes = original
+    print("  input caps (upstream 100-file constant + byte knob) block the batch pre-POST OK")
+
+
+def check_single_request_batch(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
+    # Upstream has no transaction or idempotency key: a MULTI-file handoff must arrive in
+    # exactly ONE /v1/inputs request — per-file POSTs would turn one edge into N independently
+    # failing writes with no way to converge. The end-to-end check can't see this (its handoff
+    # is a single file, where per-file and per-batch look identical). (Mutation: loop
+    # post_inputs per file -> push_calls == 2 -> red.)
+    from atlas.sync_files import store_bytes
+
+    policy = {"file_handoff": True, "allowed_worker_ids": [a_id, b_id], "max_jobs": 10}
+    run = runtime.workflows.run_graph(_graph(a_id, b_id), policy)
+    run_row = runtime.db.get_workflow_run(run["id"])
+    node = {"id": "consumer"}
+    for index, blob in enumerate((b"first", b"second")):
+        opaque, _ = store_bytes(runtime.jobs.upload_dir, blob)
+        runtime.db.create_artifact(
+            {"run_id": run["id"], "key": f"files.pair.{index}", "kind": "file_ref", "content": opaque, "metadata": {"relpath": f"pair/{index}.txt"}}
+        )
+    _reset_b()
+    runtime.workflows._push_files_to_worker(
+        run_row, node, b_id, [{"from": "pair", "push_files": ["files.pair.*"]}], "inputs/incoming/x"
+    )
+    assert WorkerB.push_calls == 1, f"a multi-file handoff must be ONE request, got {WorkerB.push_calls}"
+    prefix = f"inputs/incoming/{run['id']}/consumer"
+    assert WorkerB.received == {f"{prefix}/pair/0.txt": b"first", f"{prefix}/pair/1.txt": b"second"}, WorkerB.received
+    # Distinct artifact keys must not collapse to one destination path: upstream writes inputs
+    # sequentially, so accepting duplicate destinations would silently overwrite one member.
+    opaque, _ = store_bytes(runtime.jobs.upload_dir, b"collision")
+    runtime.db.create_artifacts(
+        [
+            {"run_id": run["id"], "key": "files.collision.a", "kind": "file_ref", "content": opaque, "metadata": {"relpath": "same.txt"}},
+            {"run_id": run["id"], "key": "files.collision.b", "kind": "file_ref", "content": opaque, "metadata": {"relpath": "same.txt"}},
+        ]
+    )
+    _reset_b()
+    try:
+        runtime.workflows._push_files_to_worker(
+            run_row, node, b_id, [{"from": "collision", "push_files": ["files.collision.*"]}], "inputs/incoming/x"
+        )
+        raise AssertionError("duplicate destination paths must be rejected")
+    except ValueError as exc:
+        assert "duplicate destination" in str(exc), exc
+    assert WorkerB.push_calls == 0
+    print("  multi-file handoff arrives in exactly ONE /v1/inputs request OK")
 
 
 def check_budget_gate_precedes_push(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
@@ -443,9 +585,13 @@ def main() -> None:
             )
         )
         worker_a = runtime.db.upsert_worker({"name": "collector-A", "base_url": url_a, "tags": ["collect"]})
-        worker_b = runtime.db.upsert_worker({"name": "consumer-B", "base_url": url_b, "tags": ["consume"]})
-        runtime.db.set_worker_sync_mode(worker_a["id"], "tunnel")
-        runtime.db.set_worker_sync_mode(worker_b["id"], "tunnel")
+        worker_b = runtime.db.upsert_worker({"name": "consumer-B", "base_url": url_b, "tags": ["consume"], "token": "b-token"})
+        # Deliberately NO set_worker_sync_mode: both workers keep the 'disabled' default.
+        # T9b's Bearer-authenticated /v1/inputs (like T9a's Job Artifacts) must work without
+        # any sync trust shape — every check below passing IS the sync_mode-not-required proof.
+        for worker in (worker_a, worker_b):
+            row = runtime.db.get_worker(worker["id"]) or {}
+            assert (row.get("sync_mode") or "disabled") == "disabled", row.get("sync_mode")
 
         try:
             check_end_to_end(runtime, worker_a["id"], worker_b["id"])
@@ -453,12 +599,16 @@ def main() -> None:
             check_runtime_guard(runtime, worker_a["id"], worker_b["id"])
             check_push_failure_fails_edge(runtime, worker_a["id"], worker_b["id"])
             check_hostile_artifact_rejected(runtime, worker_a["id"], worker_b["id"])
+            check_ack_validation(runtime, worker_a["id"], worker_b["id"])
+            check_input_caps(runtime, worker_a["id"], worker_b["id"])
+            check_single_request_batch(runtime, worker_a["id"], worker_b["id"])
             check_budget_gate_precedes_push(runtime, worker_a["id"], worker_b["id"])
             check_batch_create_is_all_or_nothing(runtime)
             check_cancel_during_push_no_downstream_job(runtime, worker_a["id"], worker_b["id"])
             check_deadline_precedes_submit(runtime, worker_a["id"], worker_b["id"])
             check_artifact_iteration_unbounded(runtime)
         finally:
+            runtime.close()  # stop the reaper daemon before the tempdir exits
             server_a.shutdown()
             server_b.shutdown()
 

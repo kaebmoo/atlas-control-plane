@@ -814,6 +814,7 @@ def check_legacy_tool_payload_redacted_on_read(tmp: Path) -> None:
         assert '"name":"Bash"' in body and '"status":"ok"' in body, body
         assert '"name":"WebFetch"' in body and '"status":"error"' in body, body  # error-only → status error
     finally:
+        runtime.close()  # stop the reaper daemon before the tempdir exits
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=2)

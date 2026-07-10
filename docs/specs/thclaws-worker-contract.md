@@ -6,14 +6,13 @@ upstream thClaws specification.
 
 ## Tested build
 
-- Runtime-reported version: `0.85.0`
-- Source commit: `18e3aa2` (`v0.85.0-8-g18e3aa2`)
-- Built and probed: 2026-07-04
+- Runtime-reported version: `0.89.0` (includes the v0.88.0 Job Artifact API)
+- Source commit: `bf1d6bb` (local `main`, 2026-07-10)
+- Built and probed: 2026-07-10
 - Earlier source survey used by the adoption plan: `e481015` (v0.85.0)
 
-Only `0.85.0` is currently tested. thClaws exposes no protocol/schema version,
-so Atlas must treat any other reported engine version as unverified rather than
-assuming SemVer compatibility.
+thClaws exposes no protocol/schema version, so Atlas must treat any other
+reported engine version as unverified rather than assuming SemVer compatibility.
 
 ## Endpoint and authentication contract
 
@@ -101,8 +100,31 @@ Consumers apply the gate as follows:
 `GET /workspace/sync/stat` returns a process-wide `busy` snapshot. It is advisory
 and may race dispatch. `pull`, `push`, `manifest`, `export`, and `trash` return
 `409 Conflict` with `workspace busy (active turn)` while an agent turn is active.
-Atlas treats this `409` as retryable only under the bounded, post-stream policies
-defined by T5/T6.
+This matters only to T4's advisory `stat` probe and operator-managed legacy sync
+use: Atlas no longer calls any sync data route (T9a collects via the Bearer Job
+Artifact routes, T9b hands off via `POST /v1/inputs` — neither is busy-gated,
+and the client's sync export/push methods were deleted with their callers), so
+Atlas retries no `409` anywhere on this surface.
+
+## Job Artifacts (v0.88.0+)
+
+`POST /agent/run` accepts `collect_files: [glob, ...]`. thClaws copies matching
+regular files into a session-scoped snapshot when the turn completes and serves
+that immutable snapshot through Bearer-authenticated routes:
+
+| Endpoint | Response | Atlas rule |
+|---|---|---|
+| `GET /v1/sessions/{sid}/artifacts?workspace_dir=...` | JSON manifest with `session_id`, `patterns`, `artifacts[]`, and optional `skipped[]` | Validate ids, jailed relative paths (including control-character rejection), sizes, lowercase SHA-256 values, unique members after POSIX normalization, and the 256-file/300-MiB caps before downloading anything. Any `skipped[]` is an explicit failure-isolated partial result. |
+| `GET /v1/sessions/{sid}/artifacts/{aid}?workspace_dir=...` | Frozen bytes with `x-sha256` | Require the header, exact manifest length, and an independently calculated SHA-256 to match before staging. |
+| `POST /v1/inputs` — body `{workspace_dir?, files: [{path, content_base64}]}` | `{workspace_dir, written: [{path, size, sha256}]}` | T9b handoff. Caps: 100 files, 64 MiB decoded (96 MiB JSON body). Destinations must sit under an allowed prefix (default `inputs/`; `..`/absolute/`.git`/`.thclaws` always rejected). Files are written ONE AT A TIME with no transaction or idempotency key — Atlas pre-validates the whole batch, sends exactly ONE request per handoff edge, never retries (409s included), and requires `written[]` to cover the exact sent set with matching size and SHA-256 before any success audit or downstream dispatch. |
+
+The session id is emitted in the initial SSE `session` event or the async 202
+ACK. `workspace_dir` must be the same resolved workspace used for dispatch.
+The snapshot is not a view of the mutable workspace, and an empty manifest with
+no `skipped[]` is a valid zero-file result. Atlas never uses
+`/workspace/sync/export` for Job Artifact collection and never consults
+`sync_mode` for this path. Collection is failure-isolated and completes before
+Atlas writes `succeeded`; no partial rows or blobs are published.
 
 ## `/agent/run` SSE contract
 
