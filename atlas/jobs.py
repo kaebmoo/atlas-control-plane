@@ -59,6 +59,10 @@ class ArtifactCollectionError(ValueError):
     """A semi-trusted worker's Job Artifact manifest or bytes violate the pinned contract."""
 
 
+class CallbackSessionPending(RuntimeError):
+    """The worker callback arrived before the async dispatch ACK bookkeeping persisted its sid."""
+
+
 @dataclass
 class _CollectedFiles:
     rows: list[dict[str, Any]]
@@ -135,6 +139,8 @@ def _validate_collect_files(value: Any, max_files: int) -> list[str] | None:
         pattern = item.strip()
         if len(pattern) > 4096:
             raise ValueError("collect_files entries must be at most 4096 characters")
+        if any(ord(char) < 0x20 or ord(char) == 0x7F for char in pattern):
+            raise ValueError("collect_files patterns must not contain control characters")
         try:
             # The existing relative-path jail is deliberately used only as a shape validator:
             # thClaws owns glob semantics, Atlas must not normalize or expand the pattern.
@@ -143,6 +149,16 @@ def _validate_collect_files(value: Any, max_files: int) -> list[str] | None:
             raise ValueError(f"collect_files pattern must be relative and contain no '..': {item!r}") from exc
         paths.append(pattern)
     return paths or None
+
+
+def _validate_artifact_path(value: Any, *, skipped: bool = False) -> str:
+    label = "skipped path" if skipped else "path"
+    if not isinstance(value, str) or not value or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise ArtifactCollectionError(f"artifact manifest has an unsafe {label}")
+    try:
+        return _reject_unsafe_path(value)
+    except SyncFileError as exc:
+        raise ArtifactCollectionError(f"artifact manifest has an unsafe {label}") from exc
 
 
 def _pricing_for_worker_model(worker: dict[str, Any] | None, model: str) -> dict[str, Any] | None:
@@ -980,16 +996,35 @@ class JobManager:
         # a delivery that never collected must not drop a CONCURRENT collector's flag or lease.
         attempted_collection = False
         if state == "succeeded" and not already_terminal:
-            worker = self.db.get_worker(job["worker_id"])
-            workspace = self.db.get_workspace(job["workspace_id"]) if job.get("workspace_id") else None
-            if worker:
-                client = ThClawsClient(worker["base_url"], worker.get("token"), timeout=self.request_timeout_seconds)
-                attempted_collection = bool(job.get("collect_files"))
-                collected = self._collect_files(job_id, job, worker, workspace, client, redact_tokens=(token,))
-            elif job.get("collect_files"):
-                self._collection_event(
-                    job_id, "files.collection_failed", {"error": "Worker disappeared", "requested": len(job["collect_files"])}
-                )
+            if job.get("collect_files") and not job.get("thclaws_session_id"):
+                # thClaws can POST the callback immediately after its 202 ACK. The dispatch
+                # thread persists that ACK's session_id just after the HTTP call returns, so a
+                # callback handler that wins the scheduling race must wait briefly rather than
+                # terminalize success without collecting. A retryable 503 below preserves the
+                # worker's delivery envelope if bookkeeping is still unavailable.
+                wait_until = time.monotonic() + min(self.collect_deadline_seconds, 5.0)
+                while time.monotonic() < wait_until:
+                    refreshed = self.db.get_job(job_id)
+                    if refreshed and refreshed.get("thclaws_session_id"):
+                        job = refreshed
+                        break
+                    if refreshed and refreshed.get("state") in TERMINAL_STATES:
+                        already_terminal = True
+                        break
+                    time.sleep(0.01)
+                if not job.get("thclaws_session_id") and not already_terminal:
+                    raise CallbackSessionPending("callback arrived before dispatch session binding; retry")
+            if not already_terminal:
+                worker = self.db.get_worker(job["worker_id"])
+                workspace = self.db.get_workspace(job["workspace_id"]) if job.get("workspace_id") else None
+                if worker:
+                    client = ThClawsClient(worker["base_url"], worker.get("token"), timeout=self.request_timeout_seconds)
+                    attempted_collection = bool(job.get("collect_files"))
+                    collected = self._collect_files(job_id, job, worker, workspace, client, redact_tokens=(token,))
+                elif job.get("collect_files"):
+                    self._collection_event(
+                        job_id, "files.collection_failed", {"error": "Worker disappeared", "requested": len(job["collect_files"])}
+                    )
         # ONE transaction applies the terminal state + summary text (stored regardless of
         # outcome, matching stream semantics) + the structural callback_result event (tool
         # NAMES and counters only — the callback shape carries no tool input/output, per T2's
@@ -1341,31 +1376,23 @@ class JobManager:
                 raise ArtifactCollectionError("artifact manifest has an unsafe id")
             if not isinstance(path, str) or not path or not isinstance(size, int) or isinstance(size, bool) or size < 0:
                 raise ArtifactCollectionError("artifact manifest has an invalid path or size")
-            try:
-                _reject_unsafe_path(path)
-            except SyncFileError as exc:
-                raise ArtifactCollectionError("artifact manifest has an unsafe path") from exc
+            normalized_path = _validate_artifact_path(path)
             if not isinstance(sha256, str) or len(sha256) != 64 or any(char not in "0123456789abcdef" for char in sha256):
                 raise ArtifactCollectionError("artifact manifest has an invalid sha256")
-            if artifact_id in ids or path in paths:
+            if artifact_id in ids or normalized_path in paths:
                 raise ArtifactCollectionError("artifact manifest has duplicate ids or paths")
             total += size
             if total > self.artifact_max_bytes:
                 raise ArtifactCollectionError("artifact manifest exceeds the byte cap")
             ids.add(artifact_id)
-            paths.add(path)
-            members.append((artifact_id, path, size, sha256))
+            paths.add(normalized_path)
+            members.append((artifact_id, normalized_path, size, sha256))
         skipped_paths: set[str] = set()
         for path in skipped:
-            if not isinstance(path, str) or not path:
-                raise ArtifactCollectionError("artifact manifest skipped entry must be a path")
-            try:
-                _reject_unsafe_path(path)
-            except SyncFileError as exc:
-                raise ArtifactCollectionError("artifact manifest has an unsafe skipped path") from exc
-            if path in skipped_paths or path in paths:
+            normalized_path = _validate_artifact_path(path, skipped=True)
+            if normalized_path in skipped_paths or normalized_path in paths:
                 raise ArtifactCollectionError("artifact manifest has duplicate skipped paths")
-            skipped_paths.add(path)
+            skipped_paths.add(normalized_path)
         if skipped_paths:
             raise ArtifactCollectionError("artifact manifest reports skipped files")
         return members

@@ -1461,7 +1461,8 @@ class WorkflowRunner:
         # `inputs/incoming/<run>/<node>/` prefix (relpath="../evil"). Fail the edge loudly on any
         # violation.
         selected: list[tuple[str, bytes, str]] = []  # (dest path, data, sha256 of the ACTUAL bytes)
-        seen_keys: set[str] = set()
+        seen_destinations: set[str] = set()
+        latest_by_key: dict[str, dict[str, Any]] = {}
         total = 0
         # iter_artifacts pages by rowid keyset, so the glob resolution sees EVERY file_ref in
         # the run — no fixed window to overflow (a multi-node run can legitimately exceed any
@@ -1469,8 +1470,12 @@ class WorkflowRunner:
         # the max_files/max_bytes caps below.
         for art in self.db.iter_artifacts(run_id=run["id"], kind="file_ref"):
             key = art.get("key") or ""
-            if key in seen_keys or not any(fnmatch.fnmatch(key, pattern) for pattern in patterns):
+            if not any(fnmatch.fnmatch(key, pattern) for pattern in patterns):
                 continue
+            # iter_artifacts is insertion-ordered; overwrite so a retried node's newest
+            # artifact wins, matching _load_artifacts' newest-first semantics.
+            latest_by_key[key] = art
+        for key, art in latest_by_key.items():
             meta = art.get("metadata") or {}
             try:
                 safe_relpath = _reject_unsafe_path(str(meta.get("relpath") or key))
@@ -1479,6 +1484,10 @@ class WorkflowRunner:
             target = resolve_in_store(upload_dir, art.get("content"))
             if target is None:
                 raise ValueError(f"file handoff artifact {key!r} is outside the upload store")
+            # Reject oversized stored members before materializing them in memory. The stat is
+            # only an early guard; the actual byte length below remains authoritative.
+            if target.stat().st_size > max_bytes:
+                raise ValueError("file handoff exceeds the input caps")
             data = target.read_bytes()
             # Cap on ACTUAL bytes (a forged metadata.size can't undercount); each in-store file is
             # already bounded by the T9a collection caps, so reading one before the check is safe.
@@ -1488,10 +1497,11 @@ class WorkflowRunner:
             total += len(data)
             if len(selected) + 1 > max_files or total > max_bytes:
                 raise ValueError("file handoff exceeds the input caps")
-            selected.append(
-                (f"inputs/incoming/{run['id']}/{node['id']}/{safe_relpath}", data, hashlib.sha256(data).hexdigest())
-            )
-            seen_keys.add(key)
+            destination = f"inputs/incoming/{run['id']}/{node['id']}/{safe_relpath}"
+            if destination in seen_destinations:
+                raise ValueError(f"file handoff selects duplicate destination path: {destination!r}")
+            seen_destinations.add(destination)
+            selected.append((destination, data, hashlib.sha256(data).hexdigest()))
 
         if not selected:
             # A push edge that matched zero artifacts — record and continue (the downstream just
@@ -1525,6 +1535,8 @@ class WorkflowRunner:
         for entry in written:
             if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
                 raise ValueError("file handoff acknowledgment entry is malformed")
+            if entry["path"] in acked:
+                raise ValueError("file handoff acknowledgment contains duplicate paths")
             acked[entry["path"]] = (entry.get("size"), entry.get("sha256"))
         expected = {dest: (len(data), sha) for dest, data, sha in selected}
         if acked != expected:

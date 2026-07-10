@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from . import __version__
 from .config import Config
 from .db import ARTIFACT_KINDS, WORKER_SYNC_MODES, Database, new_id, now_iso, resolve_in_store
-from .jobs import JobManager, TERMINAL_STATES, verify_callback_token
+from .jobs import CallbackSessionPending, JobManager, TERMINAL_STATES, verify_callback_token
 from .outbound import OutboundService, OutboundSettings
 from .packs import export_pack, import_pack, list_available_packs
 from .router import Router
@@ -1070,7 +1070,11 @@ class AtlasHandler(BaseHTTPRequestHandler):
             with runtime.db.as_actor("system:worker-callback"):
                 # Pass the verified token so a worker error message reflecting it is redacted
                 # before any terminal field (jobs.error / event / audit) is persisted.
-                result = runtime.jobs.apply_worker_callback(job_id, payload, token=token)
+                try:
+                    result = runtime.jobs.apply_worker_callback(job_id, payload, token=token)
+                except CallbackSessionPending as exc:
+                    self._json({"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
+                    return
             self._json(result)
         finally:
             runtime.callback_read_slots.release()

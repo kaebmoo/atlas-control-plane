@@ -193,7 +193,14 @@ def malformed_and_integrity(runtime: AtlasRuntime, worker_id: str) -> None:
             {"id": "a1", "path": "ok.txt", "size": 1, "sha256": "0" * 64},
             {"id": "a1", "path": "other.txt", "size": 1, "sha256": "0" * 64},
         ]}, None),
+        ("duplicate-normalized", {"session_id": "sess-first", "collected_at": "2099-01-01T00:00:00Z", "patterns": ["out/*.txt"], "artifacts": [
+            {"id": "a1", "path": "out/a.txt", "size": 1, "sha256": "0" * 64},
+            {"id": "a2", "path": "out/./a.txt", "size": 1, "sha256": "0" * 64},
+        ]}, None),
         ("unsafe", {"session_id": "sess-first", "artifacts": [{"id": "a1", "path": "../bad", "size": 1, "sha256": "0" * 64}]}, None),
+        ("control-path", {"session_id": "sess-first", "collected_at": "2099-01-01T00:00:00Z", "patterns": ["out/*.txt"], "artifacts": [
+            {"id": "a1", "path": "out/\u0000bad.txt", "size": 1, "sha256": "0" * 64},
+        ]}, None),
         ("skipped", {"session_id": "sess-first", "artifacts": [], "skipped": ["late.txt"]}, None),
         ("skipped-non-list", {"session_id": "sess-first", "collected_at": "2099-01-01T00:00:00Z", "patterns": ["out/*.txt"], "artifacts": [], "skipped": "late.txt"}, None),
         ("stale", {"session_id": "sess-first", "collected_at": "2000-01-01T00:00:00Z", "patterns": ["out/*.txt"], "artifacts": []}, None),
@@ -255,6 +262,11 @@ def callback_contract(runtime: AtlasRuntime, worker_id: str) -> None:
         time.sleep(0.02)
     run = next(row["body"] for row in MockArtifactsWorker.requests if row.get("path") == "/agent/run")
     assert run["collect_files"] == ["out/*.txt"], run
+    # A real worker may callback immediately after its 202 ACK, before the dispatch thread has
+    # persisted session_id. The callback path must wait for that binding instead of succeeding
+    # with a silently skipped collection.
+    runtime.db.update_job(job["id"], thclaws_session_id=None)
+    threading.Timer(0.05, lambda: runtime.db.update_job(job["id"], thclaws_session_id="sess-first")).start()
     result = runtime.jobs.apply_worker_callback(job["id"], {"run_id": job["id"], "status": "succeeded", "summary": "ok"})
     assert result == {"applied": True, "state": "succeeded"}, result
     duplicate = runtime.jobs.apply_worker_callback(job["id"], {"run_id": job["id"], "status": "succeeded"})

@@ -114,7 +114,7 @@ that immutable snapshot through Bearer-authenticated routes:
 
 | Endpoint | Response | Atlas rule |
 |---|---|---|
-| `GET /v1/sessions/{sid}/artifacts?workspace_dir=...` | JSON manifest with `session_id`, `patterns`, `artifacts[]`, and optional `skipped[]` | Validate ids, jailed relative paths, sizes, lowercase SHA-256 values, unique members, and the 256-file/300-MiB caps before downloading anything. Any `skipped[]` is an explicit failure-isolated partial result. |
+| `GET /v1/sessions/{sid}/artifacts?workspace_dir=...` | JSON manifest with `session_id`, `patterns`, `artifacts[]`, and optional `skipped[]` | Validate ids, jailed relative paths (including control-character rejection), sizes, lowercase SHA-256 values, unique members after POSIX normalization, and the 256-file/300-MiB caps before downloading anything. Any `skipped[]` is an explicit failure-isolated partial result. |
 | `GET /v1/sessions/{sid}/artifacts/{aid}?workspace_dir=...` | Frozen bytes with `x-sha256` | Require the header, exact manifest length, and an independently calculated SHA-256 to match before staging. |
 | `POST /v1/inputs` — body `{workspace_dir?, files: [{path, content_base64}]}` | `{workspace_dir, written: [{path, size, sha256}]}` | T9b handoff. Caps: 100 files, 64 MiB decoded (96 MiB JSON body). Destinations must sit under an allowed prefix (default `inputs/`; `..`/absolute/`.git`/`.thclaws` always rejected). Files are written ONE AT A TIME with no transaction or idempotency key — Atlas pre-validates the whole batch, sends exactly ONE request per handoff edge, never retries (409s included), and requires `written[]` to cover the exact sent set with matching size and SHA-256 before any success audit or downstream dispatch. |
 

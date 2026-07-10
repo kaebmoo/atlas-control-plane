@@ -122,7 +122,7 @@ class WorkerB(_Base):
     workspace_dirs: list = []
     push_status = 200
     push_delay = 0.0
-    ack_mode = "ok"  # ok | wrong_sha | missing | extra | not_json
+    ack_mode = "ok"  # ok | wrong_sha | missing | extra | duplicate | not_json
 
     def do_POST(self) -> None:
         cls = type(self)
@@ -160,6 +160,8 @@ class WorkerB(_Base):
                 written = written[1:]
             elif cls.ack_mode == "extra":
                 written.append({"path": "inputs/unexpected.txt", "size": 1, "sha256": "0" * 64})
+            elif cls.ack_mode == "duplicate" and written:
+                written.append(dict(written[0]))
             self._json({"workspace_dir": "/tmp/b-workspace", "written": written})
         elif self.path.startswith("/workspace/sync/"):
             cls.sync_calls += 1  # MUST stay 0 — handoff never touches legacy sync
@@ -327,7 +329,7 @@ def check_ack_validation(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
     # BEFORE the success audit and the downstream job. (Mutation: skip the size/sha
     # comparison in _push_files_to_worker -> the wrong_sha run succeeds -> red.)
     policy = {"file_handoff": True, "allowed_worker_ids": [a_id, b_id], "max_jobs": 10}
-    for mode in ("wrong_sha", "missing", "extra", "not_json"):
+    for mode in ("wrong_sha", "missing", "extra", "duplicate", "not_json"):
         _reset_b()
         WorkerB.ack_mode = mode
         run = runtime.workflows.run_graph(_graph(a_id, b_id), policy)
@@ -342,7 +344,7 @@ def check_ack_validation(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
             if row["action"] == "files.pushed" and row["resource_id"] == run["id"]
         ]
         assert not pushed, f"{mode}: files.pushed audited for an unverified handoff"
-    print("  malformed written[] acks (sha/missing/extra/non-JSON) fail the edge, no dispatch OK")
+    print("  malformed written[] acks (sha/missing/extra/duplicate/non-JSON) fail the edge, no dispatch OK")
 
 
 def check_input_caps(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
@@ -411,6 +413,24 @@ def check_single_request_batch(runtime: AtlasRuntime, a_id: str, b_id: str) -> N
     assert WorkerB.push_calls == 1, f"a multi-file handoff must be ONE request, got {WorkerB.push_calls}"
     prefix = f"inputs/incoming/{run['id']}/consumer"
     assert WorkerB.received == {f"{prefix}/pair/0.txt": b"first", f"{prefix}/pair/1.txt": b"second"}, WorkerB.received
+    # Distinct artifact keys must not collapse to one destination path: upstream writes inputs
+    # sequentially, so accepting duplicate destinations would silently overwrite one member.
+    opaque, _ = store_bytes(runtime.jobs.upload_dir, b"collision")
+    runtime.db.create_artifacts(
+        [
+            {"run_id": run["id"], "key": "files.collision.a", "kind": "file_ref", "content": opaque, "metadata": {"relpath": "same.txt"}},
+            {"run_id": run["id"], "key": "files.collision.b", "kind": "file_ref", "content": opaque, "metadata": {"relpath": "same.txt"}},
+        ]
+    )
+    _reset_b()
+    try:
+        runtime.workflows._push_files_to_worker(
+            run_row, node, b_id, [{"from": "collision", "push_files": ["files.collision.*"]}], "inputs/incoming/x"
+        )
+        raise AssertionError("duplicate destination paths must be rejected")
+    except ValueError as exc:
+        assert "duplicate destination" in str(exc), exc
+    assert WorkerB.push_calls == 0
     print("  multi-file handoff arrives in exactly ONE /v1/inputs request OK")
 
 

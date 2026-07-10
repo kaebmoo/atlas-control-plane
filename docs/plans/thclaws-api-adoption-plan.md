@@ -1356,6 +1356,24 @@ Part B — chat-completions for builder previews (benchmark-gated):
    hours); the 5-minute manifest clock-skew tolerance is now
    `ATLAS_ARTIFACT_CLOCK_SKEW_SECONDS` (default unchanged).
 
+### Round 9 (2026-07-10), independent T9a/T9b review
+
+1. **Immediate callback race closed.** A worker can deliver its callback immediately after the
+   async 202 ACK, before the dispatch thread persists `session_id`. The callback handler now
+   waits briefly for that durable binding and returns retryable 503 if it is still pending,
+   rather than terminalizing success without collection; a hermetic immediate-callback check
+   covers the ordering.
+2. **T9a path validation tightened.** Manifest paths and skipped paths are normalized before
+   duplicate detection, and control characters are rejected; collect patterns receive the same
+   control-character guard.
+3. **T9b handoff validation tightened.** Atlas rejects duplicate destination paths, duplicate
+   `written[]` acknowledgments, and oversized in-store members before reading them into memory;
+   newest file_ref rows win when duplicate artifact keys are selected.
+4. **Residual upstream limitation recorded.** thClaws can leave a prior manifest when snapshot
+   creation fails before the final manifest write. Atlas's clock-skew check cannot distinguish a
+   prior snapshot inside the skew window; an upstream generation/atomic-clear contract is now an
+   explicit confirmation ask. Atlas does not add a sync fallback.
+
 ## External confirmations outstanding
 
 - thClaws: Job Artifacts and Bearer-gated sync shipped in v0.88.0. T9 adopts
@@ -1381,3 +1399,7 @@ Part B — chat-completions for builder previews (benchmark-gated):
   no job is ever dispatched to read (T9b close-out). Nice-to-have only — even
   an atomic write cannot fix the lost-response case, so the containment
   argument stays load-bearing either way.
+- thClaws: versioned/generation-tagged Job Artifact manifests or an atomic clear/version step
+  before a new snapshot. Today a snapshot failure before the final manifest write can leave a
+  recent prior manifest that falls within Atlas's bounded clock-skew window; Atlas records this
+  as collection failure only when the timestamp is outside that window.

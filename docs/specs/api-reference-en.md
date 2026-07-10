@@ -376,7 +376,7 @@ Atlas forwards these thClaws glob patterns on `/agent/run` (stream and
 `execution:"callback"`). After successful completion it reads the frozen
 session manifest from `GET /v1/sessions/{sid}/artifacts?workspace_dir=...` and
 each member from `GET /v1/sessions/{sid}/artifacts/{aid}?workspace_dir=...`.
-It validates unique ids/paths, safe relative paths, non-negative sizes,
+It validates unique ids/paths after POSIX normalization, safe relative paths (including control-character rejection), non-negative sizes,
 lowercase SHA-256 values, the 256-file/300-MiB aggregate caps, and `skipped[]`.
 Each downloaded body must have a matching `x-sha256` header, exact length, and
 local SHA-256 before it is stored as a `file_ref` artifact:

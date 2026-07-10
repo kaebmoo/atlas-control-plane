@@ -366,8 +366,8 @@ relative อย่างชัดเจน:
 Atlas จะส่ง glob เหล่านี้ต่อไปยัง `/agent/run` ของ thClaws (ทั้ง stream และ
 `execution:"callback"`) เมื่อ worker สำเร็จแล้วจะอ่าน manifest แบบ frozen จาก
 `GET /v1/sessions/{sid}/artifacts?workspace_dir=...` และอ่าน bytes ของสมาชิกผ่าน
-`GET /v1/sessions/{sid}/artifacts/{aid}?workspace_dir=...` ตรวจ id/path ที่ไม่ซ้ำ,
-relative path ที่ปลอดภัย, size ที่ไม่ติดลบ, SHA-256 ตัวพิมพ์เล็ก, เพดาน 256 ไฟล์/
+`GET /v1/sessions/{sid}/artifacts/{aid}?workspace_dir=...` ตรวจ id/path ที่ไม่ซ้ำหลังทำ
+POSIX normalization, relative path ที่ปลอดภัย (รวมถึงปฏิเสธ control character), size ที่ไม่ติดลบ, SHA-256 ตัวพิมพ์เล็ก, เพดาน 256 ไฟล์/
 300 MiB รวม และ `skipped[]` ก่อนดาวน์โหลด ทุกไฟล์ต้องมี header `x-sha256`, ความยาว
 จริง และ SHA-256 ที่ Atlas คำนวณตรงกับ manifest จึงจะเก็บเป็น `file_ref`:
 
