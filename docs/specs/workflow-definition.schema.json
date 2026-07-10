@@ -211,7 +211,7 @@
           "type": "array",
           "minItems": 1,
           "items": {"$ref": "#/$defs/nonEmptyString"},
-          "description": "T6: artifact-key glob patterns pushed to the target worker before its job; requires policy.file_handoff"
+          "description": "T9b: artifact-key glob patterns placed into the target worker via POST /v1/inputs (under inputs/incoming/<run>/<node>/) before its job; requires policy.file_handoff"
         }
       }
     },
@@ -252,7 +252,7 @@
         "stop_on_first_failure": {"type": "boolean"},
         "file_handoff": {
           "type": "boolean",
-          "description": "T6: opt-in enabling edge push_files (off by default)"
+          "description": "T9b: opt-in enabling edge push_files (off by default)"
         }
       }
     }

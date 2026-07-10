@@ -9,7 +9,6 @@ bypassed by a second, laxer reader.
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import io
 import os
@@ -122,23 +121,5 @@ def store_bytes(upload_dir: Path, data: bytes) -> tuple[str, str]:
     return opaque_id, digest
 
 
-def build_push_tar(files: list[tuple[str, bytes]]) -> bytes:
-    """Assemble a REPRODUCIBLE gzip tar from `[(arcname, content), …]` for a T6 push:
-    deterministic member order (sorted by arcname), normalized mtime/ids/mode, and a gzip
-    header with mtime=0 — so the same file set hashes to the same bytes for audit. The tar is
-    written straight through a `GzipFile(mtime=0)` because `tarfile`'s `w:gz` bakes the
-    current time into the gzip header, which would break reproducibility — streaming members
-    into the compressor also avoids materializing the whole uncompressed tar as a second
-    in-memory copy. Callers set arcnames (Atlas controls the target layout —
-    `incoming/<run_id>/<node_key>/…`), never the worker."""
-    gz_buffer = io.BytesIO()
-    with gzip.GzipFile(fileobj=gz_buffer, mode="wb", mtime=0) as gz, tarfile.open(fileobj=gz, mode="w") as tar:
-        for arcname, data in sorted(files, key=lambda item: item[0]):
-            info = tarfile.TarInfo(name=arcname)
-            info.size = len(data)
-            info.mtime = 0
-            info.mode = 0o644
-            info.uid = info.gid = 0
-            info.uname = info.gname = ""
-            tar.addfile(info, io.BytesIO(data))
-    return gz_buffer.getvalue()
+# build_push_tar (T6's reproducible push tar) was deleted with its last caller: T9b hands
+# files off through Bearer-authenticated POST /v1/inputs (workflows._push_files_to_worker).

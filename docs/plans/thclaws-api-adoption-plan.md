@@ -954,7 +954,7 @@ Checks:
 Close-out: implemented against thClaws `bf1d6bb` (v0.89.0 tree, including the
 v0.88.0 Job Artifact API); hermetic stream/callback/lease checks are in
 `scripts/check_job_artifacts.py` and run from `scripts/gate.sh`. T9b input
-handoff remains deliberately unimplemented. A post-close-out bug hunt
+handoff landed separately (see its close-out). A post-close-out bug hunt
 (2026-07-10, Round 8 below) fixed a wire-shape rejection every real worker
 would have hit (`skipped` absent) plus two lease/inflight enforcement gaps;
 the reaper-vs-collector race is now mutation-locked in the same check
@@ -962,7 +962,7 @@ the reaper-vs-collector race is now mutation-locked in the same check
 
 ---
 
-## Milestone T9b (PLANNED): Handoff through Bearer-authenticated inputs
+## Milestone T9b (DONE): Handoff through Bearer-authenticated inputs
 
 Goal: replace T6's sync-push tar handoff with POST /v1/inputs. Before creating
 a downstream workflow-node job, Atlas converts selected, already-verified
@@ -1006,6 +1006,22 @@ Checks:
   sync push/trash and tar content types are never used.
 - Mutations: remove runtime policy guard, omit acknowledgment hash validation,
   drop the inputs prefix, and permit a second input batch.
+
+Close-out (2026-07-10): implemented against thClaws `227bd19` (`post_inputs` in
+`api_v1/artifacts.rs`: body `{workspace_dir?, files[{path, content_base64}]}`,
+ack `{written[{path, size, sha256}]}`, default `inputs/` destination jail,
+per-file writes with no transaction — which is why Atlas pre-validates the
+whole batch and treats every failure as edge-fail). `thclaws_client.post_inputs`
+is single-attempt (no 409 retry — inputs are not busy-gated and must never be
+replayed); `_push_files_to_worker` re-validates artifacts, caps at min(sync,
+upstream) limits, requires an exact written[] match, and no longer consults
+`sync_mode`; `build_push_tar` and `sync_push` deleted with their last caller.
+`check_file_handoff.py` rewritten around a `/v1/inputs` mock (Bearer asserted;
+legacy `/workspace/sync/*` asserted never-called; both mock workers stay
+sync-`disabled` to prove the gate is gone). All four planned mutations red —
+the batching one only after adding a dedicated multi-file single-request check:
+the end-to-end case ships one file, where per-file and per-batch requests are
+indistinguishable (a surviving mutation exposing a weak check, again).
 
 ---
 

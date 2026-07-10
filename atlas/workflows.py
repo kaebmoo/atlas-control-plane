@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import contextvars
 import fnmatch
 import hashlib
@@ -12,10 +13,17 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .db import Database, now_iso, resolve_in_store
-from .jobs import CALLBACK_RETRY_ENVELOPE_SECONDS, JOB_EXECUTION_MODES, _validate_collect_files, artifact_max_files_cap
+from .jobs import (
+    CALLBACK_RETRY_ENVELOPE_SECONDS,
+    JOB_EXECUTION_MODES,
+    UPSTREAM_INPUT_MAX_BYTES,
+    UPSTREAM_INPUT_MAX_FILES,
+    _validate_collect_files,
+    artifact_max_files_cap,
+)
 from .outbound import OutboundService, resolve_outbound_target
 from .router import Router
-from .sync_files import SyncFileError, _reject_unsafe_path, build_push_tar
+from .sync_files import SyncFileError, _reject_unsafe_path
 from .thclaws_client import ThClawsClient
 from .usage import elapsed_seconds
 
@@ -998,7 +1006,8 @@ class WorkflowRunner:
                             # worker is pinned in `payload`, so push and submit hit the same one.
                             pushes = pending_pushes.pop(node_key, [])
                             do_push = bool(pushes) and bool(policy.get("file_handoff"))
-                            files_dir = f"incoming/{run['id']}/{node_key}" if do_push else ""
+                            # T9b: destinations live under thClaws's default `inputs/` jail.
+                            files_dir = f"inputs/incoming/{run['id']}/{node_key}" if do_push else ""
                             payload = self._prepare_worker_node_payload(
                                 run, node, input, artifacts, policy, graph, counters, files_dir=files_dir
                             )
@@ -1017,7 +1026,12 @@ class WorkflowRunner:
                             _check_budget(policy, int(counters.get("budget_units_spent") or 0), _node_budget_units(node))
                             _check_deadline(deadline)
                             self._push_files_to_worker(
-                                run, node, node_submit["payload"]["worker_id"], node_submit["pushes"], node_submit["files_dir"]
+                                run,
+                                node,
+                                node_submit["payload"]["worker_id"],
+                                node_submit["pushes"],
+                                node_submit["files_dir"],
+                                workspace_id=node_submit["payload"].get("workspace_id"),
                             )
                         with self._thread_lock:
                             # Re-check under the lock: the push above ran UNLOCKED for up to the
@@ -1412,34 +1426,41 @@ class WorkflowRunner:
         worker_id: str,
         pushes: list[dict[str, Any]],
         files_dir: str,
+        workspace_id: str | None = None,
     ) -> None:
-        """T6: push previously-collected artifacts into the RESOLVED target worker's workspace,
-        ADDITIVELY, under `incoming/<run_id>/<node_key>/…` (Atlas owns the arcnames, so a push
-        can never clobber the worker's files; Atlas never calls trash/replace). Resolves the
-        edge's `push_files` key-glob patterns against the run's `file_ref` artifacts, reuses the
-        T5 sync caps, and audits `files.pushed` after a successful push (before the downstream
-        job is created). A missing/disabled target or a push failure raises — the edge fails loudly."""
+        """T9b: place previously-collected artifacts into the RESOLVED target worker's
+        workspace via Bearer-authenticated `POST /v1/inputs`, under
+        `inputs/incoming/<run_id>/<node_key>/…` — inside thClaws's default `inputs/`
+        destination jail. Atlas owns every path, so a push can never clobber the worker's
+        files; workspace sync, tar, 409 retries, and `sync_mode` are not used. Resolves the
+        edge's `push_files` key-glob patterns against the run's `file_ref` artifacts, caps the
+        batch at min(T5 sync caps, upstream 100-file / 64-MiB input limits), sends ONE request
+        (upstream has no transaction or idempotency key — never batch, never blindly retry),
+        and requires a written[] acknowledgment matching every sent path's exact size and
+        SHA-256 before auditing `files.pushed` (before the downstream job is created). A
+        missing target, cap breach, transport failure, or ack mismatch raises — the edge fails
+        loudly, and any worker-side residue stays confined to this unique, undispatched
+        prefix."""
         worker = self.db.get_worker(worker_id)
         if not worker:
             raise ValueError(f"file handoff target worker not found: {worker_id}")
-        if (worker.get("sync_mode") or "disabled") == "disabled":
-            raise ValueError(f"file handoff target worker {worker_id} has sync disabled (needs tunnel/forward_auth)")
         upload_dir = getattr(self.job_service, "upload_dir", None)
         if upload_dir is None:
             raise ValueError("file handoff requires an upload store")
-        max_files = self.job_service.sync_max_files
-        max_bytes = self.job_service.sync_max_bytes
+        max_files = min(self.job_service.sync_max_files, UPSTREAM_INPUT_MAX_FILES)
+        max_bytes = min(self.job_service.sync_max_bytes, UPSTREAM_INPUT_MAX_BYTES)
 
         patterns: list[str] = []
         for entry in pushes:
             patterns.extend(entry.get("push_files") or [])
-        # A file_ref artifact is NOT necessarily from T5's validated collection: POST /api/artifacts
+        # A file_ref artifact is NOT necessarily from T9a's validated collection: POST /api/artifacts
         # lets any authenticated caller create one with an arbitrary `content` path and `relpath`.
         # So re-validate BOTH before use — the same containment `_download_artifact` enforces —
         # or a crafted artifact could exfiltrate an arbitrary host file (content="../../etc/passwd",
         # or an absolute path, which `root / content` would resolve to) or escape the additive
-        # `incoming/<run>/<node>/` prefix (relpath="../evil"). Fail the edge loudly on any violation.
-        selected: list[tuple[str, bytes, str | None]] = []  # (arcname, data, sha256)
+        # `inputs/incoming/<run>/<node>/` prefix (relpath="../evil"). Fail the edge loudly on any
+        # violation.
+        selected: list[tuple[str, bytes, str]] = []  # (dest path, data, sha256 of the ACTUAL bytes)
         seen_keys: set[str] = set()
         total = 0
         # iter_artifacts pages by rowid keyset, so the glob resolution sees EVERY file_ref in
@@ -1460,26 +1481,58 @@ class WorkflowRunner:
                 raise ValueError(f"file handoff artifact {key!r} is outside the upload store")
             data = target.read_bytes()
             # Cap on ACTUAL bytes (a forged metadata.size can't undercount); each in-store file is
-            # already bounded by the T5 collection caps, so reading one before the check is safe.
+            # already bounded by the T9a collection caps, so reading one before the check is safe.
+            # Pre-validating the whole batch here is load-bearing: upstream writes files one at a
+            # time, so a mid-batch 413/403 would leave partial residue — Atlas must never send a
+            # batch that can trip an upstream limit.
             total += len(data)
             if len(selected) + 1 > max_files or total > max_bytes:
-                raise ValueError("file handoff exceeds the sync caps")
-            selected.append((f"incoming/{run['id']}/{node['id']}/{safe_relpath}", data, meta.get("sha256")))
+                raise ValueError("file handoff exceeds the input caps")
+            selected.append(
+                (f"inputs/incoming/{run['id']}/{node['id']}/{safe_relpath}", data, hashlib.sha256(data).hexdigest())
+            )
             seen_keys.add(key)
 
         if not selected:
             # A push edge that matched zero artifacts — record and continue (the downstream just
-            # gets an empty incoming dir); not a failure.
+            # gets an empty inputs dir); not a failure. (files=[] would also be an upstream 400.)
             self.db.append_workflow_event(
                 run["id"], "files_push_empty", {"patterns": patterns, "to": node["id"]}, node_key=node["id"]
             )
             return
 
-        tar = build_push_tar([(arcname, data) for arcname, data, _ in selected])
+        workspace = self.db.get_workspace(workspace_id) if workspace_id else None
         client = ThClawsClient(worker["base_url"], worker.get("token"), timeout=self.job_service.request_timeout_seconds)
         deadline = time.monotonic() + self.job_service.collect_deadline_seconds
-        # Push first; a failure raises and fails the edge before any audit says it succeeded.
-        client.sync_push(tar, deadline=deadline)
+        # ONE request; a failure raises and fails the edge before any audit says it succeeded.
+        ack = client.post_inputs(
+            [
+                {"path": dest, "content_base64": base64.b64encode(data).decode("ascii")}
+                for dest, data, _ in selected
+            ],
+            workspace.get("workspace_dir") if workspace else None,
+            deadline=deadline,
+        )
+        # The ack is the worker's word that every byte landed: require written[] to cover the
+        # EXACT sent set with matching size and SHA-256 — a missing, extra, or mismatched entry
+        # means the handoff cannot be trusted and must fail BEFORE the success audit and the
+        # downstream job. (Mutation target: skipping this validation goes red in the gate.)
+        written = ack.get("written")
+        if not isinstance(written, list):
+            raise ValueError("file handoff acknowledgment has no written[] list")
+        # Values are worker-controlled (validated by the exact comparison below, not by type).
+        acked: dict[str, tuple[Any, Any]] = {}
+        for entry in written:
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                raise ValueError("file handoff acknowledgment entry is malformed")
+            acked[entry["path"]] = (entry.get("size"), entry.get("sha256"))
+        expected = {dest: (len(data), sha) for dest, data, sha in selected}
+        if acked != expected:
+            raise ValueError(
+                "file handoff acknowledgment mismatch: "
+                f"sent {len(expected)} files, acked {len(acked)}, differing paths: "
+                f"{sorted(set(expected) ^ set(acked))[:5] or 'size/sha mismatch'}"
+            )
         detail = {
             "to_node": node["id"],
             "from_nodes": [entry.get("from") for entry in pushes],
@@ -1488,7 +1541,6 @@ class WorkflowRunner:
             "bytes": sum(len(data) for _, data, _ in selected),
             "files_dir": files_dir,
             "sha256": [sha for _, _, sha in selected],
-            "tar_sha256": hashlib.sha256(tar).hexdigest(),
         }
         self.db.audit("files.pushed", "workflow_run", run["id"], detail)
         self.db.append_workflow_event(

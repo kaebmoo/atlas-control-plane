@@ -488,10 +488,10 @@ remain valid. `DELETE` removes the definition and its triggers. Historical runs
 remain, while their `workflow_definition_id` may become null according to the
 foreign-key behavior.
 
-### File handoff between nodes (`push_files`, T6)
+### File handoff between nodes (`push_files`, T9b)
 
-An edge can push previously-collected files (see `collect_files`, T9a) into the
-**next** worker's workspace before the downstream node's job starts — so a
+An edge can hand previously-collected files (see `collect_files`, T9a) to the
+**next** worker before the downstream node's job starts — so a
 Coder→Reviewer or Reporter→Anchor chain hands over real deliverables, not just
 text. Opt-in per workflow:
 
@@ -512,15 +512,20 @@ text. Opt-in per workflow:
   save time (validation error) AND as a runtime guard. Off by default.
 - `push_files` is a list of artifact-key glob patterns, matched against the run's
   collected `file_ref` artifacts (keyed `files.<node_key>.<relpath>`).
-- **Additive only.** Files land under `incoming/<run_id>/<node_key>/…` in the
-  target worker; Atlas never calls a trash/replace/delete option, so a push can
-  never clobber the target's own files. The downstream prompt's `{files_dir}`
-  token is substituted with that incoming prefix.
-- Reuses the T5 sync caps (`ATLAS_SYNC_MAX_FILES`/`ATLAS_SYNC_MAX_BYTES`) and the
-  target worker's `sync_mode` gate (a disabled target fails the edge). The
-  outgoing tar has deterministic member order and normalized mtimes (reproducible
-  bytes for the `files.pushed` audit). A `409 workspace busy` is retried; any
-  other push failure fails the edge loudly.
+- **Additive and jailed.** Atlas sends the files through the worker's
+  Bearer-authenticated `POST /v1/inputs`; they land under
+  `inputs/incoming/<run_id>/<node_key>/…` — inside thClaws's default `inputs/`
+  destination jail — and the API has no delete/replace semantics, so a handoff
+  can never clobber the target's own files. The downstream prompt's
+  `{files_dir}` token is substituted with that prefix.
+- Capped at min(`ATLAS_SYNC_MAX_FILES`/`ATLAS_SYNC_MAX_BYTES`, thClaws's
+  100-file / 64-MiB input limits), validated before anything is sent. Exactly
+  ONE request per edge — the upstream API has no transaction or idempotency
+  key — and Atlas requires a `written[]` acknowledgment matching every file's
+  size and SHA-256 before the `files.pushed` audit and the downstream job. Any
+  transport or acknowledgment failure fails the edge loudly. Workspace sync,
+  tar, and `sync_mode` are not used: a handoff works on a sync-`disabled`
+  worker.
 
 ### Validate, Explain, and Repair
 

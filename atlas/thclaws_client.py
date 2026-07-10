@@ -194,33 +194,50 @@ class ThClawsClient:
             retry_delay=retry_409_delay,
         )
 
-    def sync_push(
+    def post_inputs(
         self,
-        tar_bytes: bytes,
+        files: list[dict[str, str]],
+        workspace_dir: str | None,
         *,
         deadline: float,
-        max_ack_bytes: int = 64 * 1024,
-        retry_409_max: int = 4,
-        retry_409_delay: float = 0.5,
+        max_ack_bytes: int = 1024 * 1024,
     ) -> dict[str, Any]:
-        """Push a gzip tar of ADDITIVE files into the target worker's workspace via
-        `POST /workspace/sync/push` (T6). Atlas builds the arcnames as
-        `incoming/<run_id>/<node_key>/…`, so a push can never clobber the worker's own files;
-        Atlas never sends any replace/trash option. Bounded by `deadline` (a `time.monotonic()`
-        value) with a bounded 409-`workspace busy` retry. The ACK body is read bounded. Same
-        sync-auth caveat as `sync_export` — only call on a `tunnel`/`forward_auth` worker."""
-        return self._call_with_409_retry(
-            lambda: self._sync_push_once(tar_bytes, deadline=deadline, max_ack_bytes=max_ack_bytes),
-            deadline=deadline,
-            retry_max=retry_409_max,
-            retry_delay=retry_409_delay,
+        """Place input files into the target workspace via Bearer-authenticated
+        `POST /v1/inputs` (T9b handoff): body `{workspace_dir?, files: [{path,
+        content_base64}]}`, ack `{written: [{path, size, sha256}]}`. ONE attempt, no retry of
+        any kind (409s included): upstream writes files one at a time with NO transaction or
+        idempotency key, so the caller must pre-validate the batch (caps, the `inputs/`
+        destination jail) and treat ANY failure — including an ambiguous one — as edge-fail,
+        with residue confined to its unique, undispatched prefix. The ack read is bounded in
+        bytes and by `deadline` (a `time.monotonic()` value); a non-JSON/non-object ack raises
+        because written[] cannot be verified from it."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ThClawsError("input push exceeded its deadline")
+        payload: dict[str, Any] = {"files": files}
+        if workspace_dir:
+            payload["workspace_dir"] = workspace_dir
+        response = self._request(
+            "POST", "/v1/inputs", payload=payload, timeout=min(self.timeout, remaining), deadline=deadline
         )
+        try:
+            body = _read_bounded(response, max_ack_bytes, deadline).decode("utf-8", errors="replace")
+        finally:
+            response.close()
+        try:
+            ack = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise ThClawsError("input acknowledgment is not JSON") from exc
+        if not isinstance(ack, dict):
+            raise ThClawsError("input acknowledgment is not an object")
+        return ack
 
     def _call_with_409_retry(self, once: Any, *, deadline: float, retry_max: int, retry_delay: float) -> Any:
-        # 409 = the worker is mid-turn; sync collection/push follows stream termination so it
+        # 409 = the worker is mid-turn; sync collection follows stream termination so it
         # clears quickly. Retry a bounded number of times, but only while enough of the deadline
         # remains for both the delay and a subsequent attempt. Any other error, or a persistent
-        # 409, propagates to the caller. Shared by sync_export and sync_push (one source).
+        # 409, propagates to the caller. (T9b's /v1/inputs deliberately does NOT use this:
+        # inputs are not busy-gated and must never be retried — no idempotency key upstream.)
         attempts_left = max(0, retry_max)
         while True:
             try:
@@ -245,30 +262,6 @@ class ThClawsClient:
             return _read_bounded(response, max_bytes, deadline)
         finally:
             response.close()
-
-    def _sync_push_once(self, tar_bytes: bytes, *, deadline: float, max_ack_bytes: int) -> dict[str, Any]:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise ThClawsError("sync push exceeded its deadline")
-        response = self._request(
-            "POST",
-            "/workspace/sync/push",
-            timeout=min(self.timeout, remaining),
-            raw_body=tar_bytes,
-            content_type="application/gzip",
-            deadline=deadline,
-        )
-        try:
-            body = _read_bounded(response, max_ack_bytes, deadline).decode("utf-8", errors="replace")
-        finally:
-            response.close()
-        if not body.strip():
-            return {}
-        try:
-            ack = json.loads(body)
-        except json.JSONDecodeError:
-            return {}  # a non-JSON 2xx ack is fine — the status already means accepted
-        return ack if isinstance(ack, dict) else {}
 
     def run_agent_stream(
         self,

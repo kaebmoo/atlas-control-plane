@@ -36,6 +36,11 @@ JOB_EXECUTION_MODES = {"stream", "callback"}
 # T9a caps must never exceed the pinned thClaws Job Artifact limits.
 UPSTREAM_ARTIFACT_MAX_FILES = 256
 UPSTREAM_ARTIFACT_MAX_BYTES = 300 * 1024 * 1024
+# T9b input-placement caps, pinned to thClaws POST /v1/inputs (api_v1/artifacts.rs
+# MAX_INPUT_FILES / MAX_INPUT_TOTAL_BYTES; its 96 MiB JSON body limit is implied by the
+# 64 MiB decoded cap plus base64 overhead on Atlas-shaped batches).
+UPSTREAM_INPUT_MAX_FILES = 100
+UPSTREAM_INPUT_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_SYNC_MAX_FILES = 200
 
 
