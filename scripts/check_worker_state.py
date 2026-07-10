@@ -310,6 +310,7 @@ def main() -> None:
             check_enable_probe(runtime, base_url, base_url_mock, tokens)
             check_dashboard(runtime)
         finally:
+            runtime.close()  # stop the reaper daemon before the tempdir exits
             server.shutdown()
             mock.shutdown()
 

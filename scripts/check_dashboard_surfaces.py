@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Dashboard-surface gate for the T1/T3/T5/T6 features on the web UI.
+"""Dashboard-surface gate for the T1/T3/T9a/T6 features on the web UI.
 
 Hermetic: reads the static frontend files directly (no server, no DB) and asserts the markers
 + wiring that surface, on the dashboard, features the earlier milestones added only to the API:
 
   T1a/T1b — the Usage view shows token totals and the estimated (non-billable) cost.
   T3      — the Start-a-Job form can opt a job into async (execution: "callback").
-  T5      — the Start-a-Job form can request collect_files.
+  T9a     — the Start-a-Job form can request Job Artifact collect_files on stream/callback.
   T6      — the visual builder can set policy.file_handoff (default-OFF) and edge push_files,
             and the run timeline shows files_pushed detail (count/bytes/target).
 
@@ -44,13 +44,14 @@ need('$("#usageTokens").textContent' in JS, "loadUsage does not render #usageTok
 need("totals.tokens_prompt" in JS and "totals.tokens_output" in JS, "loadUsage ignores token totals")
 need('$("#usageEstCost").textContent' in JS and "totals.estimated_cost_usd" in JS, "loadUsage ignores estimated_cost_usd")
 
-# --- T3/T5: Start-a-Job form gains execution + collect_files ------------------------------
+# --- T3/T9a: Start-a-Job form gains execution + collect_files ------------------------------
 need('id="collectFilesInput"' in HTML, "job form missing #collectFilesInput")
 need('id="jobExecutionCallback"' in HTML, "job form missing #jobExecutionCallback toggle")
 need("payload.collect_files = collectFiles" in JS, "submitJob does not send collect_files")
 need('payload.execution = "callback"' in JS, "submitJob does not send execution: callback")
-# collect_files + callback is a server 400 — guard it client-side with a clear message.
-need("asyncCallback && collectFiles.length" in JS, "submitJob must guard collect_files + callback client-side")
+# T9a explicitly supports collection on callback jobs; the dashboard must not reject the
+# combination client-side.
+need("asyncCallback && collectFiles.length" not in JS, "submitJob must allow collect_files + callback")
 # the async toggle must reset after submit, or the next job silently inherits callback mode.
 need('$("#jobExecutionCallback").checked = false' in JS, "submitJob must reset the async toggle after submit")
 
@@ -74,7 +75,7 @@ need("payload.count" in JS and "payload.bytes" in JS and "payload.target_worker_
 need("state.workflowEvents.slice(-14)" in JS, "run timeline must show the most recent events, not the first 14")
 need("state.workflowEvents.slice(0, 14)" not in JS, "run timeline still slices the FIRST 14 events")
 
-# --- T5 gap: a standalone job's collected files are downloadable in the Jobs view ---------
+# --- T9a gap: a standalone job's collected files are downloadable in the Jobs view ---------
 need('data-job-tab="files"' in HTML, "Jobs view missing the Files tab")
 need('id="jobArtifactDownloads"' in HTML, "Jobs view missing #jobArtifactDownloads pane")
 need("async function loadJobArtifacts(" in JS, "loadJobArtifacts not defined")

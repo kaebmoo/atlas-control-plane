@@ -5,17 +5,17 @@ does not use yet. Written for execution by a coding agent (Claude Code), one
 milestone per PR, following the conventions in `AGENTS.md` and the milestone
 format of `docs/plans/workflow-engine-coding-plan.md`.
 
-Survey source: thClaws source at v0.85.0 commit `e481015` (2026-07-03),
-`crates/core/src/api_v1/` + `crates/core/src/server.rs`. Revised after five
-independent review rounds (2026-07-03); validated findings are folded in
-below — see "Review deltas" at the end for what changed and why.
+Survey source: thClaws v0.85.0 commit `e481015` (the original survey), then
+v0.88.0 tag `66a80bb` (Job Artifacts) and local `main` `bf1d6bb` (2026-07-10,
+also containing v0.89.0). The implementation source is
+`crates/core/src/api_v1/{agent,artifacts}.rs` and `api_v1/mod.rs`.
 
-Execution scope: **T0 → T1a → T2 → T3 are done and merged.** **T1b, T4, and
-T5/T6 are approved to implement now** — T5/T6 over the `tunnel` / `forward_auth`
-deployment shapes the T0 gate already sanctions (see "Sync deployment-shape
-strategy"), which need nothing from upstream. **T7 and T8's chat-completions
-half stay deferred** — T7 on operational demand, T8 Part B on a benchmark — each
-keeping its explicit unblock so the design survives.
+Execution scope: **T0 → T6 are done and merged.** T5/T6 deliberately used the
+then-available `/workspace/sync/*` path behind `tunnel` / `forward_auth`.
+thClaws v0.88.0 now ships the stronger Job Artifact contract, so the next work
+is **T9a → T9b: replace Atlas's sync-based file path with Job Artifacts**.
+T7 and T8's chat-completions half remain deferred — T7 on operational demand,
+T8 Part B on a benchmark.
 
 ## Objectives
 
@@ -48,12 +48,12 @@ keeping its explicit unblock so the design survives.
    is daemon-scoped (skills discovered from the daemon environment, not per
    `workspace_dir`), model lists are a catalogue (not a credential check), and
    `busy` is a racy process-wide snapshot.
-5. **Move real files between workers.** Use `POST /workspace/sync/export`
-   (selective path list — NOT `GET /sync/pull`, which tars the whole
-   workspace) to collect job outputs, and `POST /workspace/sync/push` (gated)
-   to hand real files to the next worker. This removes the single biggest
-   quality ceiling on Coder→Reviewer / Reporter→Anchor chains, which today
-   pass only `assistant_text` into the next prompt.
+5. **Move real files between workers through Job Artifacts.** Declare output
+   globs in `POST /agent/run` as `collect_files`; thClaws freezes matching
+   files with SHA-256 at terminal completion. Atlas reads the Bearer-authenticated
+   manifest and individual snapshots, then sends selected files to the next
+   worker through Bearer-authenticated `POST /v1/inputs`. This removes the
+   Coder→Reviewer / Reporter→Anchor ceiling without requiring a sync tunnel.
 6. **Provision workers centrally.** `POST /v1/deploy/manifest|files` +
    `POST /v1/restart` (Bearer-authed) so an admin pushes a `.thclaws/` bundle
    from Atlas instead of editing each machine — with real provenance, not
@@ -73,7 +73,7 @@ keeping its explicit unblock so the design survives.
 | Structured events | Operators see what tools/skills ran, what was denied, where time went — per job and per run | Operators, auditors |
 | Async x_callback | Long workflows survive Atlas restarts and dropped streams; fixes the `x_callback` type defect before any call site exists | Workflow authors, operators |
 | Advisory state | Fewer jobs behind a busy worker; worker UI deep-link; explainable decisions ("busy", "skill hint") | Operators |
-| File transfer | Multi-agent workflows exchange real deliverables (code trees, reports, datasets) with SHA-256 verification | Workflow authors, end users |
+| Job Artifact transfer | Multi-agent workflows exchange immutable, per-job deliverables (code trees, reports, datasets) with SHA-256 verification and no tunnel prerequisite | Workflow authors, end users |
 | Central deploy | One audited dashboard action replaces N× ssh; fleet-wide config consistency | Admins |
 | Model validation | Model names validated against the worker instead of typed blind; chat-completions deferred pending benchmark | Workflow authors |
 
@@ -103,7 +103,37 @@ keeping its explicit unblock so the design survives.
   `api-reference-en.md` + `api-reference-th.md` (EN/TH parity).
 - Dashboard gate-marker substrings preserved.
 
-## Hard gate on the sync surface (applies to T5–T6)
+## Job Artifact contract (v0.88.0; required by T9)
+
+Job Artifacts is the supported control-plane file contract:
+
+| Operation | thClaws contract | Atlas use |
+|---|---|---|
+| Declare outputs | `POST /agent/run` with `collect_files: [glob, ...]` | Forward each job/node's collection patterns when dispatching, on both SSE and `x_callback` execution. |
+| Read manifest | `GET /v1/sessions/{sid}/artifacts?workspace_dir=...` | Fetch the frozen manifest after successful completion; validate its schema, paths, counts, sizes, and SHA-256 values. |
+| Read bytes | `GET /v1/sessions/{sid}/artifacts/{aid}?workspace_dir=...` | Download only a manifest member, under a byte/deadline cap; require exact length and SHA-256 match before storing it. |
+| Place inputs | `POST /v1/inputs` with `{workspace_dir?, files:[{path,content_base64}]}` | Place selected file artifacts under a fresh `inputs/incoming/<run>/<node>/` prefix before dispatching the downstream worker. |
+
+All four endpoints use the existing `THCLAWS_API_TOKEN` Bearer policy. The
+artifact snapshot is copied and hashed at worker completion; it is not a view
+of the mutable live workspace. This eliminates the old export race and means
+Atlas must **not** implement another tar format or use `sync/export|push` for
+ordinary orchestration.
+
+Pinned upstream limits are: output snapshots at 256 files / 300 MiB per run;
+input requests at 100 files / 64 MiB decoded (96 MiB JSON-body ceiling).
+Atlas must enforce no larger limit before sending a request. `collect_files`
+uses thClaws globset syntax, not an Atlas-side filename list. An empty manifest
+or non-empty upstream `skipped[]` is a visible, failure-isolated collection
+outcome — never silently treated as a complete requested set.
+
+The session id returned by `/agent/run` is the Job Artifact id. On SSE it is
+the initial `session` event; on `x_callback` it is in the 202 ACK. Atlas
+already persists this as `jobs.thclaws_session_id`, so no new job-id column is
+needed. The worker/workspace that created it remains the lookup scope; Atlas
+must always pass the resolved `workspace_dir` where one was used for dispatch.
+
+## Legacy sync gate (T4 only after T9)
 
 `/workspace/sync/*` does **not** use the `/v1/*` Bearer auth (`AuthOk`). Per
 `server.rs`, sync shares `/upload`'s auth surface: cloud-ingress ForwardAuth
@@ -124,13 +154,14 @@ Bearer auth to sync (tracked under "External confirmations"), a new
 to "use anyway".
 
 Also verified: `sync/manifest|export|pull|push|trash` return **409 Conflict
-while an agent turn is active** (`workspace busy`). Collectors must treat 409 as
-retryable-after-terminal, not an error.
+while an agent turn is active** (`workspace busy`). This remains relevant only
+to T4's advisory `stat` probe and any explicitly operator-managed legacy sync
+use; T9 does not use these routes.
 
 `/v1/deploy*`, `/v1/restart`, `/v1/models`, `/v1/chat/completions`, and
 `/agent/run` all use the same Bearer auth — no such gate needed.
 
-## Sync deployment-shape strategy (T5/T6 adoption path)
+## Legacy sync deployment-shape strategy (historical T5/T6 path)
 
 `/workspace/sync/{export,push,manifest,pull}` already exist in stock thClaws;
 only their **auth** is open (see the hard gate above). T5/T6 are therefore gated
@@ -193,20 +224,24 @@ T0  (worker contract spike; no core code)          — done (#24)
 T1a (token capture + doc fix)                      — done (#16)
 T2  (structured events UI)                         — done (#18)
 T3  (async x_callback)                             — done (#20, #26)
-T1b (cost estimate w/ pricing snapshot) — needs T1a
-T4  (advisory state + info surface)— needs T0 (sync_mode) for the stat probe
-T5  (file collect via sync/export) — tunnel/forward_auth; T0 gate satisfied, no upstream dep
-T6  (file push handoff)            — needs T5; same tunnel/forward_auth gate
+T1b (cost estimate w/ pricing snapshot)            — done
+T4  (advisory state + info surface)                — done; sync_mode remains for stat only
+T5  (file collect via sync/export)                 — done; superseded by T9a
+T6  (file push handoff via sync/push)              — done; superseded by T9b
+T9a (collect frozen Job Artifacts)                 — done (requires thClaws >= 0.88.0)
+T9b (handoff through /v1/inputs)                   — requires T9a
 
 DEFERRED (design recorded; each has an explicit unblock)
 T7  (worker bundle deploy)         — unblock: operational demand; Bearer /v1/*
 T8  (chat-completions surface)     — unblock: benchmark proves value
 ```
 
-Recommended execution: T0 → T1a → T2 → T3 (done), then T1b and T4, then
-T5 → T6 over tunnel/forward_auth. T1a–T3 were pure-value and independent of the
-sync auth question; T5/T6 adopt the tunnel shape the T0 gate already sanctions,
-so they no longer wait on upstream.
+Recommended execution: implement **T9a first**, then **T9b**. T9a replaces
+the collection transport and establishes the validated local `file_ref` set;
+T9b reuses that set for inputs. Do not carry compatibility fallback to
+`sync/export|push` in the job/workflow path: it would preserve the tunnel
+dependency and multiply test states. `sync_mode` stays only for T4's optional
+busy signal.
 
 ---
 
@@ -839,6 +874,141 @@ Checks:
 
 ---
 
+## Milestone T9a (DONE): Collect frozen Job Artifacts
+
+Goal: replace T5's sync-export/tar collection with thClaws Job Artifacts on
+workers running v0.88.0 or newer. Each existing collect_files value becomes a
+thClaws glob declaration on agent/run. After terminal completion but before
+Atlas writes succeeded, Atlas uses the job's persisted thclaws_session_id to
+read the immutable manifest and each selected snapshot.
+
+This preserves the pre-terminal barrier and existing file_ref artifact shape,
+so workflow ordering, downloads, dashboard rendering, and the later handoff
+selection model remain stable. It removes the sync_mode collection gate,
+409-busy retry, tar extraction, and tunnel prerequisite.
+
+Design decisions:
+
+- No fallback: a worker below 0.88.0 or without a conforming Artifact API
+  records files.collection_failed with a compatibility reason; never fall back
+  to workspace sync. A job without collect_files makes no artifact request.
+- Forward collect_files on both stream and x_callback calls. The stream's
+  session event and the async 202 ACK already populate thclaws_session_id; use
+  that exact id plus the resolved workspace_dir for all artifact requests.
+- Treat the manifest as untrusted metadata. Before download, validate unique
+  nonempty ids/paths, the existing relative-path jail, integer size, lowercase
+  64-hex SHA-256, aggregate Atlas and upstream limits, and skipped[] — which is
+  OPTIONAL on the wire: thClaws serde-omits the key when nothing was skipped
+  (the normal case), so absent means empty while a present non-list is still
+  rejected. A malformed or truncated manifest publishes no partial file_ref set.
+- Download a manifest member only under byte and wall-clock caps. Require its
+  x-sha256 header, actual length, and locally calculated SHA-256 to match the
+  manifest before opaque-store staging and the existing all-or-nothing DB write.
+- ThClaws owns glob matching. Atlas validates only bounded, obviously safe
+  pattern strings; it does not reimplement glob expansion. Empty non-skipped
+  manifests are valid zero-file collections; nonempty skipped[] is an explicit,
+  failure-isolated partial collection outcome.
+- Callback success needs a pre-terminal collection phase. Do not put a blocking
+  worker request inside T3's terminal DB transaction. Claim, collect outside
+  the transaction, then atomically terminalize; duplicate callback and reaper
+  races must retain exactly one terminal state and one published file set.
+- **Serialize continued sessions through collection.** thClaws calls the
+  session id a job id, but Atlas can intentionally reuse that id through
+  session_bindings. A later turn on the same worker/workspace/session can
+  overwrite that session's upstream artifact snapshot before Atlas has copied
+  it. Preserve conversation continuity and the freeze guarantee by taking a
+  durable, crash-recoverable lease for a bound session from dispatch until
+  collection/terminalization completes; a second job using that binding waits
+  rather than interleaving. Do not solve this by silently dropping session
+  continuation or by using an in-memory-only lock.
+
+Files:
+
+- atlas/thclaws_client.py: artifact manifest/file methods and collect_files in
+  both agent-run payloads; remove sync-export use.
+- atlas/jobs.py: pattern validation/forwarding and one collector shared by
+  stream and callback success.
+- atlas/sync_files.py (or a narrowly renamed module): retain the shared
+  relative-path and opaque-store helpers; remove tar handling after its callers
+  are gone.
+- atlas/workflows.py, scripts/check_job_artifacts.py, scripts/gate.sh, worker
+  contract, threat model, OpenAPI, EN/TH reference docs, and PROGRESS.md.
+
+Checks:
+
+- Mock v0.88 worker proves forwarding, correct session/workspace lookup, and
+  frozen bytes even when the live workspace changes after completion.
+- Reject unsafe or duplicate manifest entries, caps, skipped[], bad header/body
+  hashes, size mismatches, and short/oversized reads without rows or blobs.
+- Stream and callback collections publish before succeeded; callback duplicate
+  and reaper races retain T3's one-terminal-state guarantee.
+- Two jobs sharing a continued thClaws session cannot interleave a later run
+  with the first job's artifact collection; cancellation, worker failure, and
+  restart release/recover the durable lease without admitting a second turn
+  early.
+- No collection means no Artifact API request; an old worker never triggers a
+  sync fallback.
+- Mutations: remove forwarding, skip local SHA validation, publish one good
+  member from a bad set, and terminalize callback success before collection.
+
+Close-out: implemented against thClaws `bf1d6bb` (v0.89.0 tree, including the
+v0.88.0 Job Artifact API); hermetic stream/callback/lease checks are in
+`scripts/check_job_artifacts.py` and run from `scripts/gate.sh`. T9b input
+handoff remains deliberately unimplemented. A post-close-out bug hunt
+(2026-07-10, Round 8 below) fixed a wire-shape rejection every real worker
+would have hit (`skipped` absent) plus two lease/inflight enforcement gaps;
+the reaper-vs-collector race is now mutation-locked in the same check
+(`lease_loser_cleanup`).
+
+---
+
+## Milestone T9b (PLANNED): Handoff through Bearer-authenticated inputs
+
+Goal: replace T6's sync-push tar handoff with POST /v1/inputs. Before creating
+a downstream workflow-node job, Atlas converts selected, already-verified
+file_ref artifacts to base64 entries and writes them below the fresh target
+prefix inputs/incoming/<run_id>/<node_key>/. The downstream {files_dir}
+substitution points to that prefix.
+
+Design decisions:
+
+- Keep policy.file_handoff plus edge push_files as save-time and runtime guards.
+- Do not use sync_mode, workspace sync, tar, or 409 retries. The normal worker
+  Bearer token authenticates the input call.
+- Revalidate upload-store containment and source relpaths, then prefix every
+  destination under inputs/incoming/<run>/<node>/. Never accept a caller-supplied
+  destination or a .git/.thclaws path.
+- Respect thClaws's smaller input limit in one request: at most 100 files and
+  64 MiB decoded (96 MiB JSON body). Do not batch: the upstream API offers no
+  transaction/idempotency key. Any failure or ambiguous POST prevents downstream
+  dispatch; any residue is confined to the unique, undispatched prefix.
+- Require a written[] acknowledgment for every path with matching path, size,
+  and SHA-256 before auditing success or creating the downstream job. Do not
+  blindly retry an ambiguous input write.
+
+Files:
+
+- atlas/thclaws_client.py: bounded post_inputs method and response parsing.
+- atlas/workflows.py: replace tar build/sync push with input preparation,
+  acknowledgment validation, and the existing policy/runtime guards.
+- atlas/sync_files.py: delete build_push_tar after its final caller is gone.
+- scripts/check_file_handoff.py, scripts/gate.sh, worker contract, threat
+  model, EN/TH API docs, and PROGRESS.md.
+
+Checks:
+
+- Two mock workers prove A's frozen bytes arrive at B's exact
+  inputs/incoming/... files and {files_dir}; no sync request occurs.
+- Policy guards, unsafe/out-of-store sources, >100 files, >64 MiB, malformed
+  acknowledgments, hash/size/path mismatch, and transport failure all prevent
+  downstream dispatch and false-success audits.
+- sync_mode=disabled no longer blocks an Artifact-capable handoff; mocks assert
+  sync push/trash and tar content types are never used.
+- Mutations: remove runtime policy guard, omit acknowledgment hash validation,
+  drop the inputs prefix, and permit a second input batch.
+
+---
+
 ## Milestone T7 (DEFERRED): Worker bundle deploy (fleet provisioning)
 
 Goal: admin pushes a `.thclaws/` bundle (skills, MCP config, AGENTS.md,
@@ -966,8 +1136,8 @@ Part B — chat-completions for builder previews (benchmark-gated):
   mutation-tested (break the code → gate goes red, recorded in the PR).
 - openapi.yaml + api-reference EN + TH updated for any `/api/*` change.
 - `docs/specs/threat-model.md` updated per new trust boundary
-  (T3: inbound callback; T5: worker-supplied tar; T6: Atlas writes to
-  workers; T7: bundle deploy).
+  (T3: inbound callback; T9a: worker manifest/snapshot bytes; T9b: Atlas
+  writes jailed inputs to workers; T7: bundle deploy).
 - `PROGRESS.md` gains one close-out row per milestone.
 - No worker token or model key in logs, DB values (beyond existing
   `workers.token`), or API responses.
@@ -976,15 +1146,16 @@ Part B — chat-completions for builder previews (benchmark-gated):
 
 | Risk | Milestone | Mitigation |
 |---|---|---|
-| Sync endpoints unauthenticated on network binds | T4–T6 | hard gate: persistent `workers.sync_mode` enum requires an approved deployment shape (T0); default `disabled`; upstream Bearer ask filed |
+| Sync endpoints unauthenticated on network binds | T4 / legacy only | hard gate: persistent `workers.sync_mode` enum requires an approved deployment shape; T9 file paths do not call sync |
 | Callback endpoint as new inbound attack surface | T3 | pre-auth carve-out is dedicated + minimal: body cap before read, HMAC verify, system actor, idempotent apply, replay = no-op, reaper, threat-model entry |
 | Thinking/user text polluting handoff prompts | T2 | `extract_text` scoped to assistant-text events; regression checks |
 | Tool payload secrets persisted to SQLite | T2 | structural metadata only (`id`,`name`,`status`,bytes,sha256) — no payloads or previews stored; DB byte-scan check; truncation-is-not-redaction acknowledged |
-| Hostile/oversized tar from a compromised worker | T5 | strict member filter, byte+count caps, opaque-id store writes only |
-| Destructive write to a target workspace | T6 | additive-only under `incoming/<run_id>/`, no trash/replace ever, per-workflow opt-in + runtime guard |
+| Malformed manifest or changed artifact bytes | T9a | validate manifest schema/path/caps; require header, size, and local SHA-256 match before all-or-nothing opaque-store publication |
+| Continued session overwrites a prior snapshot | T9a | durable per worker/workspace/session lease covers dispatch through collection/terminalization; recover/release on cancel, failure, and restart |
+| Partial or destructive target input write | T9b | one ≤100-file/64-MiB request, unique `inputs/incoming/<run>/<node>/` prefix, verified acknowledgment, no downstream dispatch on failure |
 | Bundle deploy as a malware vector | T7 | named publisher keys (`key_id`, 0600 sidecar), admin-only RBAC, allowlisted entries, dry-run, full audit |
 | "Rollback" implying file removal it can't do | T7 | verified merge semantics; feature named "re-deploy previous bundle"; replace/prune mode filed upstream |
-| Collection racing downstream handoff | T5 | pre-terminal barrier: collection resolves before `succeeded` is written; deadline-bounded |
+| Collection racing downstream handoff | T9a | pre-terminal barrier: collection resolves before `succeeded` is written; deadline-bounded in stream and callback modes |
 | Token metering misread as billing change | T1a/T1b | `byok_token_counts_billable` untouched; cost labeled `estimate: true` |
 | Stale pricing silently repricing history | T1b | pricing snapshot persisted per event at record time; summaries never read the live cache |
 | Routing regressions from advisory signals | T4 | tie-break-only weighting + fixture-stability assertions |
@@ -1120,16 +1291,61 @@ Part B — chat-completions for builder previews (benchmark-gated):
    division of labor, so Atlas never becomes a tunnel manager and the
    stdlib-only invariant holds.
 
+### Round 7 (2026-07-10), upstream Job Artifact adoption
+
+1. **T5/T6 are superseded as file transports, not erased as history.**
+   thClaws v0.88.0 adds Bearer-authenticated, session-scoped output snapshots
+   and input placement. T9a/T9b replace the already-shipped sync/tar path
+   without changing Atlas's opt-in workflow model or file_ref presentation.
+2. **The new contract has two correctness edges that sync did not solve.**
+   T9a validates the manifest and independently verifies downloaded snapshot
+   bytes; T9b is limited to one upstream input request because inputs have no
+   transaction or idempotency key. Both rules are mutation-test requirements.
+3. **Callback collection is deliberately explicit.** The existing T3 callback
+   terminal transaction cannot contain a network fetch. T9a therefore plans a
+   pre-terminal collection phase with its own duplicate/reaper race checks,
+   rather than silently keeping callback jobs unsupported.
+
+### Round 8 (2026-07-10), post-T9a hardening, verified against source
+
+1. **The validator rejected every real manifest.** thClaws's `ArtifactManifest`
+   declares `skipped` with serde `default, skip_serializing_if = "Vec::is_empty"`
+   (`crates/core/src/api_v1/artifacts.rs`), so the key is ABSENT whenever nothing
+   was skipped — the normal case. Atlas read `manifest.get("skipped")` and
+   required a list, so a real worker's happy path always raised
+   `files.collection_failed`; every gate mock sent `"skipped": []`, which is why
+   the gate stayed green. Fixed with `manifest.get("skipped", [])` (a present
+   non-list still fails); the happy-path mocks in `check_job_artifacts.py` and
+   `check_file_handoff.py` now OMIT the key so the real wire shape is
+   regression-locked, and a `skipped-non-list` case pins the type gate.
+2. **The migration-012 lease invariant was not actually enforced.**
+   `claim_session_lease`'s terminal-owner backstop deleted leases without
+   checking `collection_inflight`, bypassing within one poll tick the guard
+   `apply_job_terminal_result` deliberately leaves in place while a collector is
+   mid-download; and the LOSING side of a terminal race (apply returning None)
+   cleared neither its inflight flag nor its lease — the unguarded backstop was
+   silently doing that job. Fixed as a pair plus a crash backstop: the backstop
+   now requires `collection_inflight = 0`; the losing collector clears the flag
+   and releases the lease itself (callback and stream paths); an apply WRITE
+   failure drops only the flag, keeping the lease so the worker's retry
+   re-collects the un-mutated snapshot; and startup
+   (`clear_stale_collection_inflight` in `reconcile_jobs`) clears every stale
+   flag — no collector thread survives a restart — so the stronger guard cannot
+   wedge a session's waiters after a crash mid-collection. New
+   `lease_loser_cleanup` check: the guard holds mid-download (a waiter must not
+   dispatch) and the loser's handshake un-blocks a real continuation; both
+   halves and the skipped fix are mutation-proven red.
+3. **Minor hardening.** The lease wait backs off 50 ms → 1 s (each claim runs
+   the global terminal-lease DELETE, and a callback job can hold its lease for
+   hours); the 5-minute manifest clock-skew tolerance is now
+   `ATLAS_ARTIFACT_CLOCK_SKEW_SECONDS` (default unchanged).
+
 ## External confirmations outstanding
 
-- thClaws: Bearer auth on `/workspace/sync/*`
-  ([discussion #178](https://github.com/thClaws/thClaws/discussions/178)) — **Tier 2** of the sync
-  deployment-shape strategy: opportunistic, **not blocking**. T5/T6 ship now
-  over tunnel/ForwardAuth (Tier 1); Bearer only removes the tunnel requirement
-  for network-reachable workers. **Tier 3 fallback** if upstream stalls and a
-  non-tunnel shape is genuinely needed: Atlas keeps a minimal thClaws patch
-  (`THCLAWS_SYNC_REQUIRE_AUTH=1`, the artifact-idea Tier-1 change) on a tracked
-  fork and submits it upstream — never on the T5/T6 critical path.
+- thClaws: Job Artifacts and Bearer-gated sync shipped in v0.88.0. T9 adopts
+  Job Artifacts; it does not require THCLAWS_SYNC_REQUIRE_AUTH or a tunnel.
+  The optional sync flag remains useful only to deployments that independently
+  choose whole-workspace mirroring.
 - thClaws: `GET /v1/capabilities?workspace_dir=…` (workspace-scoped skills;
   [discussion #179](https://github.com/thClaws/thClaws/discussions/179)).
 - thClaws: protocol/schema version field in `/v1/agent/info`

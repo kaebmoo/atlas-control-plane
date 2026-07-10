@@ -215,6 +215,7 @@ def main() -> None:
             bad = request_error(base_url, "POST", f"/api/workflows/{workflow_id}/validate", status=404)
             assert bad["error"] == "not found"
         finally:
+            runtime.close()  # stop the reaper daemon before the tempdir exits
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)

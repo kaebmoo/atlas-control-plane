@@ -7,6 +7,7 @@ import socket
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Iterator
@@ -278,6 +279,7 @@ class ThClawsClient:
         model: str | None = None,
         session_id: str | None = None,
         max_tokens: int | None = None,
+        collect_files: list[str] | None = None,
         stream_deadline: float | None = None,
         max_total_bytes: int | None = None,
     ) -> Iterator[SseEvent]:
@@ -288,6 +290,7 @@ class ThClawsClient:
             model=model,
             session_id=session_id,
             max_tokens=max_tokens,
+            collect_files=collect_files,
         )
         payload["stream"] = True
         # Bound the OPEN phase (connect + status line + headers) by the SAME stream_deadline,
@@ -314,6 +317,7 @@ class ThClawsClient:
         model: str | None = None,
         session_id: str | None = None,
         max_tokens: int | None = None,
+        collect_files: list[str] | None = None,
     ) -> dict[str, Any]:
         """Fire-and-forget dispatch via thClaws's `x_callback` extension. The envelope is an
         OBJECT — {url, api_key, run_id} (idempotency_key defaults to run_id upstream, and Atlas
@@ -328,6 +332,7 @@ class ThClawsClient:
             model=model,
             session_id=session_id,
             max_tokens=max_tokens,
+            collect_files=collect_files,
         )
         payload["x_callback"] = {"url": callback_url, "api_key": callback_api_key, "run_id": run_id}
         # Cap the socket timeout at the ACK read deadline: a single blocking read otherwise
@@ -396,6 +401,7 @@ class ThClawsClient:
         model: str | None,
         session_id: str | None,
         max_tokens: int | None,
+        collect_files: list[str] | None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"prompt": prompt}
         if workspace_dir:
@@ -408,7 +414,51 @@ class ThClawsClient:
             payload["session_id"] = session_id
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        if collect_files:
+            # These are thClaws globset patterns, deliberately forwarded verbatim. Atlas only
+            # validates their bounded, workspace-relative shape at job submission.
+            payload["collect_files"] = collect_files
         return payload
+
+    def artifact_manifest(self, session_id: str, workspace_dir: str | None, *, deadline: float, max_bytes: int) -> Any:
+        """Read a frozen Job Artifact manifest under the caller's collection deadline."""
+        path = self._artifact_path(session_id, None, workspace_dir)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ThClawsError("artifact manifest read exceeded its deadline")
+        response = self._request("GET", path, timeout=min(self.timeout, remaining), deadline=deadline)
+        try:
+            body = _read_bounded(response, max_bytes, deadline).decode("utf-8", errors="replace")
+        finally:
+            response.close()
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise ThClawsError("Invalid Job Artifact manifest") from exc
+
+    def artifact_bytes(
+        self, session_id: str, artifact_id: str, workspace_dir: str | None, *, deadline: float, max_bytes: int
+    ) -> tuple[bytes, str | None]:
+        """Read one frozen artifact and its required integrity header, bounded before storage."""
+        path = self._artifact_path(session_id, artifact_id, workspace_dir)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ThClawsError("artifact download exceeded its deadline")
+        response = self._request("GET", path, timeout=min(self.timeout, remaining), deadline=deadline)
+        try:
+            header = response.headers.get("x-sha256")
+            return _read_bounded(response, max_bytes, deadline), header
+        finally:
+            response.close()
+
+    @staticmethod
+    def _artifact_path(session_id: str, artifact_id: str | None, workspace_dir: str | None) -> str:
+        path = f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/artifacts"
+        if artifact_id is not None:
+            path += f"/{urllib.parse.quote(artifact_id, safe='')}"
+        if workspace_dir:
+            path += "?" + urllib.parse.urlencode({"workspace_dir": workspace_dir})
+        return path
 
 
 # x_callback ACK bounds: the ACK is ~200 bytes of JSON, so 64 KiB is ample headroom, and the

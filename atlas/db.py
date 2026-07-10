@@ -590,10 +590,36 @@ def _migration_009_worker_sync_mode(conn: sqlite3.Connection) -> None:
 
 
 def _migration_010_job_collect_files(conn: sqlite3.Connection) -> None:
-    # T5 selective file collection: the explicit path list a job collects from its worker via
-    # POST /workspace/sync/export once its stream terminates. JSON array text; NULL/absent = no
-    # collection (zero behavior change, no sync call). A new column so legacy rows read as NULL.
+    # T9a Job Artifact glob patterns a job forwards to its worker. JSON array text; NULL/absent
+    # = no collection (zero worker Artifact API calls). A new column so legacy rows read as NULL.
     _add_missing_columns(conn, "jobs", {"collect_files": "TEXT"})
+
+
+def _migration_011_session_leases(conn: sqlite3.Connection) -> None:
+    # T9a: a continued thClaws session has one mutable upstream artifact snapshot. Keep a
+    # durable owner from dispatch through terminal publication so a later turn cannot replace
+    # it before Atlas downloads it. workspace_scope is '' only for the valid no-workspace scope
+    # (SQLite UNIQUE treats NULL as distinct, which would defeat this lease).
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS session_leases (
+          worker_id TEXT NOT NULL,
+          workspace_scope TEXT NOT NULL,
+          thclaws_session_id TEXT NOT NULL,
+          job_id TEXT NOT NULL UNIQUE,
+          acquired_at TEXT NOT NULL,
+          PRIMARY KEY(worker_id, workspace_scope, thclaws_session_id),
+          FOREIGN KEY(worker_id) REFERENCES workers(id) ON DELETE CASCADE,
+          FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+
+def _migration_012_collection_inflight(conn: sqlite3.Connection) -> None:
+    # T9a: a callback collector may be downloading while the deadline reaper wins the
+    # terminal race. Keep the durable session lease until that collector clears this flag.
+    _add_missing_columns(conn, "jobs", {"collection_inflight": "INTEGER NOT NULL DEFAULT 0"})
 
 
 # Ordered, append-only migration steps. A step is either a SQL string (run via
@@ -614,6 +640,8 @@ MIGRATIONS: list[str | Any] = [
     _migration_008_non_terminal_jobs_index,
     _migration_009_worker_sync_mode,
     _migration_010_job_collect_files,
+    _migration_011_session_leases,
+    _migration_012_collection_inflight,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -2268,6 +2296,54 @@ class Database:
             )
         self.audit("session.bind", "conversation", conversation_id, {"worker_id": worker_id, "workspace_id": workspace_id})
 
+    def claim_session_lease(self, worker_id: str, workspace_id: str | None, session_id: str, job_id: str) -> bool:
+        """Claim a continued-session's mutable upstream scope, or report its current owner.
+
+        Terminal owners are reaped here as a crash-recovery backstop: a crash after a terminal
+        commit cannot leave a stale row blocking a later continuation. Live owners are never
+        stolen; startup reconciliation owns turning orphaned jobs terminal. A terminal owner
+        whose pre-terminal collector is still inflight keeps its lease (same collection_inflight
+        guard as apply_job_terminal_result's release): reaping it would let this waiter dispatch
+        and mutate the session snapshot mid-download. The losing collector clears the flag and
+        releases the lease itself; startup clears any flag no thread survives to clear.
+        """
+        scope = workspace_id or ""
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                "DELETE FROM session_leases WHERE job_id IN "
+                "(SELECT id FROM jobs WHERE state IN ('succeeded', 'failed', 'cancelled')"
+                " AND collection_inflight = 0)"
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO session_leases(worker_id, workspace_scope, thclaws_session_id, job_id, acquired_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (worker_id, scope, session_id, job_id, now_iso()),
+            )
+            row = conn.execute(
+                "SELECT job_id FROM session_leases WHERE worker_id = ? AND workspace_scope = ? AND thclaws_session_id = ?",
+                (worker_id, scope, session_id),
+            ).fetchone()
+        return bool(row and row["job_id"] == job_id)
+
+    def release_session_lease(self, job_id: str) -> None:
+        with self._lock, self.connect() as conn:
+            conn.execute("DELETE FROM session_leases WHERE job_id = ?", (job_id,))
+
+    def clear_stale_collection_inflight(self) -> None:
+        """No collector thread survives a restart, so every collection_inflight=1 is stale.
+        Clearing them at startup lets claim_session_lease's backstop reap terminal owners'
+        leases again — the inflight guard protects LIVE collectors only; left set, a flag
+        orphaned by a crash mid-collection would wedge the session's waiters forever."""
+        with self._lock, self.connect() as conn:
+            conn.execute("UPDATE jobs SET collection_inflight = 0 WHERE collection_inflight = 1")
+
+    def set_collection_inflight(self, job_id: str, active: bool) -> None:
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                "UPDATE jobs SET collection_inflight = ?, updated_at = ? WHERE id = ?",
+                (1 if active else 0, now_iso(), job_id),
+            )
+
     def create_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         job_id = payload.get("id") or new_id("job")
         now = now_iso()
@@ -2367,6 +2443,8 @@ class Database:
         state_reason: str | None = None,
         audit_details: dict[str, Any] | None = None,
         usage_payload: dict[str, Any] | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
+        collection_complete: bool = False,
     ) -> str | None:
         """Atomically transition a non-terminal job to a terminal state AND persist everything
         derived from that result — assistant text, job events, the audit row, the usage ledger
@@ -2381,6 +2459,10 @@ class Database:
         atomically wins as 'cancelled' (NULL error) — callers must use the RETURNED state."""
         if state not in {"succeeded", "failed", "cancelled"}:
             raise ValueError(f"apply_job_terminal_result requires a terminal state, got: {state}")
+        # Validate every row before the terminal transaction. The caller owns any staged blobs
+        # until this method returns succeeded; a validation/transaction failure therefore leaves
+        # no published file_ref rows and lets it reclaim all blobs.
+        artifact_rows = [self._artifact_row(payload) for payload in artifacts or []]
         now = finished_at or now_iso()
         actor = _AUDIT_ACTOR.get()
         with self._lock, self.connect() as conn:
@@ -2388,9 +2470,10 @@ class Database:
                 "UPDATE jobs SET "
                 "state = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE ? END, "
                 "error = CASE WHEN cancel_requested = 1 THEN NULL ELSE ? END, "
+                "collection_inflight = CASE WHEN ? = 1 THEN 0 ELSE collection_inflight END, "
                 "finished_at = ?, updated_at = ? "
                 "WHERE id = ? AND state NOT IN ('succeeded', 'failed', 'cancelled')",
-                (state, error, now, now, job_id),
+                (state, error, 1 if collection_complete else 0, now, now, job_id),
             )
             if not cursor.rowcount:
                 return None
@@ -2407,6 +2490,15 @@ class Database:
                 audit_details = None
             elif final != "failed":
                 error = None
+            if final == "succeeded" and artifact_rows:
+                conn.executemany(self._ARTIFACT_INSERT, artifact_rows)
+                conn.executemany(
+                    self._AUDIT_INSERT,
+                    [
+                        self._audit_values("artifact.create", "artifact", row[0], {"run_id": row[1], "key": row[3]})
+                        for row in artifact_rows
+                    ],
+                )
             seq_row = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM job_events WHERE job_id = ?", (job_id,)
             ).fetchone()
@@ -2452,6 +2544,14 @@ class Database:
                         merged["run_id"] = context["run_id"]
                         merged["node_key"] = context["node_key"]
                 self._insert_usage_event(conn, merged)
+            # Releasing inside this transaction is the session-snapshot barrier: a continued
+            # job cannot dispatch until the current job's artifact rows and terminal state are
+            # committed together.
+            conn.execute(
+                "DELETE FROM session_leases WHERE job_id = ? AND NOT EXISTS "
+                "(SELECT 1 FROM jobs WHERE id = ? AND collection_inflight = 1)",
+                (job_id, job_id),
+            )
         return final
 
     def list_due_callback_jobs(self, now: str) -> list[dict[str, Any]]:

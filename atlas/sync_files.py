@@ -1,5 +1,6 @@
-"""Shared, safe-by-construction handling of worker-supplied files moved over the thClaws
-`/workspace/sync/*` surface (T5 collection, T6 handoff). A worker is only semi-trusted: a
+"""Shared, safe-by-construction handling of files moved over the thClaws
+`/workspace/sync/*` surface (legacy T6 handoff only). T9a Job Artifacts do not use this
+transport. A worker is only semi-trusted: a
 compromised or buggy one can hand Atlas a hostile gzip tar (path traversal, symlink escape,
 device nodes, or a decompression bomb). Every ingestion path MUST go through
 `safe_extract_tar` — it is the single validator, so the caps and member filter can never be

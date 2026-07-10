@@ -49,7 +49,7 @@
         "collect_files": {
           "type": "array",
           "items": {"type": "string"},
-          "description": "T5: relative paths to collect from the worker via sync/export after the stream ends"
+          "description": "T9a: bounded relative glob patterns forwarded to thClaws Job Artifacts"
         }
       }
     },
@@ -78,7 +78,7 @@
         "collect_files": {
           "type": "array",
           "items": {"type": "string"},
-          "description": "T5: relative paths to collect from the worker via sync/export after the stream ends"
+          "description": "T9a: bounded relative glob patterns forwarded to thClaws Job Artifacts"
         }
       }
     },

@@ -187,6 +187,7 @@ def main() -> None:
                 else:
                     raise AssertionError("CLI must exit non-zero when a retention unlink fails")
         finally:
+            runtime.close()  # stop the reaper daemon before the tempdir exits
             server.shutdown()
 
     print("observability check ok")

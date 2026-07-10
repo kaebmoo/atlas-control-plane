@@ -136,6 +136,12 @@ class AtlasRuntime:
         # server startup for as long as their retry loops take.
         threading.Thread(target=self.outbound.reconcile, name="atlas-outbound-reconcile", daemon=True).start()
 
+    def close(self) -> None:
+        """Stop this runtime's perpetual background threads (today: the callback reaper).
+        Checks MUST call this before their TemporaryDirectory exits — a reaper sweep firing
+        mid-rmtree re-creates the SQLite file and fails teardown ("Directory not empty")."""
+        self.jobs.stop_callback_reaper()
+
 
 class AtlasHttpServer(ThreadingHTTPServer):
     daemon_threads = True

@@ -1256,7 +1256,7 @@ async function downloadArtifact(artifactId, filename) {
   URL.revokeObjectURL(url);
 }
 
-// T5: a job's collected files (file_ref artifacts keyed to the job). Standalone jobs have
+// T9a: a job's frozen Job Artifacts (file_ref artifacts keyed to the job). Standalone jobs have
 // run_id NULL so they never show in the Monitor run-artifact list — surface them per job here.
 // downloadArtifact uses the passed filename for the saved name, so pass the artifact's relpath.
 async function loadJobArtifacts(jobId) {
@@ -1395,15 +1395,9 @@ async function submitJob() {
     workspace_id: $("#workspaceSelect").value || undefined,
     model: $("#modelInput").value.trim() || undefined,
   };
-  // T5: optional collect_files (relative paths, comma-separated); T3: opt-in async callback.
+  // T9a: optional Job Artifact glob patterns; T3: opt-in async callback.
   const collectFiles = $("#collectFilesInput").value.split(",").map((path) => path.trim()).filter(Boolean);
   const asyncCallback = $("#jobExecutionCallback").checked;
-  // The server rejects this combination (the collection barrier is on the stream path); catch it
-  // client-side with a clear message instead of a round-trip to a 400.
-  if (asyncCallback && collectFiles.length) {
-    toast("Collect files ใช้ร่วมกับ Async (callback) ไม่ได้");
-    return;
-  }
   if (collectFiles.length) payload.collect_files = collectFiles;
   if (asyncCallback) payload.execution = "callback";
   if ($("#handoffEnabled").checked) {

@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .db import Database, now_iso, resolve_in_store
-from .jobs import CALLBACK_RETRY_ENVELOPE_SECONDS, JOB_EXECUTION_MODES, _validate_collect_files, sync_max_files_cap
+from .jobs import CALLBACK_RETRY_ENVELOPE_SECONDS, JOB_EXECUTION_MODES, _validate_collect_files, artifact_max_files_cap
 from .outbound import OutboundService, resolve_outbound_target
 from .router import Router
 from .sync_files import SyncFileError, _reject_unsafe_path, build_push_tar
@@ -197,13 +197,9 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
             # the same cap source as the job submit path), so a bad list is a save-time error,
             # not a run-time surprise.
             try:
-                _validate_collect_files(node["collect_files"], sync_max_files_cap())
+                _validate_collect_files(node["collect_files"], artifact_max_files_cap())
             except ValueError as exc:
                 raise ValueError(f"workflow node {node_id} {exc}") from exc
-            if node.get("collect_files") and node.get("execution") == "callback":
-                # Mirrors the submit-path rejection; without this cross-check the graph would
-                # save cleanly and then fail at submit on every run.
-                raise ValueError(f"workflow node {node_id} collect_files is not supported with execution 'callback'")
 
     start = graph.get("start")
     if not isinstance(start, str) or not start.strip():

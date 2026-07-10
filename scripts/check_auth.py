@@ -193,6 +193,7 @@ def main() -> None:
             assert _raw_status(f"{base_url}/api/me?token={admin_token}") == 401, "query token must be rejected on /api/me"
             assert _raw_status(f"{base_url}/api/jobs/{term_job['id']}/events?after=0&token={admin_token}") == 200, "query token must work for SSE events"
         finally:
+            runtime.close()  # stop the reaper daemon before the tempdir exits
             server.shutdown()
             server.server_close()
             server_thread.join(timeout=2)

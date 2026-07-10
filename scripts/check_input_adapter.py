@@ -252,6 +252,7 @@ def main() -> None:
             # Only the 3 valid attempts started a run; every invalid envelope above created none.
             assert len(runtime.db.list_workflow_runs(limit=1000)) == run_count_before + 3
         finally:
+            runtime.close()  # stop the reaper daemon before the tempdir exits
             server.shutdown()
             server.server_close()
             server_thread.join(timeout=2)

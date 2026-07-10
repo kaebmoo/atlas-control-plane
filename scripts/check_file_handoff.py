@@ -1,5 +1,5 @@
 """T6 — file handoff (push to the next worker). Hermetic checks with TWO mock thClaws workers:
-a collector (A) whose export supplies files, and a consumer (B) whose /workspace/sync/push
+a collector (A) whose Job Artifact snapshot supplies files, and a consumer (B) whose /workspace/sync/push
 captures the pushed tar. Covers the end-to-end push, the {files_dir} prompt substitution, the
 additive `incoming/<run_id>/<node_key>/` layout, the policy.file_handoff opt-in (save-time
 validator AND runtime guard), push-failure fails the edge, and trash/replace never called.
@@ -79,22 +79,39 @@ class _Base(BaseHTTPRequestHandler):
 
 
 class WorkerA(_Base):
-    """Collector: its export supplies A_FILE as out.md."""
+    """Collector: its frozen Job Artifact supplies A_FILE as out.md."""
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
         _ = self.rfile.read(length) if length else b""
         if self.path == "/agent/run":
-            self._stream_ok()
-        elif self.path == "/workspace/sync/export":
-            tar = _gzip_tar([("out.md", A_FILE)])
             self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/gzip")
-            self.send_header("Content-Length", str(len(tar)))
+            self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
-            self.wfile.write(tar)
+            self.wfile.write(b'event: session\ndata: {"id":"sess-a"}\n\n')
+            self.wfile.write(b'event: text\ndata: {"text": "ok"}\n\n')
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_GET(self) -> None:
+        import hashlib
+
+        if self.path.startswith("/v1/sessions/sess-a/artifacts/"):
+            body = A_FILE
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("x-sha256", hashlib.sha256(body).hexdigest())
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/v1/sessions/sess-a/artifacts"):
+            # No `skipped` key: real thClaws omits it when empty (serde skip_serializing_if).
+            self._json({"session_id": "sess-a", "collected_at": "2099-01-01T00:00:00Z", "patterns": ["out.md"], "artifacts": [{"id": "a1", "path": "out.md", "size": len(A_FILE), "sha256": hashlib.sha256(A_FILE).hexdigest()}]})
+            return
+        super().do_GET()
 
 
 class WorkerB(_Base):
@@ -202,16 +219,11 @@ def check_validation_no_policy(a_id: str, b_id: str) -> None:
         raise AssertionError("non-boolean file_handoff must be rejected")
     except ValueError:
         pass
-    # collect_files + execution:"callback" is a submit-time rejection; the save-time
-    # cross-check must catch it too, or the graph saves cleanly and fails on every run
-    # (mutation: drop the cross-check in validate_workflow_graph -> no raise -> red).
+    # T9a supports collection on callback jobs; graph validation must preserve that
+    # combination rather than retaining T5's old rejection.
     graph = _graph(a_id, b_id)
     graph["nodes"][0]["execution"] = "callback"
-    try:
-        validate_workflow_graph(graph, {"file_handoff": True, "allowed_worker_ids": [a_id, b_id]})
-        raise AssertionError("collect_files with execution 'callback' must be rejected at save time")
-    except ValueError as exc:
-        assert "callback" in str(exc), exc
+    validate_workflow_graph(graph, {"file_handoff": True, "allowed_worker_ids": [a_id, b_id]})
     print("  save-time validation: push_files requires policy.file_handoff OK")
 
 
@@ -459,6 +471,7 @@ def main() -> None:
             check_deadline_precedes_submit(runtime, worker_a["id"], worker_b["id"])
             check_artifact_iteration_unbounded(runtime)
         finally:
+            runtime.close()  # stop the reaper daemon before the tempdir exits
             server_a.shutdown()
             server_b.shutdown()
 
