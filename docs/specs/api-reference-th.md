@@ -505,6 +505,9 @@ opt-in ต่อ workflow:
   ที่ตรงทั้ง path/ขนาด/SHA-256 ของทุกไฟล์ก่อนบันทึก audit `files.pushed` และก่อนสร้าง
   job ปลายทาง ความล้มเหลวใดๆ (transport หรือ ack) จะทำให้ edge ล้มชัดเจน ไม่ใช้
   workspace sync, tar, หรือ `sync_mode` แล้ว: handoff ทำงานได้แม้ worker ปิด sync
+- การส่งไฟล์ใช้ deadline เดียวกับการเก็บไฟล์ (`ATLAS_COLLECT_DEADLINE_SECONDS`
+  ค่าเริ่มต้น 120 วินาที) batch ใกล้เพดาน (หลายสิบ MiB) บนลิงก์ช้าอาจไม่พอ —
+  ปรับ env นี้ได้ deadline ครอบทั้ง request รวมถึงการอ่าน ack
 
 ### Validate, Explain, Repair
 

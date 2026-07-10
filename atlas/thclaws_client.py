@@ -66,17 +66,13 @@ class ThClawsClient:
         path: str,
         payload: Any = None,
         timeout: float | None = None,
-        raw_body: bytes | None = None,
-        content_type: str | None = None,
         deadline: float | None = None,
     ) -> urllib.response.addinfourl:
+        # JSON-only by construction: the raw-body path died with T6's push tar, so a non-JSON
+        # upload can no longer be assembled through this client at all.
         body = None
         headers = {"Accept": "application/json"}
-        if raw_body is not None:
-            # Raw bytes (a T6 push tar), not JSON — the caller owns the content type.
-            body = raw_body
-            headers["Content-Type"] = content_type or "application/octet-stream"
-        elif payload is not None:
+        if payload is not None:
             body = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
         if self.token:
@@ -165,34 +161,11 @@ class ThClawsClient:
             raise ThClawsError("Invalid sync stat from /workspace/sync/stat")
         return payload
 
-    def sync_export(
-        self,
-        paths: list[str],
-        *,
-        deadline: float,
-        max_bytes: int,
-        retry_409_max: int = 4,
-        retry_409_delay: float = 0.5,
-    ) -> bytes:
-        """Collect an EXPLICIT path list from the worker via `POST /workspace/sync/export`
-        (JSON path array in, gzip tar of just those paths out). Returns the raw tar bytes,
-        bounded in BOTH size (`max_bytes`) and wall-clock (`deadline`, a `time.monotonic()`
-        value) — a semi-trusted worker must not be able to pin the collection thread or exhaust
-        memory. NOT `/sync/pull`, which tars the whole workspace.
-
-        Export returns 409 Conflict while an agent turn is active (`workspace busy`). Collection
-        runs AFTER the worker stream terminates, so contention is transient — retry a bounded
-        number of times with a fixed delay, but never past `deadline`. Any other error (or a
-        persistent 409) propagates as a ThClawsError for the caller's failure isolation.
-
-        Like `sync_stat`, `/workspace/sync/*` is NOT Bearer-protected: only call this on a worker
-        whose operator-asserted `sync_mode` is an approved shape (docs/specs/thclaws-worker-contract.md)."""
-        return self._call_with_409_retry(
-            lambda: self._sync_export_once(paths, deadline=deadline, max_bytes=max_bytes),
-            deadline=deadline,
-            retry_max=retry_409_max,
-            retry_delay=retry_409_delay,
-        )
+    # sync_export / sync_push (the T5/T6 legacy sync data transports, with their bounded
+    # 409-busy retry) were DELETED with their last callers: T9a collects via the Bearer
+    # Job Artifact routes and T9b hands off via POST /v1/inputs. The threat model's "Atlas
+    # never calls /workspace/sync/{export,push}" is now enforced by construction — only the
+    # advisory sync_stat probe (T4) remains on the sync surface.
 
     def post_inputs(
         self,
@@ -231,37 +204,6 @@ class ThClawsClient:
         if not isinstance(ack, dict):
             raise ThClawsError("input acknowledgment is not an object")
         return ack
-
-    def _call_with_409_retry(self, once: Any, *, deadline: float, retry_max: int, retry_delay: float) -> Any:
-        # 409 = the worker is mid-turn; sync collection follows stream termination so it
-        # clears quickly. Retry a bounded number of times, but only while enough of the deadline
-        # remains for both the delay and a subsequent attempt. Any other error, or a persistent
-        # 409, propagates to the caller. (T9b's /v1/inputs deliberately does NOT use this:
-        # inputs are not busy-gated and must never be retried — no idempotency key upstream.)
-        attempts_left = max(0, retry_max)
-        while True:
-            try:
-                return once()
-            except ThClawsError as exc:
-                if exc.http_status == 409 and attempts_left > 0 and (deadline - time.monotonic()) > retry_delay:
-                    attempts_left -= 1
-                    time.sleep(retry_delay)
-                    continue
-                raise
-
-    def _sync_export_once(self, paths: list[str], *, deadline: float, max_bytes: int) -> bytes:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise ThClawsError("sync export exceeded its deadline")
-        # deadline covers the OPEN phase too — a header-dripping worker must not be able to
-        # hold the collection barrier past its deadline (the body read below shares it).
-        response = self._request(
-            "POST", "/workspace/sync/export", payload=list(paths), timeout=min(self.timeout, remaining), deadline=deadline
-        )
-        try:
-            return _read_bounded(response, max_bytes, deadline)
-        finally:
-            response.close()
 
     def run_agent_stream(
         self,

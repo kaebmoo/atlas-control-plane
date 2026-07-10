@@ -526,6 +526,10 @@ text. Opt-in per workflow:
   transport or acknowledgment failure fails the edge loudly. Workspace sync,
   tar, and `sync_mode` are not used: a handoff works on a sync-`disabled`
   worker.
+- The handoff shares the collection deadline (`ATLAS_COLLECT_DEADLINE_SECONDS`,
+  default 120 s). A near-cap batch (tens of MiB) over a slow link can need
+  more — raise the env var; the deadline bounds the whole request including
+  the acknowledgment read.
 
 ### Validate, Explain, and Repair
 

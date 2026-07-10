@@ -48,7 +48,7 @@ python3 scripts/check_observability.py  # cross-cutting: metrics, audit export, 
 python3 scripts/check_permit_poc.py     # permit PoC: operator dashboard escapes untrusted fields
 python3 scripts/check_async_jobs.py     # T3: x_callback async jobs — pre-auth carve-out, HMAC token, reaper, races
 python3 scripts/check_job_artifacts.py    # T9a: frozen Job Artifacts — validation, callback barrier, session lease
-python3 scripts/check_file_handoff.py   # T6: sync/push file handoff — two workers, policy gate, additive, push failure
-python3 scripts/check_dashboard_surfaces.py  # T1/T3/T5/T6 web surfaces: usage tokens+cost, job collect/async, builder handoff
+python3 scripts/check_file_handoff.py   # T9b: /v1/inputs file handoff — two workers, policy gate, ack validation, caps
+python3 scripts/check_dashboard_surfaces.py  # T1/T3/T9a/T9b web surfaces: usage tokens+cost, job collect/async, builder handoff
 
 echo "=== completion gate GREEN ==="

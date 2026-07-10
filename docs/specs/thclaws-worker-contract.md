@@ -100,8 +100,11 @@ Consumers apply the gate as follows:
 `GET /workspace/sync/stat` returns a process-wide `busy` snapshot. It is advisory
 and may race dispatch. `pull`, `push`, `manifest`, `export`, and `trash` return
 `409 Conflict` with `workspace busy (active turn)` while an agent turn is active.
-Atlas treats this `409` as retryable only under the bounded, post-stream policies
-defined by T5/T6.
+This matters only to T4's advisory `stat` probe and operator-managed legacy sync
+use: Atlas no longer calls any sync data route (T9a collects via the Bearer Job
+Artifact routes, T9b hands off via `POST /v1/inputs` — neither is busy-gated,
+and the client's sync export/push methods were deleted with their callers), so
+Atlas retries no `409` anywhere on this surface.
 
 ## Job Artifacts (v0.88.0+)
 
