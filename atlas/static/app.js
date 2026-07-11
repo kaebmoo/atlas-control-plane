@@ -21,6 +21,10 @@ const state = {
   workflowEvents: [],
   workflowTriggerEvents: [],
   workerSuggestions: [],
+  deliveries: [],
+  packs: [],
+  users: [],
+  apiTokens: [],
   eventSource: null,
   auditFilter: "all",
   workflowEditorDirty: false,
@@ -42,7 +46,14 @@ async function api(path, options = {}) {
   if (!headers.has("Content-Type") && options.body) headers.set("Content-Type", "application/json");
   const token = localStorage.getItem("atlasApiToken");
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(path, { ...options, headers });
+  let response;
+  try {
+    response = await fetch(path, { ...options, headers });
+  } catch (error) {
+    setHealth(false);  // transport failure — the control plane is actually unreachable
+    throw error;
+  }
+  setHealth(true);  // any HTTP response (even 4xx/5xx) means the server is up
   const text = await response.text();
   let data = {};
   if (text) {
@@ -125,7 +136,7 @@ function setDirty(value) {
   reflectEditorDirty();
 }
 
-const VIEWS = ["overview", "command", "workflows", "monitor", "jobs", "audit", "usage", "fleet"];
+const VIEWS = ["overview", "command", "workflows", "monitor", "jobs", "audit", "usage", "fleet", "accounts"];
 const VIEW_META = {
   overview:  ["ภาพรวม", "Overview", "สรุปสถานะฟลีตและงานล่าสุด"],
   command:   ["สั่งงาน", "Command", "ส่งงานไปยัง thClaws worker ที่เหมาะสมโดยอัตโนมัติ"],
@@ -135,10 +146,21 @@ const VIEW_META = {
   fleet:     ["ฟลีต", "Fleet", "จัดการ worker และ workspace"],
   audit:     ["ตรวจสอบ", "Audit", "30 การกระทำล่าสุดบน control plane"],
   usage:     ["การใช้งาน", "Usage", "Workflow run, งาน และ budget units ต่อช่วงเวลา"],
+  accounts:  ["บัญชี", "Accounts", "จัดการผู้ใช้ บทบาท และ API token"],
+};
+
+// Role-gated views: one table drives showView's navigation guard AND applyRoleGate's
+// nav visibility/kick-out, so a hash deep-link can never reach a view the nav hides.
+const VIEW_ROLES = {
+  audit: ["admin", "auditor"],
+  usage: ["admin", "auditor"],
+  accounts: ["admin"],
 };
 
 function showView(view) {
   if (!VIEWS.includes(view)) view = "overview";
+  const allowedRoles = VIEW_ROLES[view];
+  if (allowedRoles && state.currentUser && !allowedRoles.includes(state.currentUser.role)) view = "overview";
   for (const section of document.querySelectorAll(".view")) {
     section.classList.toggle("is-active", section.dataset.view === view);
   }
@@ -152,7 +174,18 @@ function showView(view) {
   $("#pageTitleEn").textContent = meta[1];
   $("#pageSub").textContent = meta[2];
   if (view === "workflows") requestAnimationFrame(() => wfApplyScale());
+  // Per-view data loaders live here — the single navigation entry point — not in each
+  // nav/hash/link handler. Skipped pre-auth; the boot .then re-runs them once signed in.
+  if (state.currentUser) {
+    if (view === "usage") loadUsage().catch(() => undefined);
+    if (view === "accounts") loadAccounts().catch((error) => toast(error.message));
+  }
   try { localStorage.setItem("atlasView", view); } catch { /* private mode */ }
+  // Deep-linkable views: keep the URL hash in sync so refresh/back/share land on the same view.
+  if (location.hash.slice(1) !== view) {
+    if (location.hash) location.hash = view;
+    else history.replaceState(null, "", `#${view}`);  // boot: no phantom history entry for Back
+  }
 }
 
 function setNavBadge(name, count) {
@@ -293,6 +326,9 @@ function addBuilderNode() {
     if (role) node.role = role;
     const outputs = $("#builderNodeOutputsInput").value.split(",").map((value) => value.trim()).filter(Boolean);
     if (outputs.length) node.outputs = outputs;
+    // T9a: per-node file collection (thClaws owns glob matching).
+    const collectFiles = $("#builderNodeCollectFilesInput").value.split(",").map((value) => value.trim()).filter(Boolean);
+    if (collectFiles.length) node.collect_files = collectFiles;
   }
   if (["worker", "manager"].includes(type) && Number.isInteger(budgetUnits) && budgetUnits > 0) node.budget_units = budgetUnits;
   graph.nodes = [...(graph.nodes || []), node];
@@ -357,7 +393,8 @@ async function loadAll() {
   state.currentUser = me.user;
   hideLogin();
   const canReadAudit = ["admin", "auditor"].includes(state.currentUser?.role);
-  const [workers, workspaces, conversations, jobs, workflows, workflowTemplates, workflowRuns, workflowTriggers, approvals, audit] = await Promise.all([
+  const canReadDeliveries = ["admin", "operator", "auditor"].includes(state.currentUser?.role);
+  const [workers, workspaces, conversations, jobs, workflows, workflowTemplates, workflowRuns, workflowTriggers, approvals, audit, deliveries] = await Promise.all([
     api("/api/workers"),
     api("/api/workspaces"),
     api("/api/conversations"),
@@ -368,6 +405,7 @@ async function loadAll() {
     api("/api/workflow-triggers"),
     api("/api/approvals?state=pending"),
     canReadAudit ? api("/api/audit?limit=30") : Promise.resolve({ audit: [] }),
+    canReadDeliveries ? api("/api/deliveries?limit=20").catch(() => ({ deliveries: [] })) : Promise.resolve({ deliveries: [] }),
   ]);
   state.workers = workers.workers || [];
   state.workspaces = workspaces.workspaces || [];
@@ -379,6 +417,7 @@ async function loadAll() {
   state.workflowTriggers = workflowTriggers.triggers || [];
   state.approvals = approvals.approvals || [];
   state.audit = audit.audit || [];
+  state.deliveries = deliveries.deliveries || [];
   if (state.selectedWorkflowRunId && state.workflowRuns.some((run) => run.id === state.selectedWorkflowRunId)) {
     await loadWorkflowRunDetail(state.selectedWorkflowRunId);
   }
@@ -405,6 +444,7 @@ function render() {
   renderJobs();
   renderWorkflows();
   renderAudit();
+  renderDeliveries();
   updateComposerRoutePreview();
   reflectEditorDirty();
   renderIdentity();
@@ -457,14 +497,19 @@ function applyRoleGate() {
     const node = $(selector);
     if (node) node.disabled = !admin;
   }
-  const auditNav = document.querySelector('.nav-item[data-view="audit"]');
-  if (auditNav) auditNav.hidden = !["admin", "auditor"].includes(role);
-  const usageNav = document.querySelector('.nav-item[data-view="usage"]');
-  if (usageNav) usageNav.hidden = !["admin", "auditor"].includes(role);
+  for (const [view, roles] of Object.entries(VIEW_ROLES)) {
+    const navItem = document.querySelector(`.nav-item[data-view="${view}"]`);
+    if (!navItem) continue;
+    navItem.hidden = !roles.includes(role);
+    if (navItem.hidden && document.querySelector(`#view-${view}.is-active`)) showView("overview");
+  }
+  const deliveriesPanel = document.getElementById("deliveriesPanel");
+  if (deliveriesPanel) deliveriesPanel.hidden = !["admin", "operator", "auditor"].includes(role);
+  const importPackBtn = document.getElementById("importPackBtn");
+  if (importPackBtn) importPackBtn.disabled = !operator;
+  for (const node of document.querySelectorAll(".retry-delivery")) node.disabled = !operator;
   for (const node of document.querySelectorAll(".edit-worker, .delete-worker, .edit-workspace, .delete-workspace, .sync-mode-select")) node.disabled = !admin;
   for (const node of document.querySelectorAll(".poll-worker, .approve-approval, .reject-approval, .choose-approval, .fire-trigger, .toggle-trigger, .delete-trigger, .apply-worker-suggestion")) node.disabled = !operator;
-  if (auditNav?.hidden && document.querySelector("#view-audit.is-active")) showView("overview");
-  if (usageNav?.hidden && document.querySelector("#view-usage.is-active")) showView("overview");
 }
 
 async function login(event) {
@@ -477,6 +522,7 @@ async function login(event) {
   localStorage.setItem("atlasApiToken", data.token);
   form.elements.password.value = "";
   await loadAll();
+  loadPacks().catch(() => undefined);  // packs sit outside loadAll; boot's load ran pre-auth
 }
 
 async function signOut() {
@@ -824,11 +870,46 @@ function wfLayout(graph) {
   const ids = nodes.map((node) => node.id);
   const idset = new Set(ids);
   const edges = (graph.edges || []).filter((edge) => edge && idset.has(edge.from) && idset.has(edge.to));
-  // Longest-path layering; cap iterations at node count so cycles (manager loops) terminate.
+  // Cycles (manager/correction loops) blow up longest-path layering — each relaxation round
+  // pushes the loop one column deeper until the canvas is thousands of px wide and the fit
+  // scale bottoms out. Classify back-edges via DFS first, lay out only the forward DAG, and
+  // let the renderer draw back-edges as return curves under the graph.
+  const startId = (graph.start && idset.has(graph.start)) ? graph.start : ids[0];
+  const adjacency = {};
+  for (const edge of edges) (adjacency[edge.from] ||= []).push(edge);
+  const back = new Set();
+  const seen = new Set();
+  // Iterative DFS (explicit stack): a pasted multi-thousand-node chain must render slow,
+  // never blow the call stack and take the whole render loop down with it.
+  const visit = (root) => {
+    const stack = [{ id: root, index: 0 }];
+    const onstack = new Set([root]);
+    seen.add(root);
+    while (stack.length) {
+      const frame = stack[stack.length - 1];
+      const outgoing = adjacency[frame.id] || [];
+      if (frame.index >= outgoing.length) {
+        onstack.delete(frame.id);
+        stack.pop();
+        continue;
+      }
+      const edge = outgoing[frame.index++];
+      if (onstack.has(edge.to)) back.add(edge);
+      else if (!seen.has(edge.to)) {
+        seen.add(edge.to);
+        onstack.add(edge.to);
+        stack.push({ id: edge.to, index: 0 });
+      }
+    }
+  };
+  if (startId) visit(startId);
+  for (const id of ids) if (!seen.has(id)) visit(id);
+  // Longest-path layering over the forward edges only; cap iterations as a safety net.
   const depth = Object.fromEntries(ids.map((id) => [id, 0]));
   for (let k = 0; k < nodes.length; k++) {
     let changed = false;
     for (const edge of edges) {
+      if (back.has(edge)) continue;
       if (depth[edge.to] < depth[edge.from] + 1) { depth[edge.to] = depth[edge.from] + 1; changed = true; }
     }
     if (!changed) break;
@@ -848,10 +929,9 @@ function wfLayout(graph) {
     colIds.forEach((id, row) => { place[id] = { x: colX(c), y: y0 + row * (WF_NODE_H + WF_ROW_GAP), w: WF_NODE_W, h: WF_NODE_H }; });
   }
   const width = colX(maxCol) + WF_NODE_W + WF_PAD;
-  const height = totalH + WF_PAD * 2;
-  const startId = (graph.start && idset.has(graph.start)) ? graph.start : ids[0];
+  const height = totalH + WF_PAD * 2 + (back.size ? 26 : 0);
   const start = startId ? { x: WF_PAD, y: (height - 40) / 2, w: WF_START_W, h: 40, to: startId } : null;
-  return { nodes, edges, place, width, height, start };
+  return { nodes, edges, place, width, height, start, back };
 }
 
 function renderWorkflowGraph() {
@@ -874,7 +954,11 @@ function renderWorkflowGraph() {
   const segments = [];
   if (layout.start) {
     const target = layout.place[layout.start.to];
-    if (target) segments.push({ sx: layout.start.x + layout.start.w, sy: layout.start.y + layout.start.h / 2, tx: target.x, ty: target.y + target.h / 2, color: "var(--nt-grey-300)", dash: "none", width: 1.8 });
+    if (target) {
+      const sx = layout.start.x + layout.start.w, sy = layout.start.y + layout.start.h / 2;
+      const tx = target.x, ty = target.y + target.h / 2;
+      segments.push({ d: edgePath(sx, sy, tx, ty), tx, ty, color: "var(--nt-grey-300)", dash: "none", width: 1.8 });
+    }
   }
   for (const edge of layout.edges) {
     const source = layout.place[edge.from];
@@ -882,15 +966,30 @@ function renderWorkflowGraph() {
     if (!source || !target) continue;
     const cond = edge.condition?.type || "always";
     const human = cond === "human_selected";
+    const isBack = layout.back.has(edge);
+    let d, tx, ty;
+    if (isBack) {
+      // Return edge (loop) — dip under the graph and come back into the target's bottom edge.
+      const sx = source.x + source.w / 2, sy = source.y + source.h;
+      tx = target.x + target.w / 2;
+      ty = target.y + target.h;
+      const dropY = layout.height - 10;
+      d = `M ${sx} ${sy} C ${sx} ${dropY}, ${tx} ${dropY}, ${tx} ${ty}`;
+    } else {
+      const sx = source.x + source.w, sy = source.y + source.h / 2;
+      tx = target.x;
+      ty = target.y + target.h / 2;
+      d = edgePath(sx, sy, tx, ty);
+    }
     segments.push({
-      sx: source.x + source.w, sy: source.y + source.h / 2, tx: target.x, ty: target.y + target.h / 2,
+      d, tx, ty,
       color: human ? "var(--nt-yellow-500)" : "var(--nt-grey-300)",
-      dash: cond.startsWith("artifact") ? "5 4" : "none",
+      dash: isBack ? "6 5" : (cond.startsWith("artifact") ? "5 4" : "none"),
       width: human ? 2.5 : 1.8,
     });
   }
   const svg = `<svg class="wf-edges" width="${layout.width}" height="${layout.height}" aria-hidden="true">${
-    segments.map((seg) => `<path d="${edgePath(seg.sx, seg.sy, seg.tx, seg.ty)}" fill="none" stroke="${seg.color}" stroke-width="${seg.width}" stroke-dasharray="${seg.dash}"/><circle cx="${seg.tx}" cy="${seg.ty}" r="4" fill="${seg.color}"/>`).join("")
+    segments.map((seg) => `<path d="${seg.d}" fill="none" stroke="${seg.color}" stroke-width="${seg.width}" stroke-dasharray="${seg.dash}"/><circle cx="${seg.tx}" cy="${seg.ty}" r="4" fill="${seg.color}"/>`).join("")
   }</svg>`;
 
   const tagFor = (type) => type === "human_gate" ? { cls: "gate", label: "human gate" }
@@ -962,6 +1061,7 @@ function renderWorkflowNodeInspector() {
     fields.push([node.type === "manager" ? "Manager" : "Worker", node.worker_id || (node.role ? `role=${node.role}` : "auto"), false]);
     if (node.prompt) fields.push(["Prompt", node.prompt, true]);
     if (node.outputs) fields.push(["Outputs", Array.isArray(node.outputs) ? node.outputs.join(", ") : node.outputs, false]);
+    if (node.collect_files) fields.push(["Collect files", Array.isArray(node.collect_files) ? node.collect_files.join(", ") : String(node.collect_files), true]);
     if (node.budget_units != null) fields.push(["Budget units", String(node.budget_units), false]);
     if (node.mode) fields.push(["Join mode", `${node.mode}${node.quorum ? ` · quorum ${node.quorum}` : ""}`, false]);
   }
@@ -1058,6 +1158,8 @@ function renderWorkflowRuns() {
   }
 
   const run = state.workflowRunDetail?.run;
+  // No selection → hide the skeleton progress/stat scaffolding instead of showing empty bars.
+  document.querySelector(".mon-detail")?.classList.toggle("is-empty", !run);
   const set = (id, fn) => { const node = document.getElementById(id); if (node) fn(node); };
   set("monRunName", (node) => { node.textContent = run ? run.name : "เลือก run จากรายการ"; });
   set("monRunChip", (node) => { node.hidden = !run; if (run) { node.className = `status ${statusClass(run.state)}`; node.textContent = run.state; } });
@@ -1383,18 +1485,12 @@ function renderUsageEvents(events) {
 }
 
 async function submitJob() {
-  const prompt = $("#promptInput").value.trim();
-  if (!prompt) {
+  // Same field set the route preview resolves against (composerPayload) — keep them in sync.
+  const payload = composerPayload();
+  if (!payload.prompt) {
     toast("Prompt is required");
     return;
   }
-  const payload = {
-    prompt,
-    conversation_id: $("#conversationSelect").value || undefined,
-    worker_id: $("#workerSelect").value || undefined,
-    workspace_id: $("#workspaceSelect").value || undefined,
-    model: $("#modelInput").value.trim() || undefined,
-  };
   // T9a: optional Job Artifact glob patterns; T3: opt-in async callback.
   const collectFiles = $("#collectFilesInput").value.split(",").map((path) => path.trim()).filter(Boolean);
   const asyncCallback = $("#jobExecutionCallback").checked;
@@ -1649,9 +1745,53 @@ function composerRouteText() {
   return "Auto route: online status, workspace key, company, tags, role";
 }
 
+function composerPayload() {
+  return {
+    prompt: $("#promptInput").value.trim(),
+    conversation_id: $("#conversationSelect").value || undefined,
+    worker_id: $("#workerSelect").value || undefined,
+    workspace_id: $("#workspaceSelect").value || undefined,
+    model: $("#modelInput").value.trim() || undefined,
+  };
+}
+
+let routePreviewTimer = null;
+let lastRouteKey = "";
+let lastRouteText = "";
 function updateComposerRoutePreview() {
-  if (state.selectedJobId) return;
-  $("#routePreview").textContent = composerRouteText();
+  const preview = $("#routePreview");
+  // Ask the real router (POST /api/routes/resolve, dry-run) so the preview shows the actual
+  // decision + reason, not a client-side guess. jobs.run roles only — viewers keep the guess.
+  if (!["admin", "operator"].includes(state.currentUser?.role) || !document.querySelector("#view-command.is-active")) {
+    preview.textContent = composerRouteText();
+    return;
+  }
+  const payload = composerPayload();
+  if (!payload.prompt) payload.prompt = "route preview";
+  // The key includes a fleet fingerprint: a worker changing status re-resolves, while the 5s
+  // poll with unchanged inputs+fleet neither re-POSTs nor flickers the resolved text away.
+  // Resolve failures are cached under the same key, so a down router is retried only when
+  // something actually changes — never once per poll.
+  const key = `${JSON.stringify(payload)}|${state.workers.map((worker) => worker.id + worker.status).join(",")}`;
+  if (key === lastRouteKey) {
+    preview.textContent = lastRouteText || composerRouteText();
+    return;
+  }
+  lastRouteKey = key;
+  preview.textContent = composerRouteText();  // instant fallback while the debounce resolves
+  clearTimeout(routePreviewTimer);
+  routePreviewTimer = setTimeout(async () => {
+    try {
+      const data = await api("/api/routes/resolve", { method: "POST", body: JSON.stringify(payload) });
+      if (key !== lastRouteKey) return;  // stale response
+      const workspaceKey = data.workspace?.workspace_key;
+      lastRouteText = `→ ${data.worker?.name || "?"}${workspaceKey ? ` · ${workspaceKey}` : ""} — ${data.reason || "router เลือกให้"}`;
+    } catch (error) {
+      if (key !== lastRouteKey) return;
+      lastRouteText = `${composerRouteText()} · router: ${error.message}`;
+    }
+    preview.textContent = lastRouteText;
+  }, 500);
 }
 
 async function saveWorker(event) {
@@ -2115,6 +2255,158 @@ async function deleteWorkspace(workspaceId) {
   await loadAll();
 }
 
+// ----- Health chip · Deliveries · Packs · Accounts (dashboard coverage of existing APIs) -----
+
+function setHealth(ok) {
+  const chip = document.getElementById("healthChip");
+  const text = document.getElementById("healthChipText");
+  if (!chip || !text) return;
+  chip.classList.toggle("err", !ok);
+  text.textContent = ok ? "ระบบทำงานปกติ" : "เชื่อมต่อไม่ได้";
+}
+
+function renderDeliveries() {
+  const list = document.getElementById("deliveryList");
+  if (!list) return;
+  if (!state.deliveries.length) {
+    list.innerHTML = '<div class="empty">ยังไม่มี delivery</div>';
+    return;
+  }
+  list.innerHTML = state.deliveries.map((delivery) => {
+    const chip = delivery.status === "delivered" ? "succeeded" : delivery.status === "pending" ? "queued" : "failed";
+    return `
+    <article class="workflow-run-item">
+      <div class="item-title">
+        <span class="mono">${escapeHtml(shortId(delivery.run_id))}</span>
+        <span class="status ${statusClass(chip)}">${escapeHtml(delivery.status)}</span>
+      </div>
+      <div class="item-sub">${escapeHtml(delivery.url)}</div>
+      <div class="item-sub">พยายาม ${Number(delivery.attempts) || 0}/${Number(delivery.max_attempts) || 0} · ${escapeHtml(formatTime(delivery.delivered_at || delivery.updated_at || delivery.created_at))}${delivery.last_error ? ` · ${escapeHtml(String(delivery.last_error).slice(0, 120))}` : ""}</div>
+      ${["failed", "blocked"].includes(delivery.status) ? `<button class="preview-btn retry-delivery" type="button" data-delivery-id="${escapeHtml(delivery.id)}">ส่งซ้ำ</button>` : ""}
+    </article>`;
+  }).join("");
+}
+
+async function loadPacks() {
+  try {
+    state.packs = (await api("/api/packs")).packs || [];
+  } catch {
+    state.packs = [];
+  }
+  renderPacks();
+}
+
+function renderPacks() {
+  const box = document.getElementById("packList");
+  if (!box) return;
+  box.innerHTML = state.packs.length ? state.packs.map((pack) => `
+    <div class="pack-item" title="${escapeHtml(pack.description || pack.error || "")}">
+      <span class="pack-name">${escapeHtml(pack.name || pack.file)}</span>
+      <span class="pack-meta">${pack.error ? "ไฟล์ไม่ผ่านการตรวจ" : `v${escapeHtml(String(pack.version))} · ${Number(pack.workflows) || 0} wf${pack.signed ? " · ลงนาม" : ""}`}</span>
+    </div>
+  `).join("") : '<div class="empty">ไม่มีแพ็กบนเครื่อง server</div>';
+}
+
+async function importPackFile(file) {
+  let pack;
+  try {
+    pack = JSON.parse(await file.text());
+  } catch {
+    throw new Error("ไฟล์ไม่ใช่ JSON ที่ถูกต้อง");
+  }
+  await api("/api/packs/import", { method: "POST", body: JSON.stringify(pack) });
+  toast("นำเข้าแพ็กสำเร็จ");
+  await loadAll();
+  await loadPacks();  // loadAll doesn't cover packs — refresh the rail list too
+}
+
+async function exportSelectedWorkflowPack() {
+  if (!state.selectedWorkflowId) throw new Error("เลือกเวิร์กโฟลว์จากรายการก่อน");
+  const pack = (await api(`/api/packs/${encodeURIComponent(state.selectedWorkflowId)}/export`)).pack;
+  const blob = new Blob([prettyJson(pack)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${String(pack.name || "workflow").replace(/[^\w฀-๿-]+/g, "-")}.pack.json`;
+  document.body.appendChild(anchor);  // Firefox needs the anchor in the DOM for click() to fire
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+  toast("ส่งออกแพ็กแล้ว");
+}
+
+async function loadAccounts() {
+  if (state.currentUser?.role !== "admin") return;
+  const [users, tokens] = await Promise.all([api("/api/users"), api("/api/tokens")]);
+  state.users = users.users || [];
+  state.apiTokens = tokens.tokens || [];
+  renderAccounts();
+}
+
+function renderAccounts() {
+  const userList = document.getElementById("userList");
+  const tokenList = document.getElementById("tokenList");
+  const tokenUserSelect = document.getElementById("tokenUserSelect");
+  if (!userList || !tokenList) return;
+  userList.innerHTML = state.users.length ? state.users.map((user) => `
+    <article class="workflow-run-item">
+      <div class="item-title">
+        <span>${escapeHtml(user.username)}</span>
+        <span class="role-chip">${escapeHtml(user.role)}</span>
+      </div>
+      <div class="item-sub">${escapeHtml(user.status)} · token ${Number(user.token_count) || 0} · สร้าง ${escapeHtml(formatTime(user.created_at))}</div>
+      <div class="item-actions">
+        <button class="preview-btn toggle-user-status" type="button" data-user-id="${escapeHtml(user.id)}" data-next-status="${user.status === "active" ? "disabled" : "active"}" ${user.id === state.currentUser?.id ? "disabled" : ""}>${user.status === "active" ? "ระงับ" : "เปิดใช้"}</button>
+        <button class="preview-btn danger-mini delete-user" type="button" data-user-id="${escapeHtml(user.id)}" ${user.id === state.currentUser?.id ? "disabled" : ""}>ลบ</button>
+      </div>
+    </article>
+  `).join("") : '<div class="empty">ยังไม่มีผู้ใช้</div>';
+  if (tokenUserSelect) {
+    // Preserve the admin's picked target across re-renders (a status toggle or revoke
+    // refreshes the list); falling back silently to the current user would mint the
+    // next token for the wrong account.
+    const previous = tokenUserSelect.value;
+    tokenUserSelect.innerHTML = state.users.map((user) =>
+      `<option value="${escapeHtml(user.id)}">${escapeHtml(user.username)}</option>`).join("");
+    const desired = previous || state.currentUser?.id || "";
+    if ([...tokenUserSelect.options].some((option) => option.value === desired)) tokenUserSelect.value = desired;
+  }
+  tokenList.innerHTML = state.apiTokens.length ? state.apiTokens.map((token) => `
+    <article class="workflow-run-item ${token.revoked_at ? "is-revoked" : ""}">
+      <div class="item-title">
+        <span>${escapeHtml(token.name || "(ไม่มีชื่อ)")}</span>
+        <span class="item-sub">${escapeHtml(token.username || "")}</span>
+      </div>
+      <div class="item-sub">สร้าง ${escapeHtml(formatTime(token.created_at))} · ใช้ล่าสุด ${token.last_used_at ? escapeHtml(formatTime(token.last_used_at)) : "—"}${token.revoked_at ? " · เพิกถอนแล้ว" : ""}</div>
+      ${token.revoked_at ? "" : `<button class="preview-btn danger-mini revoke-token" type="button" data-token-id="${escapeHtml(token.id)}">เพิกถอน</button>`}
+    </article>
+  `).join("") : '<div class="empty">ยังไม่มี token</div>';
+}
+
+async function createUser(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  await api("/api/users", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
+  form.reset();
+  toast("เพิ่มผู้ใช้แล้ว");
+  await loadAccounts();
+}
+
+async function createToken(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = await api("/api/tokens", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
+  form.reset();
+  const reveal = document.getElementById("newTokenReveal");
+  if (reveal) {
+    reveal.hidden = false;
+    reveal.innerHTML = `<div class="token-reveal-title">token ใหม่ — แสดงครั้งเดียว คัดลอกเก็บทันที</div>
+      <code>${escapeHtml(data.api_token)}</code>
+      <button class="preview-btn" type="button" data-copy="${escapeHtml(data.api_token)}">คัดลอก</button>`;
+  }
+  await loadAccounts();
+}
+
 document.addEventListener("change", async (event) => {
   const syncSelect = event.target.closest(".sync-mode-select");
   if (syncSelect) {
@@ -2228,6 +2520,38 @@ document.addEventListener("click", async (event) => {
     await selectWorkflowTrigger(triggerItem.dataset.triggerId).catch((error) => toast(error.message));
     return;
   }
+  const retryDeliveryButton = event.target.closest(".retry-delivery");
+  if (retryDeliveryButton) {
+    await api(`/api/deliveries/${encodeURIComponent(retryDeliveryButton.dataset.deliveryId)}/retry`, { method: "POST" })
+      .then(() => { toast("ส่งซ้ำแล้ว — รอผล"); return loadAll(); })
+      .catch((error) => toast(error.message));
+    return;
+  }
+  const toggleUserButton = event.target.closest(".toggle-user-status");
+  if (toggleUserButton) {
+    await api(`/api/users/${encodeURIComponent(toggleUserButton.dataset.userId)}`, { method: "PUT", body: JSON.stringify({ status: toggleUserButton.dataset.nextStatus }) })
+      .then(() => loadAccounts())
+      .catch((error) => toast(error.message));
+    return;
+  }
+  const deleteUserButton = event.target.closest(".delete-user");
+  if (deleteUserButton) {
+    if (!confirm("ลบผู้ใช้นี้? token ทั้งหมดของผู้ใช้จะถูกลบไปด้วย")) return;
+    await api(`/api/users/${encodeURIComponent(deleteUserButton.dataset.userId)}`, { method: "DELETE" })
+      .then(() => loadAccounts())
+      .catch((error) => toast(error.message));
+    return;
+  }
+  const revokeTokenButton = event.target.closest(".revoke-token");
+  if (revokeTokenButton) {
+    // Dashboard sessions are themselves tokens (named "dashboard login") and look identical —
+    // warn before revoking, because killing the current session's token logs you out instantly.
+    if (!confirm("เพิกถอน token นี้? ถ้าเป็น token ของเซสชันที่กำลังใช้อยู่ คุณจะหลุดจากระบบทันที")) return;
+    await api(`/api/tokens/${encodeURIComponent(revokeTokenButton.dataset.tokenId)}`, { method: "DELETE" })
+      .then(() => loadAccounts())
+      .catch((error) => toast(error.message));
+    return;
+  }
   const jobItem = event.target.closest(".job-row");
   if (jobItem) {
     openJobStream(jobItem.dataset.jobId);
@@ -2263,7 +2587,6 @@ document.addEventListener("click", (event) => {
   const link = event.target.closest("[data-view-link]");
   if (!link) return;
   showView(link.dataset.viewLink);
-  if (link.dataset.viewLink === "usage") loadUsage().catch((error) => toast(error.message));
 });
 $("#pollAllBtn").addEventListener("click", async () => {
   await refreshAll({ poll: true, notice: true }).catch((error) => toast(error.message));
@@ -2272,8 +2595,11 @@ $("#cancelJobBtn").addEventListener("click", () => cancelSelectedJob().catch((er
 $("#newWorkflowBtn").addEventListener("click", () => newWorkflow());
 $("#saveWorkflowBtn").addEventListener("click", () => saveWorkflow().catch((error) => toast(error.message)));
 $("#validateWorkflowBtn").addEventListener("click", () => validateWorkflow().catch((error) => toast(error.message)));
-$("#explainWorkflowBtn").addEventListener("click", () => explainWorkflow().catch((error) => toast(error.message)));
-$("#repairWorkflowBtn").addEventListener("click", () => repairWorkflow().then(() => renderWorkflowGraph()).catch((error) => toast(error.message)));
+$("#explainWorkflowBtn").addEventListener("click", () => explainWorkflow().then(() => showWfSection("assist")).catch((error) => toast(error.message)));
+$("#repairWorkflowBtn").addEventListener("click", () => repairWorkflow().then(() => {
+  renderWorkflowGraph();
+  showWfSection("assist");  // repair's warnings/explanation render there — never save blind
+}).catch((error) => toast(error.message)));
 $("#suggestWorkersBtn").addEventListener("click", () => suggestWorkers().catch((error) => toast(error.message)));
 $("#draftWorkflowBtn").addEventListener("click", () => draftWorkflow().catch((error) => toast(error.message)));
 $("#applyWorkflowTemplateBtn").addEventListener("click", () => {
@@ -2304,6 +2630,18 @@ $("#applyTriggerQuickBtn").addEventListener("click", () => {
 $("#suggestTriggersBtn").addEventListener("click", () => suggestTriggers().catch((error) => toast(error.message)));
 $("#addWorkerBtn").addEventListener("click", () => openWorkerModal());
 $("#addWorkspaceBtn").addEventListener("click", () => openWorkspaceModal());
+$("#createUserForm").addEventListener("submit", (event) => createUser(event).catch((error) => toast(error.message)));
+$("#createTokenForm").addEventListener("submit", (event) => createToken(event).catch((error) => toast(error.message)));
+$("#importPackBtn").addEventListener("click", () => $("#packFileInput").click());
+$("#packFileInput").addEventListener("change", (event) => {
+  const file = event.currentTarget.files?.[0];
+  event.currentTarget.value = "";
+  if (file) importPackFile(file).catch((error) => toast(error.message));
+});
+$("#exportPackBtn").addEventListener("click", () => exportSelectedWorkflowPack().catch((error) => toast(error.message)));
+// Route preview follows the prompt/model as they are typed (debounced inside).
+$("#promptInput").addEventListener("input", () => updateComposerRoutePreview());
+$("#modelInput").addEventListener("input", () => updateComposerRoutePreview());
 $("#conversationSelect").addEventListener("change", () => {
   state.selectedJobId = null;
   updateComposerRoutePreview();
@@ -2329,8 +2667,13 @@ $("#workflowPolicyInput").addEventListener("input", () => { syncPolicyFormFromJs
 for (const [, selector] of POLICY_FORM_FIELDS) {
   $(selector).addEventListener("input", () => { syncPolicyJsonFromForm(); });
 }
-// Workflows: editing the Graph JSON re-renders the node graph; the name display tracks the input.
-$("#workflowGraphInput").addEventListener("input", () => { renderWorkflowGraph(); });
+// Workflows: editing the Graph JSON re-renders the node graph (debounced — the full
+// parse/layout/SVG rebuild per keystroke lags on big graphs); the name display tracks the input.
+let wfGraphInputTimer = null;
+$("#workflowGraphInput").addEventListener("input", () => {
+  clearTimeout(wfGraphInputTimer);
+  wfGraphInputTimer = setTimeout(() => renderWorkflowGraph(), 200);
+});
 $("#workflowNameInput").addEventListener("input", () => {
   const display = document.getElementById("workflowName");
   if (display) display.textContent = $("#workflowNameInput").value || "เวิร์กโฟลว์ใหม่";
@@ -2340,6 +2683,14 @@ for (const tab of document.querySelectorAll(".tab-pill[data-wf-tab]")) {
     for (const other of document.querySelectorAll(".tab-pill[data-wf-tab]")) other.classList.toggle("is-active", other === tab);
     for (const pane of document.querySelectorAll("[data-wf-pane]")) pane.hidden = pane.dataset.wfPane !== tab.dataset.wfTab;
   });
+}
+// Workflows: section tabs under the graph (design / policy / run / assist).
+function showWfSection(name) {
+  for (const tab of document.querySelectorAll(".wf-sec-tab")) tab.classList.toggle("is-active", tab.dataset.wfSection === name);
+  for (const pane of document.querySelectorAll("[data-wf-section-pane]")) pane.hidden = pane.dataset.wfSectionPane !== name;
+}
+for (const tab of document.querySelectorAll(".wf-sec-tab")) {
+  tab.addEventListener("click", () => showWfSection(tab.dataset.wfSection));
 }
 $("#wfZoomIn").addEventListener("click", () => { wfUserZoom = Math.min(2, wfUserZoom * 1.15); wfApplyScale(); });
 $("#wfZoomOut").addEventListener("click", () => { wfUserZoom = Math.max(0.5, wfUserZoom / 1.15); wfApplyScale(); });
@@ -2356,7 +2707,6 @@ for (const button of document.querySelectorAll(".nav-item")) {
     showView(button.dataset.view);
     sidebarEl?.classList.remove("nav-open");
     navToggleBtn?.setAttribute("aria-expanded", "false");
-    if (button.dataset.view === "usage") loadUsage().catch((error) => toast(error.message));
   });
 }
 for (const chip of document.querySelectorAll(".audit-chip[data-audit-filter]")) {
@@ -2369,7 +2719,17 @@ for (const chip of document.querySelectorAll(".audit-chip[data-audit-filter]")) 
 $("#loadUsageBtn").addEventListener("click", () => loadUsage().catch((error) => toast(error.message)));
 $("#usageJsonBtn").addEventListener("click", () => downloadUsage("").catch((error) => toast(error.message)));
 $("#usageCsvBtn").addEventListener("click", () => downloadUsage("csv").catch((error) => toast(error.message)));
-showView(localStorage.getItem("atlasView") || "overview");
+// URL hash wins over the remembered view so shared/bookmarked links open the right screen.
+window.addEventListener("hashchange", () => {
+  const view = location.hash.slice(1);
+  if (!VIEWS.includes(view)) return;
+  // Ignore the echo from showView's own hash write, else every navigation runs twice
+  // (doubling per-view loaders like loadUsage/loadAccounts).
+  if (document.querySelector(".view.is-active")?.dataset.view === view) return;
+  showView(view);
+});
+const bootHash = location.hash.slice(1);
+showView(VIEWS.includes(bootHash) ? bootHash : (localStorage.getItem("atlasView") || "overview"));
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeModals();
@@ -2378,8 +2738,10 @@ document.addEventListener("keydown", (event) => {
 loadAll()
   .then(() => {
     document.body.classList.remove("is-loading");
-    // If the Usage view was restored from localStorage, load it now that auth/role are known.
+    loadPacks().catch(() => undefined);
+    // If the Usage/Accounts view was restored from localStorage, load it now that auth/role are known.
     if (document.querySelector("#view-usage.is-active")) loadUsage().catch(() => undefined);
+    if (document.querySelector("#view-accounts.is-active")) loadAccounts().catch((error) => toast(error.message));
     const firstActive = state.jobs.find((job) => ["running", "queued", "cancel_requested"].includes(job.state));
     if (firstActive) openJobStream(firstActive.id);
   })
@@ -2390,7 +2752,7 @@ loadAll()
 
 setInterval(() => {
   if (!$("#loginScreen").hidden) return;
-  loadAll().catch(() => undefined);
+  loadAll().catch(() => undefined);  // health is tracked at the fetch layer in api()
 }, 5000);
 
 setInterval(() => {
