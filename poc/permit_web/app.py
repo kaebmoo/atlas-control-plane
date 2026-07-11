@@ -21,8 +21,10 @@ Run:  python3 app.py   then open http://127.0.0.1:8080
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import secrets
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -34,6 +36,7 @@ TOKEN = os.environ.get("ATLAS_TOKEN", "")
 WORKFLOW_NAME = os.environ.get("WORKFLOW_NAME", "PoC Permit Application")
 WORKFLOW_ID = os.environ.get("WORKFLOW_ID", "")
 PORT = int(os.environ.get("PORT", "8080"))
+CSRF_TOKEN = secrets.token_urlsafe(32)
 
 _wf_cache = {"id": WORKFLOW_ID}
 
@@ -186,6 +189,7 @@ PAGE = """<!doctype html>
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const CSRF_TOKEN = %%CSRF_TOKEN%%;
 let timer = null, runId = null;
 
 $("#f").addEventListener("submit", async (e) => {
@@ -193,7 +197,7 @@ $("#f").addEventListener("submit", async (e) => {
   const fd = Object.fromEntries(new FormData($("#f")).entries());
   $("#panel").innerHTML = '<p class="muted">กำลังส่งคำขอเข้า Atlas…</p>';
   try {
-    const r = await fetch("/api/submit", {method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify(fd)});
+    const r = await fetch("/api/submit", {method:"POST", headers:{"content-type":"application/json", "X-CSRF-Token": CSRF_TOKEN}, body: JSON.stringify(fd)});
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || "submit failed");
     runId = j.run_id;
@@ -229,7 +233,7 @@ function render(j) {
 }
 
 async function decide(action) {
-  const r = await fetch("/api/decide", {method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({run_id: runId, action})});
+  const r = await fetch("/api/decide", {method:"POST", headers:{"content-type":"application/json", "X-CSRF-Token": CSRF_TOKEN}, body: JSON.stringify({run_id: runId, action})});
   const j = await r.json();
   if (!r.ok) { alert(j.error || "decide failed"); return; }
   poll();
@@ -261,10 +265,21 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
+    def _csrf_valid(self) -> bool:
+        host = self.headers.get("Host", "").lower()
+        origin = self.headers.get("Origin", "").rstrip("/")
+        allowed_hosts = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+        return (
+            host in allowed_hosts
+            and origin == f"http://{host}"
+            and hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), CSRF_TOKEN)
+        )
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
+            page = PAGE.replace("%%CSRF_TOKEN%%", json.dumps(CSRF_TOKEN))
+            self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             return
         if parsed.path == "/api/status":
             run_id = (parse_qs(parsed.query).get("run_id") or [""])[0]
@@ -276,6 +291,9 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:
+        if not self._csrf_valid():
+            self._json({"error": "same-origin CSRF token required"}, 403)
+            return
         if self.path == "/api/submit":
             try:
                 self._json(start_run(self._read_json()))

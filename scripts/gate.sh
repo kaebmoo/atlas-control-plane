@@ -16,7 +16,7 @@ python3 -m py_compile \
   scripts/check_jobs.py scripts/check_backup.py scripts/check_audit_fixes.py \
   scripts/check_docs.py scripts/check_stress.py scripts/check_fuzz.py \
   scripts/check_ui_ux.py scripts/check_input_adapter.py scripts/check_outbound.py \
-  scripts/check_observability.py scripts/check_permit_poc.py scripts/check_event_views.py \
+  scripts/check_observability.py scripts/check_permit_poc.py scripts/check_booth_poc.py scripts/check_event_views.py \
   scripts/check_lib.py scripts/check_async_jobs.py scripts/check_worker_state.py \
   scripts/check_job_artifacts.py scripts/check_file_handoff.py scripts/check_dashboard_surfaces.py
 
@@ -46,6 +46,7 @@ python3 scripts/check_input_adapter.py  # IA-1: envelope + provenance audit
 python3 scripts/check_outbound.py       # OB-1: signed outbound delivery + deliveries API
 python3 scripts/check_observability.py  # cross-cutting: metrics, audit export, classification + purge
 python3 scripts/check_permit_poc.py     # permit PoC: operator dashboard escapes untrusted fields
+python3 scripts/check_booth_poc.py      # PoC proxies: same-origin CSRF, upload gate, stable worker IDs
 python3 scripts/check_async_jobs.py     # T3: x_callback async jobs — pre-auth carve-out, HMAC token, reaper, races
 python3 scripts/check_job_artifacts.py    # T9a: frozen Job Artifacts — validation, callback barrier, session lease
 python3 scripts/check_file_handoff.py   # T9b: /v1/inputs file handoff — two workers, policy gate, ack validation, caps
