@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Atlas Control Plane</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260630-nt10">
+    <link rel="stylesheet" href="/static/styles.css?v=20260711-ux3">
   </head>
   <body class="is-loading">
     <a class="skip-link" href="#main">Skip to content</a>
@@ -99,6 +99,10 @@
               <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></span>
               <span class="nav-label"><span class="th">การใช้งาน</span><span class="en">Usage</span></span>
             </button>
+            <button class="nav-item" type="button" data-view="accounts">
+              <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
+              <span class="nav-label"><span class="th">บัญชี</span><span class="en">Accounts</span></span>
+            </button>
           </div>
         </nav>
 
@@ -125,7 +129,7 @@
             </div>
             <p id="pageSub">สถานะฟลีต งาน และเวิร์กโฟลว์โดยรวม</p>
           </div>
-          <span class="health-chip"><span class="dot"></span>ระบบทำงานปกติ</span>
+          <span class="health-chip" id="healthChip"><span class="dot"></span><span id="healthChipText">กำลังเชื่อมต่อ…</span></span>
           <button id="refreshBtn" class="refresh-btn" type="button">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>
             <span>รีเฟรช</span>
@@ -137,22 +141,22 @@
         <section class="view is-active" id="view-overview" data-view="overview" tabindex="-1">
           <div class="view-wrap dash">
             <div class="stat-grid">
-              <div class="stat-tile">
+              <div class="stat-tile" data-view-link="fleet" title="ไปที่ฟลีต">
                 <div class="stat-top"><span class="stat-label">Worker ออนไลน์</span><span class="stat-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="20" height="6" rx="1"/><rect x="2" y="15" width="20" height="6" rx="1"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></span></div>
                 <div class="stat-num"><b id="metricWorkers">0</b><span id="metricWorkersUnit">/ 0</span></div>
                 <div class="stat-delta" id="metricWorkersDelta">ยังไม่มีข้อมูล</div>
               </div>
-              <div class="stat-tile">
+              <div class="stat-tile" data-view-link="jobs" title="ไปที่งาน">
                 <div class="stat-top"><span class="stat-label">งานที่กำลังทำ</span><span class="stat-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg></span></div>
                 <div class="stat-num"><b id="metricRunning">0</b><span>active</span></div>
                 <div class="stat-delta" id="metricRunningDelta">queued + running</div>
               </div>
-              <div class="stat-tile">
+              <div class="stat-tile" data-view-link="monitor" title="ไปที่ติดตาม">
                 <div class="stat-top"><span class="stat-label">Run วันนี้</span><span class="stat-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="15" y="15" width="6" height="6" rx="1"/><rect x="15" y="3" width="6" height="6" rx="1"/><path d="M6 9v6a2 2 0 0 0 2 2h7M18 9v3"/></svg></span></div>
                 <div class="stat-num"><b id="metricRuns">0</b><span>runs</span></div>
                 <div class="stat-delta" id="metricRunsDelta">workflow runs</div>
               </div>
-              <div class="stat-tile">
+              <div class="stat-tile" data-view-link="monitor" title="ไปที่ติดตาม">
                 <div class="stat-top"><span class="stat-label">รออนุมัติ</span><span class="stat-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span></div>
                 <div class="stat-num"><b id="metricApprovals">0</b><span>pending</span></div>
                 <div class="stat-delta" id="metricApprovalsDelta">human approvals</div>
@@ -274,6 +278,12 @@
               <div class="wf-rail-foot">
                 <label class="field"><span>เริ่มจากเทมเพลต</span><select id="workflowTemplateSelect"><option value="">เลือกเทมเพลต</option></select></label>
                 <button id="applyWorkflowTemplateBtn" class="preview-btn block-btn" type="button">คัดลอกเทมเพลตมาที่ตัวแก้ไข</button>
+                <div class="rail-sep" aria-hidden="true"></div>
+                <div class="rail-mini-title">แพ็ก · Packs</div>
+                <div id="packList" class="pack-list"></div>
+                <input id="packFileInput" type="file" accept="application/json,.json" hidden>
+                <button id="importPackBtn" class="preview-btn block-btn" type="button">นำเข้าแพ็กจากไฟล์ (.json)</button>
+                <button id="exportPackBtn" class="preview-btn block-btn" type="button">ส่งออกเวิร์กโฟลว์นี้เป็นแพ็ก</button>
               </div>
             </div>
 
@@ -291,6 +301,14 @@
                 </div>
               </div>
 
+              <div class="wf-sec-tabs" role="tablist" aria-label="Workflow sections">
+                <button class="wf-sec-tab is-active" type="button" data-wf-section="design"><span class="th">ออกแบบ</span><span class="en">Design</span></button>
+                <button class="wf-sec-tab" type="button" data-wf-section="policy"><span class="th">นโยบาย</span><span class="en">Policy</span></button>
+                <button class="wf-sec-tab" type="button" data-wf-section="run"><span class="th">เรียกใช้</span><span class="en">Run</span></button>
+                <button class="wf-sec-tab" type="button" data-wf-section="assist"><span class="th">ผู้ช่วย AI</span><span class="en">Assist</span></button>
+              </div>
+
+              <div class="wf-sec-pane" data-wf-section-pane="design">
               <div class="card card-pad-0 wf-inspector">
                 <div class="wf-insp-side">
                   <div class="tabs-pill">
@@ -335,6 +353,7 @@
                         <label class="field"><span>Role / label</span><input id="builderNodeRoleInput" placeholder="reviewer"></label>
                         <label class="field"><span>Prompt / reason</span><input id="builderNodePromptInput" placeholder="Review {artifact.draft}"></label>
                         <label class="field"><span>Outputs</span><input id="builderNodeOutputsInput" placeholder="review"></label>
+                        <label class="field"><span>Collect files <span class="hint-inline">— T9a · glob ได้ คั่นด้วย comma</span></span><input id="builderNodeCollectFilesInput" placeholder="reports/*.md, out/data.csv"></label>
                         <label class="field"><span>Budget units</span><input id="builderNodeBudgetInput" type="number" min="1" value="1"></label>
                         <label class="field"><span>Human choices</span><input id="builderHumanChoicesInput" placeholder="publish:Publish, revise:Revise"></label>
                         <label class="field"><span>Join mode</span><select id="builderJoinModeSelect"><option value="all">all</option><option value="any">any</option><option value="quorum">quorum</option></select></label>
@@ -365,17 +384,12 @@
                   </div>
                 </details>
 
-                <div class="field-group">
-                  <div class="field-group-title">Worker resolution</div>
-                  <div class="item-actions">
-                    <button id="suggestWorkersBtn" class="preview-btn" type="button">Suggest workers</button>
-                  </div>
-                  <div id="workerSuggestionList" class="stack-list short-list"></div>
-                </div>
+              </div>
               </div>
 
+              <div class="wf-sec-pane" data-wf-section-pane="policy" hidden>
               <div class="card">
-                <div class="card-head"><h3>Policy</h3></div>
+                <div class="card-head"><div><h3>Policy</h3><p class="card-sub">ลิมิตความปลอดภัยของ run · แก้ได้จากฟอร์มโดยไม่ต้องแตะ JSON</p></div></div>
                 <div id="workflowPolicyForm" class="row-3">
                   <label class="field"><span>Max jobs</span><input id="policyMaxJobsInput" type="number" min="1"></label>
                   <label class="field"><span>Max iterations</span><input id="policyMaxIterationsInput" type="number" min="1"></label>
@@ -392,33 +406,45 @@
                     <label class="switch"><input id="policyFileHandoffInput" type="checkbox"><span class="slider"></span></label>
                   </div>
                 </div>
-                <div class="field code-field">
-                  <div class="code-label">
-                    <span>Policy JSON</span>
-                    <span class="tag tag-edit">Raw · stays in sync</span>
+                <details class="fold">
+                  <summary>Policy JSON — Raw · stays in sync</summary>
+                  <div class="field code-field">
+                    <textarea id="workflowPolicyInput" class="code-area" rows="5" spellcheck="false" wrap="off"></textarea>
                   </div>
-                  <textarea id="workflowPolicyInput" class="code-area" rows="5" spellcheck="false" wrap="off"></textarea>
+                </details>
+              </div>
+              </div>
+
+              <div class="wf-sec-pane" data-wf-section-pane="run" hidden>
+              <div class="card">
+                <div class="card-head"><div><h3>เรียกใช้ · Run</h3><p class="card-sub">อินพุตของ run ใหม่ · ปุ่มเรียกใช้อยู่มุมขวาบน</p></div></div>
+                <label class="field code-field">
+                  <span>Run input JSON <span class="hint-inline">— เช่น {"topic": "ข่าวเช้า"}</span></span>
+                  <textarea id="workflowRunInput" class="code-area" rows="4" spellcheck="false" wrap="off">{}</textarea>
+                </label>
+              </div>
+
+              <div class="card">
+                <div class="card-head"><div><h3>Worker resolution</h3><p class="card-sub">จับคู่ role ของโหนดกับ worker จริงในฟลีตก่อนเรียกใช้</p></div></div>
+                <div class="item-actions">
+                  <button id="suggestWorkersBtn" class="preview-btn" type="button">Suggest workers</button>
                 </div>
+                <div id="workerSuggestionList" class="stack-list short-list"></div>
+              </div>
+              </div>
+
+              <div class="wf-sec-pane" data-wf-section-pane="assist" hidden>
+              <div class="card">
+                <div class="card-head"><h3>Draft from plain language</h3><span class="tag tag-preview">Preview only</span></div>
+                <label class="field"><span>Prompt</span><textarea id="draftPromptInput" rows="4" placeholder="Describe the workflow in plain language"></textarea></label>
+                <button id="draftWorkflowBtn" class="preview-btn" type="button">Draft</button>
+                <pre id="draftResult" class="code-block"></pre>
               </div>
 
               <div class="card">
                 <div class="card-head"><h3>Explanation</h3><span class="tag tag-preview">Display only</span></div>
                 <pre id="workflowExplanation" class="code-block"></pre>
               </div>
-
-              <div class="card">
-                <div class="card-head"><h3>Run input</h3></div>
-                <label class="field code-field">
-                  <span>Run input JSON</span>
-                  <textarea id="workflowRunInput" class="code-area" rows="4" spellcheck="false" wrap="off">{}</textarea>
-                </label>
-              </div>
-
-              <div class="card">
-                <div class="card-head"><h3>Draft from plain language</h3><span class="tag tag-preview">Preview only</span></div>
-                <label class="field"><span>Prompt</span><textarea id="draftPromptInput" rows="4" placeholder="Describe the workflow in plain language"></textarea></label>
-                <button id="draftWorkflowBtn" class="preview-btn" type="button">Draft</button>
-                <pre id="draftResult" class="code-block"></pre>
               </div>
             </div>
           </div>
@@ -475,6 +501,7 @@
               </div>
             </div>
 
+            <div class="mon-more-grid">
             <details class="card mon-more">
               <summary>Artifacts</summary>
               <div id="workflowArtifactDownloads" class="stack-list short-list"></div>
@@ -535,6 +562,13 @@
               <div id="triggerList" class="stack-list short-list"></div>
               <pre id="triggerEventList" class="code-block"></pre>
             </details>
+
+            <details class="card mon-more" id="deliveriesPanel">
+              <summary>Deliveries (webhook ขาออก)</summary>
+              <p class="hint">ผลการส่ง callback ของ run ไปยัง URL ปลายทาง · retry ได้เมื่อ failed</p>
+              <div id="deliveryList" class="stack-list short-list"><div class="empty">ยังไม่มี delivery</div></div>
+            </details>
+            </div>
           </div>
         </section>
 
@@ -667,6 +701,42 @@
             <div id="usageAlert" class="usage-alert" hidden></div>
           </div>
         </section>
+
+        <!-- ACCOUNTS (admin only) -->
+        <section class="view" id="view-accounts" data-view="accounts" tabindex="-1">
+          <div class="view-wrap accounts-grid">
+            <div class="card card-pad-0">
+              <div class="card-head">
+                <div><h3>ผู้ใช้ · Users</h3><p class="card-sub">บทบาท: admin / operator / viewer / auditor</p></div>
+              </div>
+              <form id="createUserForm" class="acct-form" autocomplete="off">
+                <input name="username" placeholder="ชื่อผู้ใช้" required autocomplete="off">
+                <input name="password" type="password" placeholder="รหัสผ่าน" required autocomplete="new-password">
+                <select name="role">
+                  <option value="viewer">viewer</option>
+                  <option value="operator">operator</option>
+                  <option value="auditor">auditor</option>
+                  <option value="admin">admin</option>
+                </select>
+                <button class="secondary-btn" type="submit">เพิ่มผู้ใช้</button>
+              </form>
+              <div id="userList" class="stack-list"><div class="empty">กำลังโหลด…</div></div>
+            </div>
+
+            <div class="card card-pad-0">
+              <div class="card-head">
+                <div><h3>API Tokens</h3><p class="card-sub">token แสดงเต็มครั้งเดียวตอนสร้าง · เก็บให้ดี</p></div>
+              </div>
+              <form id="createTokenForm" class="acct-form" autocomplete="off">
+                <input name="name" placeholder="ชื่อ token เช่น ci-deploy" required>
+                <select name="user_id" id="tokenUserSelect"></select>
+                <button class="secondary-btn" type="submit">สร้าง token</button>
+              </form>
+              <div id="newTokenReveal" class="token-reveal" hidden></div>
+              <div id="tokenList" class="stack-list"><div class="empty">กำลังโหลด…</div></div>
+            </div>
+          </div>
+        </section>
         </div>
       </main>
     </div>
@@ -714,6 +784,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/static/app.js?v=20260630-nt10" type="module"></script>
+    <script src="/static/app.js?v=20260711-ux3" type="module"></script>
   </body>
 </html>
