@@ -48,11 +48,15 @@ it. Two targets:
 
 - **`--target local`** (default) — start the instance as a local subprocess
   (`python3 -m atlas`) with its own data dir/DB. Used for dev and the hermetic check.
-  Auth stays on; the seeded token is stored by reference.
+  Auth stays on; the seeded token is stored by reference. Override the region label,
+  bind host/port, and data directory with `--region`, `--host`, `--port`, and
+  `--data-dir` (handy for running several instances side by side in dev/test).
 - **`--target compose`** — print a **docker-compose IaC stub** (not a bespoke
   orchestrator). The operator fills in the image/volumes, runs `docker compose up -d`,
-  then seeds an admin token on the box with `python3 -m atlas.admin create-admin` and
-  registers the resulting `base_url`. **systemd** is the alternative target
+  then seeds an admin token on the box with `python3 -m atlas.admin create-admin`.
+  There is no `atlas-fleet` subcommand to register a compose-provisioned instance yet —
+  registration is currently a manual DB/API operation (insert the row into the registry,
+  or call the `Registry.register` API directly). **systemd** is the alternative target
   ([docs/ops/atlas.service](../docs/ops/atlas.service)); GDCC/k8s are noted as alternates
   in the GA plan's external-decision register.
 
@@ -70,7 +74,8 @@ degraded) instance is marked `offline`. Provisioning applies the same rule — i
 
 `usage-pull` calls each instance's `GET /api/usage` (authenticated with the instance's
 seeded token), optionally bounded by `--from`/`--to`, and prints the **raw** usage events
-per instance.
+per instance. Pass `--instance <instance_id>` to pull just that one registered instance
+instead of all of them.
 
 ## CDR export
 

@@ -6,6 +6,16 @@
 > Posting note retained for history: keep the auth wording neutral (as below). If the missing
 > auth on `/workspace/sync/*` looks unintended rather than documented behavior,
 > report that part privately via the repo Security tab first.
+>
+> **Status update (2026-07-12):** Tier 2 shipped upstream as the Job Artifact
+> API (v0.88.0) — session-scoped (`GET/POST /v1/sessions/{session_id}/artifacts`),
+> not job-scoped as proposed below — and Atlas now consumes it via
+> `atlas/thclaws_client.py`'s `artifact_manifest`/`artifact_bytes` (T9a) and
+> `POST /v1/inputs` via `post_inputs` (T9b). The old `sync_export`/`sync_push`
+> transport this post describes was deleted once those routes landed, so the
+> "today the only way to move files is workspace sync" framing below is
+> historical. Tier 1 (Bearer auth on `/workspace/sync/*`) remains outstanding
+> upstream.
 
 ---
 

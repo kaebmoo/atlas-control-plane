@@ -22,12 +22,30 @@ THCLAWS_API_TOKEN="dev-token-2" \
 thclaws --serve --bind 127.0.0.1 --port 4318
 ```
 
-Terminal 3: start Atlas.
+Terminal 3: start Atlas. Atlas requires an authenticated session (or Bearer
+token) for essentially every endpoint, so pick one of these two bootstrap
+paths first:
 
-```bash
-cd /Users/seal/Documents/GitHub/atlas-control-plane
-python3 -m atlas --host 127.0.0.1 --port 8787
-```
+- **Browser login (recommended):** start Atlas normally, then seed the first
+  admin user once:
+
+  ```bash
+  cd /Users/seal/Documents/GitHub/atlas-control-plane
+  python3 -m atlas.admin create-admin admin
+  python3 -m atlas --host 127.0.0.1 --port 8787
+  ```
+
+  `create-admin` prompts for a password and prints a one-time API token. Log
+  in at `http://127.0.0.1:8787` with that username/password.
+
+- **Loopback demo mode (no login, curl-friendly):** skip user creation and
+  start Atlas with loopback auth disabled. This also makes the Demo 5/6 curl
+  examples below work exactly as written, with no `Authorization` header:
+
+  ```bash
+  cd /Users/seal/Documents/GitHub/atlas-control-plane
+  ATLAS_LOOPBACK_NO_AUTH=true python3 -m atlas --host 127.0.0.1 --port 8787
+  ```
 
 Open:
 
@@ -144,7 +162,10 @@ Expected result:
 - trigger events show `received` and `started`
 - trigger card shows its latest state/error
 
-Optional webhook dedupe check:
+Optional webhook dedupe check (if Atlas was started with
+`ATLAS_LOOPBACK_NO_AUTH=true`, calls from `127.0.0.1` need no
+`Authorization` header; otherwise add `-H 'Authorization: Bearer <token>'`
+using a token from `python3 -m atlas.admin create-token <username>`):
 
 1. Create another trigger with type `webhook`.
 2. Call `/api/workflow-triggers/{id}/fire` twice with the same `dedupe_key`.
@@ -153,7 +174,10 @@ Optional webhook dedupe check:
 
 ## Demo 6: Manual Artifact
 
-Use a run id from Demo 4:
+Use a run id from Demo 4. This example assumes Atlas was started with
+`ATLAS_LOOPBACK_NO_AUTH=true` (see Setup); otherwise add
+`-H 'Authorization: Bearer <token>'` with a token from
+`python3 -m atlas.admin create-token <username>`:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8787/api/artifacts \

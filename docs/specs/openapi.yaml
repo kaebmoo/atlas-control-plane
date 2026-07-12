@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: Atlas Control Plane API
-  version: 1.2.0
+  version: 1.3.0
   description: |
-    Current HTTP API implemented by atlas/app.py as of 2026-06-29. Workflow and
+    Current HTTP API implemented by atlas/app.py as of 2026-07-01. Workflow and
     trigger request schemas describe the preferred canonical client shape; the
     backend also accepts some shorthand/defaulted fields documented in the guides.
     All API errors use {"error":"message"}. Per-user bearer tokens are required
@@ -1140,6 +1140,10 @@ paths:
       summary: Upload a direct binary body as a file_ref artifact
       requestBody:
         required: true
+        description: >-
+          Content-Type is stored as-is on the resulting artifact and is not
+          restricted server-side to the media types listed below; any
+          Content-Type value is accepted.
         content:
           application/octet-stream:
             schema: {type: string, format: binary}

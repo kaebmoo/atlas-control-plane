@@ -18,7 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from atlas.config import Config
-from atlas.app import AtlasRuntime
+from atlas.app import AtlasHttpServer, AtlasRuntime
+from scripts.check_lib import request_json
 
 WORKSPACE_ID = ""
 
@@ -177,6 +178,29 @@ def stream_contract(runtime: AtlasRuntime, worker_id: str) -> None:
     sequence = {event["event_type"]: event["seq"] for event in events(runtime, job["id"])}
     assert sequence["files.collected"] < sequence["state"], sequence
     print("  stream forwarding, workspace scope, frozen bytes, terminal barrier OK")
+
+
+def job_artifacts_route(runtime: AtlasRuntime, api_base_url: str, worker_id: str) -> None:
+    # Ported from the deleted T5 check_file_collection.py: a standalone job's collected files
+    # are keyed to the JOB (run_id NULL), so GET /api/jobs/{id}/artifacts must return them for
+    # the Jobs-view download list. End-to-end over REAL HTTP against AtlasHttpServer — a static
+    # substring can't tell a working route from a broken one (mutation: break the route's
+    # len(parts)/job_id filter -> this goes red). Collect MORE than list_artifacts' default
+    # limit (100) so the test also proves the route doesn't silently truncate.
+    MockArtifactsWorker.reset()
+    MockArtifactsWorker.snapshots["sess-first"] = [(f"out/f{i:03d}.txt", f"file-{i}".encode()) for i in range(105)]
+    job = submit(runtime, worker_id, collect=["out/*.txt"])
+    job = wait_terminal(runtime, job["id"])
+    assert job["state"] == "succeeded"
+    status, body, _ = request_json(api_base_url, "GET", f"/api/jobs/{job['id']}/artifacts", None, None)
+    assert status == 200, (status, body)
+    files = [art for art in body["artifacts"] if art.get("kind") == "file_ref"]
+    assert len(files) == 105, f"expected all 105 collected files, got {len(files)} (limit truncation?)"
+    assert "files.out/f104.txt" in {art["key"] for art in files}, "a collected file is missing from the route"
+    # an unknown job id is a clean 404, not a 500.
+    status, _, _ = request_json(api_base_url, "GET", "/api/jobs/job_missing/artifacts", None, None)
+    assert status == 404, status
+    print("  GET /api/jobs/{id}/artifacts returns all collected files over real HTTP (no 100-limit truncation) OK")
 
 
 def no_collection_no_artifact_api(runtime: AtlasRuntime, worker_id: str) -> None:
@@ -369,9 +393,14 @@ def main() -> None:
         workspace = runtime.db.upsert_workspace({"worker_id": worker["id"], "workspace_key": "t9", "workspace_dir": "/tmp/t9-workspace"})
         global WORKSPACE_ID
         WORKSPACE_ID = workspace["id"]
+        # A separate Atlas API server (distinct from the mock WORKER above) for the HTTP route test.
+        api_server = AtlasHttpServer(("127.0.0.1", 0), runtime)
+        threading.Thread(target=api_server.serve_forever, daemon=True).start()
+        api_base = f"http://127.0.0.1:{api_server.server_address[1]}"
         try:
             worker_id = worker["id"]
             stream_contract(runtime, worker_id)
+            job_artifacts_route(runtime, api_base, worker_id)
             no_collection_no_artifact_api(runtime, worker_id)
             malformed_and_integrity(runtime, worker_id)
             caps_and_old_worker(runtime, worker_id)
@@ -382,6 +411,8 @@ def main() -> None:
             runtime.close()  # stop the reaper daemon before the tempdir exits
             server.shutdown()
             server.server_close()
+            api_server.shutdown()
+            api_server.server_close()
     print("check_job_artifacts OK")
 
 

@@ -61,6 +61,9 @@ Based on the current `thclaws --serve` surface:
 - `POST /upload`: file upload support.
 - `POST /v1/deploy`, `/v1/deploy/files`, `/v1/deploy/manifest`: deployment surface.
 - `POST /v1/restart`: process restart surface.
+- `GET /v1/sessions/{sid}/artifacts` and `/v1/sessions/{sid}/artifacts/{aid}` (v0.88.0+): Bearer-authenticated read of a frozen, session-scoped Job Artifact snapshot produced by `collect_files`.
+- `POST /v1/inputs` (v0.88.0+): Bearer-authenticated write of files into a worker's `inputs/` workspace jail.
+- `GET /workspace/sync/stat`: advisory process-wide busy snapshot; not Bearer-protected in plain single-tenant `--serve`, so Atlas only polls it on a worker whose operator-asserted `sync_mode` is an approved shape.
 
 ## Works In Atlas Without Modifying thClaws
 
@@ -78,6 +81,9 @@ Based on the current `thclaws --serve` surface:
   Atlas SQLite.
 - Manual, schedule, webhook, workflow-completion, artifact, and worker-status
   triggers without worker-side orchestration APIs.
+- Frozen artifact collection via `collect_files` on `/agent/run` plus the
+  Bearer-authenticated Job Artifact routes.
+- File handoff to a downstream worker via `POST /v1/inputs`.
 
 ## Workarounds, Not Native
 

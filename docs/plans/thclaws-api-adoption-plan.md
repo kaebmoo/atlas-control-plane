@@ -12,10 +12,10 @@ also containing v0.89.0). The implementation source is
 
 Execution scope: **T0 → T6 are done and merged.** T5/T6 deliberately used the
 then-available `/workspace/sync/*` path behind `tunnel` / `forward_auth`.
-thClaws v0.88.0 now ships the stronger Job Artifact contract, so the next work
-is **T9a → T9b: replace Atlas's sync-based file path with Job Artifacts**.
-T7 and T8's chat-completions half remain deferred — T7 on operational demand,
-T8 Part B on a benchmark.
+thClaws v0.88.0 shipped the stronger Job Artifact contract, and **T9a → T9b
+are now done: Atlas's sync-based file path has been replaced with Job
+Artifacts**. T7 and T8's chat-completions half remain deferred — T7 on
+operational demand, T8 Part B on a benchmark.
 
 ## Objectives
 
@@ -229,7 +229,7 @@ T4  (advisory state + info surface)                — done; sync_mode remains f
 T5  (file collect via sync/export)                 — done; superseded by T9a
 T6  (file push handoff via sync/push)              — done; superseded by T9b
 T9a (collect frozen Job Artifacts)                 — done (requires thClaws >= 0.88.0)
-T9b (handoff through /v1/inputs)                   — requires T9a
+T9b (handoff through /v1/inputs)                   — done
 
 DEFERRED (design recorded; each has an explicit unblock)
 T7  (worker bundle deploy)         — unblock: operational demand; Bearer /v1/*

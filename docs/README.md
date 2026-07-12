@@ -13,6 +13,8 @@
 - [ตัวอย่าง Workflow](workflow-examples.md) — graph, condition, join, gate, manager,
   trigger, artifact และตัวอย่าง API
 - [สคริปต์ Demo](demo-script.md) — ลำดับสำหรับสาธิตระบบ
+- [บทพูด Booth AI Party 2026 (ไทย)](booth-ai-party-2026-th.md) — บทพูดสาธิตหน้าบูธ,
+  T9a/T9b file handoff ระหว่าง worker
 
 ## User guides
 
@@ -20,6 +22,8 @@
 - [Atlas Web User Guide — English](guides/web-user-guide-en.md)
 - [Workflow Examples](workflow-examples.md)
 - [Demo Script](demo-script.md)
+- [Booth AI Party 2026 Talk Script (English)](booth-ai-party-2026-en.md) — booth demo
+  walkthrough, T9a/T9b file handoff between workers
 
 ## เอกสารอ้างอิง / Reference
 
@@ -33,6 +37,10 @@
   อะไรทำได้ (fixed N), อะไรติด (dynamic fan-out / map), workaround และเงื่อนไขควรสร้างเพิ่ม
 - [thClaws Capability Matrix](thclaws-capability-matrix.md) — ความสามารถที่ใช้ได้ทันที,
   workaround และข้อจำกัดของ thClaws
+- [Upstream requests](upstream/) — archived "Ideas" posts filed against thClaws upstream:
+  [Job/artifact API](upstream/thclaws-artifact-api-idea.md) (#178, superseded in part by the
+  T9a/T9b Job Artifact API — see thClaws Worker Protocol Contract) ·
+  [capabilities contract](upstream/thclaws-capabilities-contract-idea.md) (#179, still outstanding)
 
 ## การตัดสินใจเชิงสถาปัตยกรรม / ADRs
 
@@ -158,13 +166,18 @@ docs/
 │   ├── workflow-definition.schema.json
 │   ├── workflow-trigger.schema.json
 │   └── workflow-ai-draft.schema.json
+├── upstream/
+│   ├── thclaws-artifact-api-idea.md
+│   └── thclaws-capabilities-contract-idea.md
 ├── concepts-en.md
 ├── concepts-th.md
 ├── architecture.md
 ├── workflow-patterns.md
 ├── thclaws-capability-matrix.md
 ├── workflow-examples.md
-└── demo-script.md
+├── demo-script.md
+├── booth-ai-party-2026-en.md
+└── booth-ai-party-2026-th.md
 ```
 
 เมื่อเพิ่มเอกสารใหม่ ให้จัดไว้ตามกลุ่มข้างต้นและเพิ่มลิงก์ในไฟล์นี้

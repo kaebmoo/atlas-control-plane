@@ -61,7 +61,7 @@ means. A machine-readable copy of the name/graph/policy/sample-input is in
 
 > **Order matters:** register the worker **first**, then save the workflow. Saving a
 > workflow whose node `role` has no matching worker fails with
-> `workflow node intake role no matching worker: permit`.
+> `workflow node intake role has no matching worker: permit`.
 
 ### Step 1 — Add a worker (Fleet view)
 
@@ -185,7 +185,7 @@ the reserved `_meta.source` for provenance. `channel` must be one of
 
 | Message | Cause / fix |
 | --- | --- |
-| `… role no matching worker: permit` | No worker with role/tag `permit` exists yet → add it in Fleet **first** (Step 1). |
+| `… role has no matching worker: permit` | No worker with role/tag `permit` exists yet → add it in Fleet **first** (Step 1). |
 | run stuck in `running`, never finishes | The matching worker is **offline** → start the mock / thClaws and confirm it shows online. |
 | `missing prompt variable {artifact.review}` | A prior node didn't declare `outputs` (so no artifact) → add `outputs` to that node. |
 | `unknown prompt variable …` | `{input.X}` names a field you didn't include in the run input. |
@@ -273,11 +273,22 @@ form now runs against the real model.
 - **Poll return path:** the page re-reads the run it created; no public callback URL or
   outbound allowlist needed. (Swapping to OB-1 push is a later step.)
 
+## Security model
+
+- **Same-origin CSRF defense:** `app.py` mints a random `CSRF_TOKEN`
+  (`secrets.token_urlsafe(32)`) once at startup and embeds it in the served page. The two
+  mutating endpoints, `/api/submit` and `/api/decide`, reject any `POST` with `403` unless
+  it presents a matching `X-CSRF-Token` header **and** a `Host`/`Origin` pair that resolves
+  to the PoC's own origin. This stops cross-site requests from riding the browser's
+  session; it is not authentication (that's the operator token, kept server-side — see
+  above).
+
 ## Notes & troubleshooting
 
 - **Worker stays offline:** make sure `mock_worker.py` is running *before* `setup.py`
   (setup polls it on register); re-run `setup.py` to re-poll.
 - **This is a demo**, not production: the mock returns canned text, and loopback-no-auth
   must never be used off localhost. Keep the PoC behind localhost/VPN.
-- Isolated from Atlas core: nothing here imports or changes `atlas/`, and it is not part
-  of the completion gate.
+- Isolated from Atlas core: nothing here imports or changes `atlas/`. It IS exercised by
+  the completion gate (`scripts/check_permit_poc.py` + `scripts/check_booth_poc.py`), though
+  it requires no changes to `atlas/` core.

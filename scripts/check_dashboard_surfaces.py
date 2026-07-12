@@ -87,7 +87,7 @@ need('artifact.kind === "file_ref"' in JS, "loadJobArtifacts must filter file_re
 # removed, which is exactly the mutation this guards.
 need(JS.count("loadJobArtifacts(jobId).catch") >= 2, "loadJobArtifacts must run on job open AND on stream close")
 # NB: the backend GET /api/jobs/{id}/artifacts route is behaviour-tested end-to-end in
-# scripts/check_file_collection.py (a static substring can't tell a working route from a broken one).
+# scripts/check_job_artifacts.py (a static substring can't tell a working route from a broken one).
 
 # --- existing anchors must not regress (careless rewrite guard) ---------------------------
 need('id="usageBudgetUnits"' in HTML, "existing Usage marker regressed")

@@ -28,13 +28,21 @@ Atlas is a **control plane** — it gives orders, it doesn't run the AI itself. 
 workers (thClaws) across many machines from one dashboard, over plain HTTP APIs — routing, live
 result streaming, history, and chaining agents into workflows.
 
-**0:30–3:00 — Live demo (the star)** — News Desk, from `demo-script.md`
-1. Show 2 workers online (reporter + anchor).
-2. Send the reporter: *"Find one tech news item and summarize the facts."* → **let people watch it stream live**.
-3. Turn on `Hand off after success` → the anchor turns the reporter's output into a broadcast script
-   → point out the linked parent/child jobs.
-4. (If time) run the full News Desk workflow + human approval gate:
-   it pauses for a human to click Approve before publishing → this is what separates it from a chatbot.
+**0:30–3:00 — Live demo (the star)** — News Desk, at **http://127.0.0.1:8090** (the actual booth
+PoC: run `poc/booth_demo/setup.py` once, then `poc/booth_demo/app.py` — 5-terminal quick start in
+[`poc/booth_demo/README.md`](../poc/booth_demo/README.md))
+1. Show 2 workers online on the index page (reporter + anchor).
+2. Submit a topic on `/news` → **let people watch the reporter's job stream live** in the Atlas
+   dashboard alongside.
+3. Reporter finishes → files appear as downloads and a banner shows Atlas **pushed them into the
+   anchor's workspace** → the anchor reads those files and writes the broadcast script → point
+   out the linked parent/child jobs.
+4. The run pauses at the approval gate → click Approve before publishing → this is what separates
+   it from a chatbot.
+
+*(Fallback if the booth PoC won't cooperate: the generic dashboard-driven flow in
+`demo-script.md` demonstrates the same routing/handoff/approval-gate ideas one dashboard action at
+a time.)*
 
 **3:00–4:00 — Why this = money** (tie to the event theme)
 - **Cheaper:** run on your own machine / a local model → no data leakage, no per-token cloud bill.
@@ -57,7 +65,8 @@ result streaming, history, and chaining agents into workflows.
 ## Booth setup checklist
 
 - [ ] Big screen showing the dashboard with a live stream running = crowd magnet.
-- [ ] 2 workers + Atlas started ahead of time per `demo-script.md` (Terminals 1/2/3).
+- [ ] 2 workers + Atlas + the booth PoC (`poc/booth_demo/setup.py` then `app.py`) started ahead
+      of time — **each worker in its own working directory** (see `poc/booth_demo/README.md`).
 - [ ] **Bad-wifi fallback:** wire a worker to a **local model** so a cloud call can't hang mid-demo —
       and record a backup demo GIF to play if the live run breaks.
 - [ ] Rehearse to finish in 3 minutes (booth visitors won't wait).

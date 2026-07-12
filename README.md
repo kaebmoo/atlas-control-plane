@@ -56,6 +56,14 @@ Atlas currently supports:
 - Bounded binary file artifacts with SHA-256 metadata and secure downloads.
 - Explicit restart recovery that never retries an interrupted worker job
   without operator authorization.
+- Input Adapter ingress: any source (LINE, email via n8n, a web form, or
+  another system) POSTs one JSON envelope (business fields plus a reserved
+  `_meta` object) to an existing trigger/run endpoint, and async execution
+  (`execution: "callback"`) lets a worker deliver its terminal result later via
+  a per-dispatch signed callback token instead of holding a stream open.
+- Return Path: signed outbound webhook delivery (`X-Atlas-Signature`) of a
+  completed workflow run's result to an allowlisted `callback_url`, with
+  bounded automatic retry, manual redelivery, and a deliveries list/detail API.
 
 This is enough to run simple real workflows such as:
 
@@ -267,7 +275,8 @@ curl -H "Authorization: Bearer dev-token-1" \
 
 Open Atlas and go to the **Fleet** view in the left navigation:
 
-1. Click `Add worker` in the Workers card.
+1. Click the **+** button in the Workers card header (labeled `เพิ่ม worker`
+   in the current dashboard).
 2. Fill:
 
 ```text
@@ -297,7 +306,8 @@ When editing an existing worker, leave the token blank to keep the stored token.
 
 ## Add Workspaces
 
-In the **Fleet** view, click `Add workspace` in the Workspaces card.
+In the **Fleet** view, click the **+** button in the Workspaces card header
+(labeled `เพิ่ม workspace` in the current dashboard).
 
 Example:
 
@@ -328,7 +338,8 @@ In the **Command** view:
 
 1. Enter a prompt.
 2. Optionally select a Worker or Workspace.
-3. Click `Run`.
+3. Click the run button at the bottom of the composer (play icon, labeled
+   `เรียกใช้งาน` in the current dashboard), or press **⌘ + Enter**.
 
 If both Worker and Workspace are left on Auto, Atlas resolves a route by:
 
@@ -361,7 +372,8 @@ Find one concise technology news item and summarize the facts.
 ```
 
 3. Enable `Hand off after success`.
-4. Select `Local thClaws 2` under `Send to worker`.
+4. Select `Local thClaws 2` under the handoff worker select (labeled
+   `ส่งไปยัง worker` in the current dashboard).
 5. Keep or edit the Handoff prompt:
 
 ```text
@@ -372,7 +384,8 @@ Do not add facts that are not in the source.
 {result}
 ```
 
-6. Click `Run`.
+6. Click the run button (labeled `เรียกใช้งาน` in the current dashboard), or
+   press **⌘ + Enter**.
 
 When the reporter job succeeds, Atlas creates a child job on the anchor worker.
 The Jobs list shows:
@@ -604,6 +617,7 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 - `POST /api/workers/poll`
 - `GET /api/workers/{id}`
 - `POST /api/workers/{id}/poll`
+- `POST /api/workers/{id}/sync-mode`
 - `DELETE /api/workers/{id}`
 - `GET /api/workspaces`
 - `POST /api/workspaces`
@@ -617,6 +631,8 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 - `GET /api/jobs/{id}`
 - `GET /api/jobs/{id}/events`
 - `POST /api/jobs/{id}/cancel`
+- `GET /api/jobs/{id}/artifacts`
+- `POST /api/worker-callbacks/{id}` (worker-only terminal delivery for `execution: "callback"` jobs)
 - `GET /api/workflows`
 - `POST /api/workflows`
 - `POST /api/workflows/draft`
@@ -641,6 +657,7 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 - `POST /api/workflow-runs/{id}/pause`
 - `POST /api/workflow-runs/{id}/resume`
 - `POST /api/workflow-runs/{id}/cancel`
+- `POST /api/workflow-runs/{id}/deliver` (manually (re)send the signed result to `_meta.reply.callback_url`)
 - `GET /api/approvals`
 - `POST /api/approvals/{id}/approve`
 - `POST /api/approvals/{id}/reject`
@@ -657,6 +674,9 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 - `GET /api/workflow-triggers/{id}/events`
 - `GET /api/audit`
 - `GET /api/usage?from=&to=&format=json|csv` (admin/auditor only)
+- `GET /api/metrics` (aggregate operational counters; any authenticated role)
+- `GET /api/deliveries?run_id=&status=` (list outbound deliveries; operator/auditor)
+- `POST /api/deliveries/{id}/retry` (one bounded manual re-attempt; operator)
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/me`
@@ -669,6 +689,7 @@ Environment variables:
 ```text
 ATLAS_HOST=127.0.0.1
 ATLAS_PORT=8787
+ATLAS_HOME=.
 ATLAS_DB=./data/atlas.sqlite
 ATLAS_API_TOKEN=
 ATLAS_LOOPBACK_NO_AUTH=false
@@ -677,10 +698,31 @@ ATLAS_REQUEST_TIMEOUT=30
 ATLAS_UPLOAD_DIR=./data/uploads
 ATLAS_MAX_UPLOAD_BYTES=10485760
 ATLAS_REQUEST_LOG=false
+ATLAS_REQUIRE_SIGNED_PACKS=false
+ATLAS_PUBLIC_BASE_URL=
+ATLAS_CALLBACK_TIMEOUT_SECONDS=3600
+ATLAS_OUTBOUND_ALLOWLIST=
+ATLAS_OUTBOUND_MAX_ATTEMPTS=5
+ATLAS_OUTBOUND_TIMEOUT=10
 ```
 
 `ATLAS_REQUEST_LOG=true` emits one JSON line per request to stderr (method, path,
 status, client, duration); it leaves response bodies unchanged and is off by default.
+
+`ATLAS_HOME` sets the root used to build the *default* `ATLAS_DB`/`ATLAS_UPLOAD_DIR`
+paths when those are left unset (defaults to the current working directory). If you
+set `ATLAS_DB` or `ATLAS_UPLOAD_DIR` explicitly, a relative path resolves against the
+process's current working directory, not `ATLAS_HOME` — use an absolute path if the
+service's cwd isn't guaranteed. `ATLAS_PUBLIC_BASE_URL`
+is the externally reachable Atlas base URL that workers deliver
+`execution: "callback"` job results to; leaving it unset rejects callback
+jobs at submit time. `ATLAS_CALLBACK_TIMEOUT_SECONDS` bounds how long Atlas
+waits for that callback before reaping the job. `ATLAS_OUTBOUND_ALLOWLIST` is
+a comma-separated list of hosts/CIDRs the Return Path (`OB-1`) may deliver
+signed webhooks to — an empty allowlist disables outbound delivery entirely.
+`ATLAS_OUTBOUND_MAX_ATTEMPTS` and `ATLAS_OUTBOUND_TIMEOUT` bound its retry
+count and per-attempt timeout. `ATLAS_REQUIRE_SIGNED_PACKS` rejects
+unsigned/unverifiable solution-pack imports when set.
 
 Create the first administrator (the token is printed once):
 
@@ -849,15 +891,22 @@ Atlas handles these at the control-plane layer where possible. See
 
 ```text
 atlas/
+  __main__.py         CLI entry point (`python3 -m atlas`)
   app.py              HTTP API and static dashboard server
+  admin.py            admin CLI: create-admin, user/token/role management
+  auth.py             password hashing and API-token verification primitives
   config.py           environment configuration
   db.py               SQLite schema, versioned migration runner, persistence methods
   jobs.py             job runner, streaming bridge, handoff, worker polling
+  sync_files.py       shared upload-store and path-safety primitives for file artifacts
   router.py           routing decisions
+  workflows.py        workflow engine: graph execution, conditions, gates, manager nodes
+  workflow_templates.py  built-in workflow templates
   thclaws_client.py   thClaws HTTP/SSE client
   usage.py            usage totals, CSV, signed offline export, verification
   packs.py            solution pack validate/import/export/sign
   packs/              shipped pack bundles (gov_complaint.json)
+  outbound.py         signed outbound webhook delivery + retry (Return Path)
   byok.py             write-only BYOK key injection (no model key in core)
   static/             dashboard HTML/CSS/JS
 fleet/                Atlas Fleet: instance registry + atlas-fleet CLI (separate component)
@@ -865,7 +914,7 @@ docs/
   architecture.md
   demo-script.md
   thclaws-capability-matrix.md
-  user-guide.md
+  guides/             web-user-guide-en.md · web-user-guide-th.md
   workflow-examples.md
   ops/                deployment + backup/restore runbooks, systemd unit
 scripts/

@@ -66,6 +66,10 @@ The visual builder must cover every currently supported capability:
   `human_selected`, `max_iterations_below`
 - worker-produced artifacts: `text` and `json`
 - routing: worker, workspace, role, and routing hints
+- worker/manager job execution mode (`execution`: `stream` or `callback`) and
+  post-run file collection (`collect_files`, T9a)
+- edge-level file handoff to the downstream node (`push_files`, T9b), gated by
+  `policy.file_handoff`
 - every policy/guard field currently accepted by the backend
 - triggers: `manual`, `schedule`, `webhook`, `workflow_run_completed`,
   `artifact_created`, `worker_status_changed`
@@ -227,6 +231,8 @@ Inspector fields:
 | `outputs` | no | canonical v1 supports one artifact key |
 | `output_format` | no | omit = text; `json` = parse the entire response as JSON |
 | `budget_units` | no | integer > 0; runtime default = 1 |
+| `execution` | no | `stream` (default) or `callback`; job execution mode |
+| `collect_files` | no | array of relative glob patterns; collects real output files as `file_ref` artifacts after the job succeeds (T9a), capped by the backend's `artifact_max_files_cap()` |
 
 Routing precedence is `workspace_id` → `worker_id` → auto-route by role/hints.
 The selected workspace must belong to the selected worker and must not violate
@@ -239,6 +245,9 @@ Artifact rules:
 - The current runtime uses only the first output key.
 - `output_format: "json"` requires a JSON-only parseable response; otherwise the node fails.
 - Output keys should match `^[A-Za-z_][A-Za-z0-9_]*$` so `{artifact.KEY}` can reference them.
+
+See [api-reference-en.md](api-reference-en.md), section "Frozen Job Artifacts
+(`collect_files`, T9a)", for collection timing, deadlines, and caps.
 
 ### 7.2 Manager node
 
@@ -254,8 +263,9 @@ Artifact rules:
 ```
 
 A manager uses the same routing fields and budget behavior as a worker, but it
-does not directly create an output artifact. Every outgoing edge must use
-`manager_selected`, and `target` must equal the edge's `to`.
+does not directly create an output artifact. A manager also accepts the same
+`execution` and `collect_files` fields described in 7.1. Every outgoing edge
+must use `manager_selected`, and `target` must equal the edge's `to`.
 
 The manager worker must return JSON only:
 
@@ -357,7 +367,8 @@ Canonical edge:
 
 `from` and `to` must reference existing nodes. The visual editor should ask for
 confirmation before creating a self-loop, even though the backend accepts one
-when a loop guard exists.
+when a loop guard exists. An edge may also declare `push_files` to hand off
+previously-collected files to its target node; see 8.4.
 
 ### 8.1 Condition table
 
@@ -424,6 +435,20 @@ After a user drags an output port to an input port:
 2. If the source is a human gate with choices, require a choice before creating the edge.
 3. Otherwise default to `always`, then open the edge inspector for optional changes.
 4. If the edge creates a cycle, show a loop warning and require a guard before Save.
+
+### 8.4 File handoff (`push_files`, T9b)
+
+An edge may carry `push_files`, a non-empty array of artifact-key glob
+patterns (for example `files.coder.*`), which hands previously-collected
+`file_ref` artifacts (see `collect_files` in 7.1, T9a) to the edge's target
+node before that node's job starts.
+
+- `push_files` requires `policy.file_handoff: true`; the backend rejects the
+  edge at save time otherwise, and re-checks the policy again at runtime.
+- The downstream node's prompt may reference the handed-off files with the
+  `{files_dir}` placeholder.
+- See [api-reference-en.md](api-reference-en.md), section "File handoff
+  between nodes (`push_files`, T9b)", for transport, caps, and jailing details.
 
 ## 9. Execution semantics the graph must communicate
 
@@ -512,6 +537,7 @@ the correct join.
 | `allowed_worker_ids` | string[] | worker allowlist |
 | `allowed_workspace_ids` | string[] | workspace allowlist |
 | `stop_on_first_failure` | boolean | true = stop after the first failed branch |
+| `file_handoff` | boolean | opt-in enabling edge `push_files` (T9b); off by default |
 
 Recommended defaults for a new workflow:
 
