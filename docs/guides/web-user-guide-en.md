@@ -40,6 +40,7 @@ the per-instance username/password, and stop the server with `Ctrl+C`. Atlas use
 
 | View | Purpose |
 | --- | --- |
+| **Overview** | Default landing dashboard: fleet, job, run, and approval stat tiles plus recent jobs |
 | **Command** | Submit a single job or a two-stage handoff |
 | **Workflows** | Create, validate, explain, repair, and run workflows |
 | **Monitor** | Inspect workflow runs, approvals, artifacts, and triggers |
@@ -47,8 +48,9 @@ the per-instance username/password, and stop the server with `Ctrl+C`. Atlas use
 | **Audit** | Review recent control-plane actions |
 | **Usage** | Per-period run/job/budget totals, a quota-threshold alert, and JSON/CSV download |
 | **Fleet** | Manage workers and workspaces |
+| **Accounts** | Admin-only: manage users and API tokens (see [§11](#11-accounts-users-and-api-tokens)) |
 
-The sidebar counters show workers, active jobs, and finished jobs. The Monitor
+The sidebar counters show workers, active jobs, and pending approvals. The Monitor
 badge counts pending approvals; the Jobs badge counts `queued`, `running`, and
 `cancel_requested` jobs.
 
@@ -126,6 +128,8 @@ Click **Save Workspace**. Workspace cards provide **Edit** and confirmed
 | **Worker** | Auto-route or force a worker |
 | **Workspace** | Auto-route or force a workspace |
 | **Model** | Optional model override; blank uses the worker default |
+| **Collect files** | Optional comma-separated relative paths to freeze as job artifacts on success; see [API Reference: Frozen Job Artifacts](../specs/api-reference-en.md#frozen-job-artifacts-collect_files-t9a) |
+| **Async (callback)** | Opt in to fire-and-forget `execution: "callback"` dispatch; requires `ATLAS_PUBLIC_BASE_URL` on the server; see [API Reference: Async execution](../specs/api-reference-en.md#async-execution-execution-callback) |
 
 The route preview under the Command heading reflects precedence:
 
@@ -176,7 +180,8 @@ It is built from **structural metadata only**: tool inputs and outputs are never
 stored or shown (only their byte size and SHA-256), so a payload can never leak a
 secret. **Events** shows the raw event log — route, session, state, error,
 completion, cancellation, handoff, message, close, and the worker's structured
-events (`thinking`, `tool_use_*`, `skill_*`, `usage`, and any others).
+events (`thinking`, `tool_use_*`, `skill_*`, `usage`, and any others). **Files**
+lists downloads for any job artifacts collected via `collect_files`.
 
 **Cancel** is available while a job is active. Cancellation is best effort at
 the Atlas layer: the job first becomes `cancel_requested`, and the worker may
@@ -211,6 +216,11 @@ If the stream disconnects, select the job card again to replay events.
 
 ## 6. Workflows: multi-step work
 
+Below the graph canvas, the editor is split into four section tabs — **Design**
+(Graph JSON and Builder Lite), **Policy**, **Run** (run input and worker
+resolution), and **Assist** (Draft from plain language) — and only the active
+tab's fields are shown.
+
 ### Definitions and templates
 
 - **New** resets the editor for a new definition.
@@ -226,6 +236,15 @@ Save anything you need before clicking New, selecting another definition,
 copying a template, or drafting: these actions can replace the preview, and the
 current UI does not confirm when switching definitions. This UI version has no
 workflow-definition delete action.
+
+### Packs
+
+The rail's **Packs** list shows portable `atlas.pack.v1` files available on the
+server. Click **Import pack from file (.json)** to load a pack, which creates
+its workflow definition(s) and trigger(s) after validating the graph as usual.
+Select a workflow and click **Export this workflow as a pack** to download it
+as a shareable JSON file. See [Solution Pack Format](../specs/pack-format.md)
+for the file structure.
 
 ### Definition and Graph JSON
 
@@ -287,9 +306,12 @@ Expand **Builder Lite — add nodes & edges...** to update the Graph JSON previe
 It does not save automatically.
 
 Add node fields include Node ID, Node type, Role/label, Prompt/reason, Outputs,
-Budget units, Human choices (`publish:Publish, revise:Revise`), Join mode, and
-Join quorum. Add edge fields include From, To, Condition, Artifact/node, Path,
-and Value(s)/max; the selected condition determines which fields are used.
+Collect files (frozen job artifacts, comma-separated globs), Budget units,
+Human choices (`publish:Publish, revise:Revise`), Join mode, and Join quorum.
+Add edge fields include From, To, Condition, Artifact/node, Path, Value(s)/max,
+and Push files (artifact-key globs handed to the downstream node; requires the
+Policy **File handoff** toggle); the selected condition determines which
+condition fields are used.
 
 Click **Suggest workers** to diagnose unresolved worker nodes. Where a suggestion
 is available, **Apply To JSON** adds its `worker_id`/`workspace_id` to the
@@ -310,6 +332,7 @@ The form and **Policy JSON** remain synchronized while JSON is valid.
 | **Allowed worker IDs** | Comma-separated allowlist |
 | **Allowed workspace IDs** | Comma-separated allowlist |
 | **Stop on first failure** | Stop on the first failed branch when enabled |
+| **File handoff** | Must be enabled for any edge's `push_files` to take effect; off by default |
 
 Invalid raw JSON is preserved and does not update the form; repair its syntax
 before continuing.
@@ -325,13 +348,6 @@ before continuing.
 
 Review Repair output and explicitly click **Save** if it should become active.
 
-### Draft from plain language
-
-Register a worker whose role or tag is `workflow_builder`. Enter a description
-in the Draft **Prompt** and click **Draft**. Graph and policy previews are loaded
-into the editor; explanation, warnings, and trigger drafts appear below. Nothing
-is saved automatically.
-
 ### Run a workflow
 
 Save the definition first. Enter **Run input JSON**, for example:
@@ -341,6 +357,13 @@ Save the definition first. Enter **Run input JSON**, for example:
 ```
 
 Click **Run workflow**. Atlas creates the run and opens **Monitor**.
+
+### Draft from plain language
+
+Register a worker whose role or tag is `workflow_builder`. Enter a description
+in the Draft **Prompt** and click **Draft**. Graph and policy previews are loaded
+into the editor; explanation, warnings, and trigger drafts appear below. Nothing
+is saved automatically.
 
 ## 7. Monitor: workflow operations
 
@@ -456,6 +479,13 @@ and confirmed **Delete**. Fire uses the current Run input JSON as payload. Selec
 the card itself to inspect recent `received`, `started`, `ignored`, or `failed`
 events.
 
+### Deliveries
+
+The **Deliveries** panel lists outbound webhook delivery attempts (the signed
+result Atlas POSTs to a run's `_meta.reply.callback_url`), each with its status
+— `delivered`, `pending`, `failed`, or `blocked` — attempt count, and last
+error. A **Retry** button is offered for `failed` and `blocked` deliveries.
+
 ## 8. Audit
 
 **Audit** shows recent control-plane actions such as `worker.poll`, `job.create`,
@@ -485,8 +515,11 @@ trace state changes and poll/run errors. The UI renders a subset of the latest
 ### Usage view (dashboard)
 
 Administrators and auditors see a **Usage** view. Set an optional **From**/**To**
-range and click **Load** to show workflow-run, job, and budget-unit totals for the
-period, with **Download JSON** / **Download CSV** buttons. Enter an **Expected runs**
+range and click **Load** to show five metric tiles for the period — workflow
+runs, jobs, budget units, Tokens (prompt · output), and Est. cost (USD) — plus a
+7-day workflow-runs bar chart, with **Download JSON** / **Download CSV** buttons.
+Tokens and Est. cost are visibility-only, non-billable estimates counted from
+worker usage; they are not an invoice. Enter an **Expected runs**
 target and an **Alert at %** threshold to get a read-only quota alert (e.g. "7 / 10
 expected runs used (70%)") that turns red once the run volume crosses the threshold.
 The alert is a volume signal only — it never affects `budget_units`, which stays the
@@ -512,7 +545,40 @@ The file contains raw usage only. Atlas does not calculate prices or invoices,
 and BYOK model/token counts are visibility-only. Protect the file and signing
 key as billing/audit material.
 
-## 11. Troubleshooting
+## 11. Accounts: users and API tokens
+
+Administrators see an **Accounts** view for creating and managing users and API
+tokens directly from the dashboard — a browser-based alternative to the raw
+`/api/users` and `/api/tokens` endpoints.
+
+### Users
+
+| Field | Usage |
+| --- | --- |
+| **Username** | Login name |
+| **Password** | Set on creation; there is no in-place password-change action here |
+| **Role** | `viewer`, `operator`, `auditor`, or `admin` |
+
+Click **Add user** to create the account. Each user card shows status, token
+count, and creation time, and provides:
+
+- **Suspend / Enable** — toggle between `active` and `disabled`; disabled for
+  your own account.
+- **Delete** — remove the user after confirmation; disabled for your own
+  account.
+
+### API tokens
+
+| Field | Usage |
+| --- | --- |
+| **Name** | Label for the token, for example `ci-deploy` |
+| **User** | Account the token authenticates as |
+
+Click **Create token**. Atlas shows the full token value once in a reveal
+panel — copy it immediately, since it is never shown again (see [§9](#9-security-and-remote-access)).
+Token cards show creation time and provide confirmed **Revoke**.
+
+## 12. Troubleshooting
 
 | Symptom | Check |
 | --- | --- |

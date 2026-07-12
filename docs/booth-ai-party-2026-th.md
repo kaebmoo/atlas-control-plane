@@ -28,13 +28,17 @@ Atlas คือ **control plane** ตัวสั่งงาน ไม่ใช
 หลายเครื่อง จาก dashboard เดียว ผ่าน HTTP API ธรรมดา — routing, สตรีมผลสด, เก็บประวัติ,
 ต่อ agent เป็น workflow
 
-**0:30–3:00 — Demo สด (พระเอกของงาน)** — News Desk จาก `demo-script.md`
-1. โชว์ worker 2 ตัว online (reporter + anchor)
-2. สั่ง reporter: *"หาข่าวเทคโนโลยีหนึ่งชิ้นแล้วสรุปข้อเท็จจริง"* → **ให้คนดู stream วิ่งสด**
-3. เปิด `Hand off after success` → anchor เอาผลของ reporter ไปเขียนเป็นบทข่าว
-   → ชี้ให้เห็น job แม่/ลูกผูกกัน
-4. (ถ้าเหลือเวลา) รัน workflow News Desk เต็ม + human approval gate:
-   หยุดรอคนกด Approve ก่อนเผยแพร่ → นี่คือจุดต่างจาก chatbot
+**0:30–3:00 — Demo สด (พระเอกของงาน)** — News Desk ที่ **http://127.0.0.1:8090** (ตัว PoC จริงของ
+booth: รัน `poc/booth_demo/setup.py` ครั้งเดียว แล้วรัน `poc/booth_demo/app.py` — ขั้นตอนเต็มแบบ
+5 terminal ดูที่ [`poc/booth_demo/README.md`](../poc/booth_demo/README.md))
+1. โชว์หน้า index ว่า worker 2 ตัว online (reporter + anchor)
+2. กรอกหัวข้อในหน้า `/news` → **ให้คนดู job ของ reporter สตรีมสด** คู่กับ Atlas dashboard ข้างๆ
+3. reporter เสร็จ → ไฟล์ขึ้นให้ดาวน์โหลด พร้อมแบนเนอร์บอกว่า Atlas **ส่งไฟล์เข้าเวิร์กสเปซของ
+   anchor แล้ว** → anchor อ่านไฟล์พวกนั้นแล้วเขียนบทข่าว → ชี้ให้เห็น job แม่/ลูกผูกกัน
+4. รันหยุดรอที่ approval gate → กด Approve ก่อนเผยแพร่ → นี่คือจุดต่างจาก chatbot
+
+*(Fallback ถ้า PoC ของ booth มีปัญหา: flow แบบ dashboard ทั่วไปใน `demo-script.md` โชว์แนวคิด
+routing/handoff/approval gate เดียวกันได้ ทีละสเต็ปในแดชบอร์ด)*
 
 **3:00–4:00 — ทำไมเรื่องนี้ = เงิน** (ผูกกับธีมงาน)
 - **ประหยัด:** รันบนเครื่องตัวเอง / local model → ข้อมูลไม่รั่ว ไม่มีบิล cloud ต่อ token
@@ -56,7 +60,8 @@ Atlas คือ **control plane** ตัวสั่งงาน ไม่ใช
 ## Checklist ตั้ง booth
 
 - [ ] จอใหญ่โชว์ dashboard + ปล่อย live stream วิ่งค้างไว้ = แม่เหล็กดูดคน
-- [ ] รัน 2 worker + Atlas ไว้ล่วงหน้าตาม `demo-script.md` (Terminal 1/2/3)
+- [ ] รัน 2 worker + Atlas + booth PoC (`poc/booth_demo/setup.py` แล้วค่อย `app.py`) ไว้ล่วงหน้า —
+      **แต่ละ worker ต้องแยกคนละ working directory** (ดู `poc/booth_demo/README.md`)
 - [ ] **Fallback เน็ตงานห่วย:** ต่อ worker กับ **local model** ไว้ ไม่งั้น cloud call ค้างกลาง demo
       — และอัด GIF demo สำรองไว้เปิดถ้าสดพัง
 - [ ] ซ้อมให้จบใน 3 นาที (คนที่ booth ไม่รอนาน)

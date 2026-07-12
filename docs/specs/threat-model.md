@@ -98,30 +98,35 @@ auto-assigned name).
    routes (a future GET route ending `/events` would also accept a query token — still RBAC-gated);
    the three SSE bounds are split across `iter_sse` (deadline + per-event cap) and the jobs consumer
    (deadline + total-output cap), covering only in combination; `base_url` is a scheme **prefix**
-   check, not a parsed scheme; and of the four migration steps only `SCHEMA` is a string under
-   `executescript` (002–004 are callables guarded by `PRAGMA table_info`).
+   check, not a parsed scheme; and of the (now twelve) migration steps, `SCHEMA` is the only bare
+   string under `executescript` — two later callables (`_migration_005_deliveries`,
+   `_migration_011_session_leases`) also call `conn.executescript(...)` internally for their own
+   `CREATE TABLE IF NOT EXISTS` steps, while the remaining callables are guarded by
+   `PRAGMA table_info`.
 
-Author self-check evidence:
+Author self-check evidence (a snapshot tied to the 2026-06-30 review commit — files have grown
+since, so treat these as pointers to re-locate by symbol name, not as an evergreen line-number
+index):
 
 | Claim | Code | Verdict |
 |---|---|---|
 | API token = SHA-256 of a 256-bit random token | `auth.py` `generate_api_token`/`hash_api_token` (`token_urlsafe(32)` → `sha256`) | match |
 | Passwords = PBKDF2-HMAC-SHA256, 600k iters | `auth.py:9` `PASSWORD_ITERATIONS`, `hash_password`/`verify_password` (`compare_digest`) | match |
-| role→permission map enforced | `app.py:167` `ROLE_PERMISSIONS[role]`; `_required_permission` (`app.py:895`) | match |
+| role→permission map enforced | `app.py:70` `ROLE_PERMISSIONS[role]`; `_required_permission` (`app.py:1174`) | match |
 | `?token=` only on SSE streams | `app.py:875-881` (GET + path ends `/events`) | match |
-| Secrets never returned | `_public_worker` pops `token` (`app.py:935`); applied on every GET `/api/workers` path | match |
-| `ATLAS_LOOPBACK_NO_AUTH` off by default | `config.py:40` (`_bool_env(..., False)`) | match |
-| Worker SSE bounded (deadline / output cap / per-event cap) | `jobs.py:35-36,237-281` (3600s / 16 MiB); `iter_sse` chunked + 32 MiB cap (`thclaws_client.py:116`) | match |
+| Secrets never returned | `_public_worker` pops `token` (`app.py:1216`); applied on every GET `/api/workers` path | match |
+| `ATLAS_LOOPBACK_NO_AUTH` off by default | `config.py:52` (`_bool_env(..., False)`) | match |
+| Worker SSE bounded (deadline / output cap / per-event cap) | `jobs.py:35-36,237-281` (3600s / 16 MiB); `iter_sse` chunked + 32 MiB cap (`thclaws_client.py:587-589`) | match |
 | Tool/skill payloads never persisted (structural metadata only) | `project_structured_event` (`thclaws_client.py`) whitelists `{id,name,status,*_bytes,*_sha256}`; applied before `append_job_event` (`jobs.py`); **read path also redacts** legacy raw rows via `redact_tool_payload_for_read` in `_stream_job_events` (`app.py`); byte-scan tests (write + legacy read) in `check_jobs.py` | match |
 | Total worker output bounded (raw wire bytes) | `iter_sse(max_total_bytes=…)` caps CUMULATIVE bytes read at the source (`thclaws_client.py`), so data, framing/whitespace padding, comment and data-less frames all count; `JobManager` passes `max_output_bytes`; per-event 32 MiB cap + stream deadline still apply; flood tests (tool payload / event name / terminal / whitespace-padded / comment) in `check_jobs.py` | match |
-| Worker tokens encrypted at rest | `db.py:1569-1624` encrypt-then-MAC (HMAC-CTR, random nonce, domain-separated keys) | match |
+| Worker tokens encrypted at rest | `db.py:2056-2125` encrypt-then-MAC (HMAC-CTR, random nonce, domain-separated keys) | match |
 | `base_url` scheme http(s)-only | `db.py:1493-1496` (raises `ValueError` otherwise) | match |
 | Packs via shared validators; signing optional | `packs.py:14` imports `validate_workflow_references`; `verify_pack_signature` + `require_signed_packs` (`config.py:45`) | match |
 | Risk 1 — dedupe in-process atomic, no UNIQUE | `db.py:1348-1364` SELECT+INSERT under `_lock`; schema `dedupe_key` has a plain INDEX, no UNIQUE | match |
 | Risk 2 — migration `executescript` | `db.py:549`; string steps are `CREATE … IF NOT EXISTS` (`MIGRATIONS`, `db.py:503`) | match |
 | Risk 3 — removing `ATLAS_SECRET_KEY` 400s GET `/api/workers` | `db.py:1594` raises `ValueError` → `app.py:174` maps to 400 | match |
 | Risk 4 — BYOK env-file has no cross-process lock; fleet sidecar does | `byok.py:41-64` atomic-write, no flock; `fleet.py:138-164` `fcntl.flock` across read-modify-write | match |
-| Risk 5 — `max_minutes` = wall-clock from start | `workflows.py:1681-1685` (`started_at + timedelta(minutes=max_minutes)`) | match |
+| Risk 5 — `max_minutes` = wall-clock from start | `workflows.py:2106-2111` (`_workflow_deadline`: `started_at + timedelta(minutes=max_minutes)`) | match |
 
 ## Definition of done (stop criterion — replaces "audit until zero")
 

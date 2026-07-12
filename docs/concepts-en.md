@@ -136,6 +136,7 @@ Creates a thClaws job.
 | `prompt` | The task; supports prompt variables |
 | `outputs` | Artifact keys this node writes |
 | `output_format` | `json` parses the reply as JSON (node fails if unparseable) |
+| `collect_files` | List of relative file-path globs to collect from the worker as `file_ref` artifacts once the job succeeds (T9a; see [API reference](specs/api-reference-en.md)) |
 | `budget_units` | Cost against `max_budget_units` (default `1`) |
 
 The reply is stored under the **first** declared `outputs` key (parsed JSON when
@@ -212,22 +213,32 @@ lists).
 block for bounded loops; do not confuse it with the global `max_iterations`
 policy guard ([§10](#10-policy)).
 
+An edge may also carry `push_files`: a list of artifact-key glob patterns that
+hand previously-collected files (`collect_files`, [§5](#5-node-types)) to the
+downstream worker before its job starts. This requires `policy.file_handoff`
+([§10](#10-policy)); see [API reference](specs/api-reference-en.md) (T9b).
+
 ---
 
 ## 8. Prompt variables
 
-Worker and manager `prompt` strings interpolate `{...}` placeholders from two
-roots:
+Worker and manager `prompt` strings interpolate `{...}` placeholders from
+several roots:
 
 | Placeholder | Source |
 | --- | --- |
 | `{input.X}` | The run input JSON |
 | `{artifact.KEY}` | An artifact's content by key |
+| `{run.KEY}` *(advanced)* | Run metadata |
+| `{node.KEY}` *(advanced)* | The current node's own definition fields |
 
 - Dot-paths walk into nested JSON, e.g. `{artifact.fact_check.verdict}`.
 - Dict/list values are inserted as compact JSON.
 - An unknown root raises `unknown prompt variable`; a missing path raises
   `missing prompt variable`.
+- A downstream worker reached by a `push_files` edge ([§7](#7-edge-conditions))
+  also sees a special, non-dotted `{files_dir}` token — substituted with the
+  path holding the handed-off files, or empty when no push occurred.
 
 A `manager` node additionally reasons over the run state (`graph`,
 `current_node`, `artifacts`, `counters`, `policy`) and must reply with
@@ -267,6 +278,10 @@ Artifacts are shared only by nodes in the **same run**. Each persisted record is
 `{key, kind, content, metadata}`. Prompts (`{artifact.KEY}`), edge conditions,
 and `artifact_created` triggers read them; **Monitor → Artifacts** displays them
 for inspection.
+
+An artifact may also carry an optional data-classification tag (`public`,
+`internal`, `confidential`, `secret`) stored in `metadata.classification` — see
+[API reference](specs/api-reference-en.md).
 
 ### How worker output becomes an artifact
 
@@ -387,6 +402,7 @@ instead of continuing.
 | `allowed_worker_ids` | Allowlist of worker ids |
 | `allowed_workspace_ids` | Allowlist of workspace ids |
 | `stop_on_first_failure` | Stop the run on the first failed branch; **default `true`** |
+| `file_handoff` | Opt-in gate required before any edge `push_files` may run ([§7](#7-edge-conditions)); default off |
 
 With `stop_on_first_failure: false`, independent ready branches keep running, but
 the run still finishes `failed` if any node failed. Each worker/manager node
@@ -454,8 +470,9 @@ gate can be decided **once**.
 - The `requires_human_after_iterations` policy adds one approval pause after the
   given number of jobs have started, independent of explicit gate nodes.
 
-Approval state literals: `pending` → `approved` / `rejected` (or a selected
-choice). A cancelled run cancels pending approvals.
+Approval state literals: `pending` → `approved` | `rejected` | `chosen` (a
+choice-gate decision; the picked id is stored in `selected_choice`) |
+`cancelled` (set on any still-`pending` approval when the run is cancelled).
 
 ---
 

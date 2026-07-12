@@ -123,10 +123,10 @@ Every error uses one JSON shape:
 | GET | `/healthz` | Unauthenticated liveness probe (`{ok, service, version}`) |
 | GET | `/api/health` | Atlas health (authenticated; includes worker count) |
 | GET | `/api/workers` | List workers |
-| POST | `/api/workers` | Create/upsert worker |
+| POST | `/api/workers` | Create/upsert worker (admin) |
 | POST | `/api/workers/poll` | Poll all workers |
 | GET | `/api/workers/{worker_id}` | Get worker |
-| DELETE | `/api/workers/{worker_id}` | Delete worker and its workspaces |
+| DELETE | `/api/workers/{worker_id}` | Delete worker and its workspaces (admin) |
 | POST | `/api/workers/{worker_id}/poll` | Poll one worker |
 | POST | `/api/workers/{worker_id}/sync-mode` | Set sync trust mode (admin); enabling `tunnel`/`forward_auth` runs a pre-enable sync probe — a failed probe returns 400 and leaves the mode unchanged; audited (`worker.sync_mode_changed`) |
 | GET | `/api/workspaces` | List workspaces |
@@ -228,7 +228,9 @@ require `read`.
 
 ### Create or update a Worker
 
-`POST /api/workers` upserts by `id` or `base_url`:
+`POST /api/workers` upserts by `id` or `base_url`. Like `DELETE
+/api/workers/{worker_id}`, this route resolves to the `admin` permission — an
+`operator` token gets `403`; only `admin` can register or delete workers:
 
 ```bash
 curl -sS -X POST "$BASE_URL/api/workers" \
@@ -433,11 +435,14 @@ data: {"text":"hello","seq":4,"created_at":"..."}
 
 Common events are `route`, `session`, `state`, `text`, `error`, `done`,
 `cancel_requested`, `handoff_configured`, `handoff_started`, `handoff_skipped`,
-`handoff_error`, `message`, and `close`. Workers also emit structured events —
-`thinking`, `user_message_injected`, `usage`, `result`, and the tool/skill
-events `tool_use_start`, `tool_use_result`, `tool_use_denied`, `skill_invoked`,
-`skill_invoked_result`. Unknown event names may appear (worker-defined) and are
-safe to ignore.
+`handoff_error`, `message`, and `close`. Atlas itself also appends
+`session_lease_waiting`, `session_lease_acquired`, `callback_dispatched`, and
+`callback_dispatch_unconfirmed` around callback-mode session leasing and
+dispatch. Workers also emit structured events — `thinking`,
+`user_message_injected`, `usage`, `result`, and the tool/skill events
+`tool_use_start`, `tool_use_result`, `tool_use_denied`, `skill_invoked`,
+`skill_invoked_result`. Atlas or the worker may emit additional event names not
+listed here; treat any unrecognized name as safe to ignore.
 
 Tool and skill events carry **structural metadata only** — never the tool
 `input`/`output` payload (which can hold secrets Atlas cannot detect). Their
@@ -900,7 +905,7 @@ If `_meta.reply` is absent or `mode: "none"`, the adapter instead polls
 
 ## 15. OpenAPI 3.1
 
-[openapi.yaml](openapi.yaml) defines 58 paths and 77 operations, including
+[openapi.yaml](openapi.yaml) defines 62 paths and 81 operations, including
 security schemes, parameters, request bodies, response wrappers, and schema
 references. It can drive Swagger UI, Redoc, code generation, or contract tests.
 

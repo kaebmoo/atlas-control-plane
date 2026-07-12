@@ -83,9 +83,14 @@ encryption buys nothing.
    Skip this step only if the snapshot has no `file_ref` artifacts (no tarball was produced).
 5. **Start Atlas** (`systemctl start atlas`). On startup the migration runner brings
    the restored schema forward to the current version if the snapshot is older;
-   restoring a snapshot at the same or newer version is a no-op.
-6. Verify (e.g. dashboard loads, `GET /api/usage` responds, an artifact download
-   succeeds), then delete the `.bak` file.
+   restoring a snapshot at the same or newer version is a no-op. `ATLAS_SECRET_KEY`
+   must be set to the same key that was active when the snapshot was taken — worker
+   tokens are encrypted at rest keyed by it, and a mismatched (or missing) key makes
+   every stored token undecryptable.
+6. Verify (e.g. dashboard loads, `GET /api/usage` responds, `GET /api/workers`
+   responds without error, an artifact download succeeds), then delete the `.bak`
+   file. A `GET /api/workers` failure with a 400 about the stored worker token is
+   the signature of a wrong or missing `ATLAS_SECRET_KEY`.
 
 A snapshot is a normal SQLite file — you can also inspect it directly:
 `sqlite3 atlas-<ts>.sqlite "SELECT MAX(version) FROM schema_version;"`.

@@ -34,6 +34,18 @@ Seed an admin token before first use:
 python3 -m atlas.admin create-admin admin   # prints a one-time API token
 ```
 
+### User & token management
+
+Day-2 user/token lifecycle is CLI-only (no dashboard signup flow beyond the Accounts
+screen for already-authenticated admins):
+
+```bash
+python3 -m atlas.admin create-user alice --role operator   # prompts for a password; no token
+python3 -m atlas.admin create-token alice                  # prints a one-time API token for an existing user
+python3 -m atlas.admin revoke-token <token_id>
+python3 -m atlas.admin list-users
+```
+
 ### systemd
 
 Copy [`atlas.service`](atlas.service) to `/etc/systemd/system/`, adjust the user and
@@ -102,6 +114,8 @@ Leave it off (`false`) to stay completely silent, as in dev.
 | `ATLAS_REQUEST_TIMEOUT` | `30` | Worker request timeout (seconds, per recv). |
 | `ATLAS_MAX_STREAM_SECONDS` | `3600` | Overall wall-clock bound on a single worker stream; a slow/dripping worker is cut at this deadline. |
 | `ATLAS_MAX_JOB_OUTPUT_BYTES` | `16777216` | Cap on a single job's accumulated assistant output. |
+| `ATLAS_ARTIFACT_MAX_BYTES` | `314572800` (300 MiB) | Cap on total bytes of artifacts collected from a worker after a job/workflow node finishes. Clamped to the pinned thClaws upstream limit (300 MiB); a higher value is silently capped there. |
+| `ATLAS_ARTIFACT_MAX_FILES` | `256` | Cap on the number of artifact files collected from a worker per job/workflow node. Clamped to the pinned thClaws upstream limit (256 files). |
 | `ATLAS_PUBLIC_BASE_URL` | — | Externally reachable Atlas base URL (e.g. `https://atlas.example.com`) that thClaws workers deliver `execution: "callback"` results to. Unset ⇒ async jobs are rejected at submit with 400; stream jobs are unaffected. |
 | `ATLAS_CALLBACK_TIMEOUT_SECONDS` | `3600` | Deadline for an `execution: "callback"` job to deliver its terminal callback. The callback token — and the reaper's grace — extend ~5 min (the worker's retry envelope) past it, so the reaper fails the job only after the deadline plus that grace, never cutting off a still-valid retry. |
 | `ATLAS_REQUIRE_SIGNED_PACKS` | `false` | **Set `true` in production (SHALL).** When `true`, `POST /api/packs/import` rejects unsigned packs. Running prod with `false` is an accepted risk owned by Pornthep Nivatyakul (see `specs/threat-model.md`). |

@@ -224,7 +224,7 @@ Atlas มีหน้าที่แค่เรียก thClaws ผ่าน H
   error:
 
   ```
-  workflow node intake role no matching worker: permit
+  workflow node intake role has no matching worker: permit
   ```
 
   วิธีแก้คือกลับไปเพิ่ม worker (role หรือ tag = `permit`) ที่ Fleet ก่อน แล้วกลับมา Save workflow

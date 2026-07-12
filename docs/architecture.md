@@ -73,6 +73,8 @@ This keeps manual override available while letting Atlas auto-route when the cal
 - `audit_log`: operator and system actions.
 - `usage_events`: append-only, idempotent per-job/per-run usage records; the
   Atlas instance is the tenant, so the table has no `tenant_id`.
+- `deliveries`: append-only outbound-delivery ledger for OB-1 webhook callbacks
+  (attempts, status, retry bookkeeping).
 
 ## Workflow Execution
 
@@ -185,7 +187,9 @@ authoritative spec; see also [Concepts §15](concepts-en.md#15-fleet-packs-byok-
 - **`/healthz`** is an unauthenticated liveness endpoint returning `{ok, service, version}`
   that Fleet uses to provision and track instances. Fleet treats an instance as healthy only
   when the response is HTTP 200 **and** `ok` is true; a 200 carrying `{"ok": false}` (reachable
-  but degraded) is recorded `offline`, on both the provision wait and the periodic poll.
+  but degraded) is recorded `offline` by the periodic poll. During the provision wait, the same
+  `ok: false` response is treated as not-yet-healthy and provisioning simply keeps polling until
+  it times out (the instance is never registered).
 
 ## Phase 4 Readiness
 

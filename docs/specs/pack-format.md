@@ -29,6 +29,7 @@ Packs ship under `atlas/packs/*.json`. The reference pack is
     {
       "name": "…",                // required
       "description": "…",         // optional
+      "version": 1,               // optional int, default 1; must be integer-convertible
       "status": "active",         // optional (default active)
       "graph": { … },             // required; validated by the workflow graph validator
       "policy": { … }             // optional; same shape as a workflow definition policy
@@ -67,8 +68,9 @@ On **import**, any concrete `worker_id` / `workspace_id` (or `policy.allowed_*` 
 workflow must exist on the importing instance — otherwise the pack is rejected rather
 than persisting a definition that would dangle at routing time. **Role-only** nodes carry
 no instance-specific ids and stay portable across instances (the recommended way to
-author packs). Export preserves each workflow's `version`, so export→import is a faithful
-round-trip.
+author packs). Export preserves each workflow's graph/policy/version/status, so a
+workflow definition round-trips faithfully; bundle-level metadata (`roles`, `sample_input`,
+`docs`) is pack-authoring-only and is not persisted, so it is emptied on export.
 
 Validation never bypasses the real engine validators (graph **and** policy caps), so a
 pack can only create workflows that the workflow API would otherwise accept.
@@ -76,6 +78,11 @@ pack can only create workflows that the workflow API would otherwise accept.
 On import, a `schedule` trigger's first `next_fire_at` is computed exactly as the
 trigger API does, so imported schedules become due; `enabled: false` is honored (a
 disabled trigger imports disabled and exports disabled).
+
+Import is atomic: if creating any workflow or trigger fails partway through, everything
+already created earlier in that same import call is rolled back before the error is
+raised, so a failed import never leaves a partial pack (orphan workflows/triggers)
+behind.
 
 ## Endpoints (additive)
 

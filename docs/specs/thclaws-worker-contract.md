@@ -92,8 +92,10 @@ Consumers apply the gate as follows:
   `busy: null` and never blocks routing.
 - T5/T6 check the persisted mode immediately before every sync network call.
   A disabled worker produces a skipped event and no request.
-- If upstream adds Bearer auth to sync, Atlas may add a separate `bearer` mode
-  after version/capability verification; existing modes do not silently change.
+- Upstream now ships opt-in Bearer auth for sync (`THCLAWS_SYNC_REQUIRE_AUTH=1`,
+  v0.88.0+). Atlas may add a separate `bearer` mode after version/capability
+  verification confirms the deployed worker actually enforces it; existing
+  modes do not silently change.
 
 ## Busy behavior
 
@@ -114,7 +116,7 @@ that immutable snapshot through Bearer-authenticated routes:
 
 | Endpoint | Response | Atlas rule |
 |---|---|---|
-| `GET /v1/sessions/{sid}/artifacts?workspace_dir=...` | JSON manifest with `session_id`, `patterns`, `artifacts[]`, and optional `skipped[]` | Validate ids, jailed relative paths (including control-character rejection), sizes, lowercase SHA-256 values, unique members after POSIX normalization, and the 256-file/300-MiB caps before downloading anything. Any `skipped[]` is an explicit failure-isolated partial result. |
+| `GET /v1/sessions/{sid}/artifacts?workspace_dir=...` | JSON manifest with `session_id`, `patterns`, `artifacts[]`, and optional `skipped[]` | Validate ids, jailed relative paths (including control-character rejection), sizes, lowercase SHA-256 values, unique members after POSIX normalization, and the 256-file/300-MiB caps before downloading anything. A present, non-empty `skipped[]` is treated as a full collection failure (zero files staged), isolated from the job's own success/fail outcome — not a partial collection of the non-skipped members. |
 | `GET /v1/sessions/{sid}/artifacts/{aid}?workspace_dir=...` | Frozen bytes with `x-sha256` | Require the header, exact manifest length, and an independently calculated SHA-256 to match before staging. |
 | `POST /v1/inputs` — body `{workspace_dir?, files: [{path, content_base64}]}` | `{workspace_dir, written: [{path, size, sha256}]}` | T9b handoff. Caps: 100 files, 64 MiB decoded (96 MiB JSON body). Destinations must sit under an allowed prefix (default `inputs/`; `..`/absolute/`.git`/`.thclaws` always rejected). Files are written ONE AT A TIME with no transaction or idempotency key — Atlas pre-validates the whole batch, sends exactly ONE request per handoff edge, never retries (409s included), and requires `written[]` to cover the exact sent set with matching size and SHA-256 before any success audit or downstream dispatch. |
 
@@ -219,9 +221,16 @@ Atlas deliberately prices by the wire semantics above, not by that port.
 
 ## Outstanding upstream contract requests
 
-- Bearer authentication for `/workspace/sync/*`.
 - `GET /v1/capabilities?workspace_dir=...` for workspace-scoped skills.
 - A protocol/schema version field in `/v1/agent/info`.
+
+Bearer authentication for `/workspace/sync/*` is no longer outstanding: since
+v0.88.0, `THCLAWS_SYNC_REQUIRE_AUTH=1` wraps every `/workspace/sync/*` route in
+the same `check_bearer_headers` gate used by `/v1/*` (opt-in; unset keeps the
+classic trusted-network behavior). Atlas's "Sync capability gate" section could
+add a `bearer` `sync_mode` now, after verifying the deployed worker's version
+and that the flag is actually set, rather than treating this purely as future
+work.
 
 The sync/artifact request is recorded locally in
 [`../upstream/thclaws-artifact-api-idea.md`](../upstream/thclaws-artifact-api-idea.md)

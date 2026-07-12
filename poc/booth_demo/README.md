@@ -136,7 +136,9 @@ Everything above is also visible in the Atlas dashboard Monitor view: node timel
 - Upload keys are sanitized to `upload_<ascii-name>` (Atlas artifact-key charset). Thai
   filenames still display on the page; only the key is transliterated.
 - This is a demo, not production: keep `ATLAS_LOOPBACK_NO_AUTH` strictly on localhost.
-  Nothing here imports or changes `atlas/`; it is not part of the completion gate.
+  Nothing here imports or changes `atlas/` core — but the PoC's own proxy logic (this
+  `app.py` Handler, `setup.py`'s graph wiring) **is** exercised by `scripts/check_booth_poc.py`,
+  which runs as part of the canonical gate (`scripts/gate.sh`).
 
 ## Troubleshooting
 
@@ -149,3 +151,5 @@ Everything above is also visible in the Atlas dashboard Monitor view: node timel
 | anchor says it can't find the folder | worker started in the wrong directory, or an older thClaws without `/v1/inputs` (need v0.88+) |
 | run stuck `running` on a node | that worker is offline or mid-model-call; watch the live stream in the dashboard Jobs view |
 | `file handoff … requires policy.file_handoff` on save | keep `file_handoff: true` in the policy (setup.py sets it) |
+| upload rejected / connection cut mid-upload | per-file cap is **8 MiB** (`MAX_UPLOAD_BYTES` in `app.py`) — split or shrink the attachment |
+| upload gate never releases / activation fails after ~5s | `/api/activate` polls Atlas for the upload gate for **`UPLOAD_ACTIVATION_TIMEOUT_SECONDS = 5`** — if an upload is still in flight or Atlas is slow, it times out; retry once the upload finishes |

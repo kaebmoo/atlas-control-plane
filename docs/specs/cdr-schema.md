@@ -55,6 +55,14 @@ Re-exporting the same period yields byte-identical files: tenants and rows are s
 (`tenant`, then `event_type`), the field order is fixed, and the CSV contains **no
 generated-at timestamp** — only timestamps derived from the data.
 
+## CSV safety
+
+`cdr_csv()` neutralizes spreadsheet-formula injection: any field value starting with
+`=`, `+`, `-`, `@`, tab, CR, or LF is prefixed with a single quote so Excel/Sheets opens
+it as inert text instead of executing it as a formula (e.g. a tenant literally named
+`=1+1`). This only affects how such a value renders in a spreadsheet — the underlying
+CSV cell value is unchanged for any other consumer.
+
 ## Generating
 
 ```bash
