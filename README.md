@@ -709,8 +709,11 @@ ATLAS_OUTBOUND_TIMEOUT=10
 `ATLAS_REQUEST_LOG=true` emits one JSON line per request to stderr (method, path,
 status, client, duration); it leaves response bodies unchanged and is off by default.
 
-`ATLAS_HOME` sets the root Atlas resolves `ATLAS_DB` and `ATLAS_UPLOAD_DIR`
-against (defaults to the current working directory). `ATLAS_PUBLIC_BASE_URL`
+`ATLAS_HOME` sets the root used to build the *default* `ATLAS_DB`/`ATLAS_UPLOAD_DIR`
+paths when those are left unset (defaults to the current working directory). If you
+set `ATLAS_DB` or `ATLAS_UPLOAD_DIR` explicitly, a relative path resolves against the
+process's current working directory, not `ATLAS_HOME` — use an absolute path if the
+service's cwd isn't guaranteed. `ATLAS_PUBLIC_BASE_URL`
 is the externally reachable Atlas base URL that workers deliver
 `execution: "callback"` job results to; leaving it unset rejects callback
 jobs at submit time. `ATLAS_CALLBACK_TIMEOUT_SECONDS` bounds how long Atlas

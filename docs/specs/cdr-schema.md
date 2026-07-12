@@ -58,10 +58,12 @@ generated-at timestamp** — only timestamps derived from the data.
 ## CSV safety
 
 `cdr_csv()` neutralizes spreadsheet-formula injection: any field value starting with
-`=`, `+`, `-`, `@`, tab, CR, or LF is prefixed with a single quote so Excel/Sheets opens
-it as inert text instead of executing it as a formula (e.g. a tenant literally named
-`=1+1`). This only affects how such a value renders in a spreadsheet — the underlying
-CSV cell value is unchanged for any other consumer.
+`=`, `+`, `-`, `@`, tab, CR, or LF has a literal `'` prepended in the exported CSV cell
+(e.g. a tenant literally named `=1+1` is written as `'=1+1`), so Excel/Sheets opens it
+as inert text instead of executing it as a formula. This changes the actual persisted
+cell value, not just how a spreadsheet renders it — a non-spreadsheet consumer (a CSV
+parser, `grep`, a diff) sees the leading `'` too and must strip it to recover the
+original value.
 
 ## Generating
 
