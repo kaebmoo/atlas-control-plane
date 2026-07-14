@@ -32,6 +32,7 @@ const state = {
   events: [],
 };
 
+const API_BASE = (window.ATLAS_API_BASE || "").replace(/\/+$/, "");
 const $ = (selector) => document.querySelector(selector);
 const AUTO_POLL_MS = 60000;
 const DEFAULT_NEWS_HANDOFF_PROMPT = `คุณคือผู้ประกาศข่าว
@@ -48,7 +49,7 @@ async function api(path, options = {}) {
   if (token) headers.set("Authorization", `Bearer ${token}`);
   let response;
   try {
-    response = await fetch(path, { ...options, headers });
+    response = await fetch(API_BASE + path, { ...options, headers });
   } catch (error) {
     setHealth(false);  // transport failure — the control plane is actually unreachable
     throw error;
@@ -1326,7 +1327,7 @@ async function downloadUsage(format) {
   const headers = new Headers();
   const token = localStorage.getItem("atlasApiToken");
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(`/api/usage?${params.toString()}`, { headers });
+  const response = await fetch(`${API_BASE}/api/usage?${params.toString()}`, { headers });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
@@ -1345,7 +1346,7 @@ async function downloadArtifact(artifactId, filename) {
   const headers = new Headers();
   const token = localStorage.getItem("atlasApiToken");
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(`/api/artifacts/${encodeURIComponent(artifactId)}/content`, { headers });
+  const response = await fetch(`${API_BASE}/api/artifacts/${encodeURIComponent(artifactId)}/content`, { headers });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
@@ -1568,7 +1569,7 @@ function openJobStream(jobId) {
     const token = localStorage.getItem("atlasApiToken");
     if (token) headers.set("Authorization", `Bearer ${token}`);
     try {
-      const response = await fetch(`/api/jobs/${jobId}/events?after=0`, { headers, signal: controller.signal });
+      const response = await fetch(`${API_BASE}/api/jobs/${jobId}/events?after=0`, { headers, signal: controller.signal });
       if (!response.ok || !response.body) throw new Error(`stream failed (${response.status})`);
       const reader = response.body.getReader();
       const decoder = new TextDecoder();

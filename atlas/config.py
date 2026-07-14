@@ -37,6 +37,8 @@ class Config:
     # Unset -> execution:"callback" is rejected at submit validation time.
     public_base_url: str | None = None
     callback_timeout_seconds: float = 3600.0
+    serve_ui: bool = True
+    cors_origins: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -60,6 +62,8 @@ class Config:
             outbound_timeout_seconds=float(os.getenv("ATLAS_OUTBOUND_TIMEOUT", "10")),
             public_base_url=(os.getenv("ATLAS_PUBLIC_BASE_URL") or "").rstrip("/") or None,
             callback_timeout_seconds=float(os.getenv("ATLAS_CALLBACK_TIMEOUT_SECONDS", "3600")),
+            serve_ui=_bool_env("ATLAS_SERVE_UI", True),
+            cors_origins=_csv_env("ATLAS_CORS_ORIGINS"),
         )
 
     @property

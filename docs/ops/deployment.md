@@ -88,6 +88,21 @@ server {
 }
 ```
 
+**Security warning — loopback bypass behind a reverse proxy.** `ATLAS_LOOPBACK_NO_AUTH`
+grants the built-in admin identity to any request whose *source address* is
+`127.0.0.1`/`::1`; it does not verify who is actually behind the connection.
+A same-host reverse proxy makes **every** proxied request appear to
+originate from `127.0.0.1`, so it would silently grant admin to anyone the
+proxy accepts a connection from. Keep `ATLAS_LOOPBACK_NO_AUTH=false` (the
+default, and what `scripts/run-prod.sh` enforces) whenever a reverse proxy —
+or anything else — sits in front of Atlas.
+
+**Headless / split UI.** Set `ATLAS_SERVE_UI=false` to run Atlas as an
+API-only server and host the dashboard (or a custom UI) separately — see
+[API Integration Guide](../guides/api-integration-guide-en.md) for the full
+walkthrough and `scripts/serve_ui.py` for the local dev static server used
+while iterating on `atlas/static/` against a headless instance.
+
 ## 3. Request logging
 
 Set `ATLAS_REQUEST_LOG=true` (default in `run-prod.sh`) to emit one JSON line per
@@ -109,6 +124,8 @@ Leave it off (`false`) to stay completely silent, as in dev.
 | `ATLAS_REQUEST_LOG` | `false` | JSON request log to stderr. |
 | `ATLAS_HOST` | `127.0.0.1` | `0.0.0.0` only behind a proxy/firewall. |
 | `ATLAS_PORT` | `8787` | Upstream port for the proxy. |
+| `ATLAS_SERVE_UI` | `true` | `false` runs Atlas headless — `GET /` and `GET /static/*` return 404 JSON; `/healthz` and `/api/*` are unaffected. Use when the dashboard is hosted elsewhere (see [API Integration Guide](../guides/api-integration-guide-en.md)). |
+| `ATLAS_CORS_ORIGINS` | unset (`*`) | Comma-separated allowlist of browser origins allowed to call `/api/*` cross-origin. Unset keeps today's `Access-Control-Allow-Origin: *`; set it when serving the dashboard (or a custom UI) from a different origin than the API. |
 | `ATLAS_DB` | `./data/atlas.sqlite` | SQLite path; WAL mode is enabled automatically. |
 | `ATLAS_MAX_UPLOAD_BYTES` | `10485760` | Upload cap; mirror at the proxy. |
 | `ATLAS_REQUEST_TIMEOUT` | `30` | Worker request timeout (seconds, per recv). |
