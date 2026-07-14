@@ -18,7 +18,8 @@ python3 -m py_compile \
   scripts/check_ui_ux.py scripts/check_input_adapter.py scripts/check_outbound.py \
   scripts/check_observability.py scripts/check_permit_poc.py scripts/check_booth_poc.py scripts/check_event_views.py \
   scripts/check_lib.py scripts/check_async_jobs.py scripts/check_worker_state.py \
-  scripts/check_job_artifacts.py scripts/check_file_handoff.py scripts/check_dashboard_surfaces.py
+  scripts/check_job_artifacts.py scripts/check_file_handoff.py scripts/check_dashboard_surfaces.py \
+  scripts/check_headless.py scripts/serve_ui.py
 
 node --check atlas/static/app.js
 
@@ -51,5 +52,6 @@ python3 scripts/check_async_jobs.py     # T3: x_callback async jobs — pre-auth
 python3 scripts/check_job_artifacts.py    # T9a: frozen Job Artifacts — validation, callback barrier, session lease
 python3 scripts/check_file_handoff.py   # T9b: /v1/inputs file handoff — two workers, policy gate, ack validation, caps
 python3 scripts/check_dashboard_surfaces.py  # T1/T3/T9a/T9b web surfaces: usage tokens+cost, job collect/async, builder handoff
+python3 scripts/check_headless.py     # headless API/UI split: ATLAS_SERVE_UI, CORS allowlist, API_BASE wiring, dev UI server
 
 echo "=== completion gate GREEN ==="

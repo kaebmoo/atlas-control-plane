@@ -191,6 +191,29 @@ authoritative spec; see also [Concepts §15](concepts-en.md#15-fleet-packs-byok-
   `ok: false` response is treated as not-yet-healthy and provisioning simply keeps polling until
   it times out (the instance is never registered).
 
+## Deployment topologies
+
+The dashboard (`atlas/static/`) and the `/api/*` surface are decoupled: the
+same API server can either serve the built-in UI itself or run headless
+behind any external UI, controlled by `ATLAS_SERVE_UI`
+(see [API Integration Guide](guides/api-integration-guide-en.md)).
+
+- **Combined (default).** `ATLAS_SERVE_UI` unset — one process serves both the
+  dashboard at `/` and `/api/*`, exactly as today. No client changes needed.
+- **Headless + external static host.** `ATLAS_SERVE_UI=0` — Atlas answers only
+  `/healthz` and `/api/*`; `GET /` and `GET /static/*` 404. A copy of
+  `atlas/static/` (or a custom UI) is hosted anywhere — a CDN, a separate
+  static host, or `scripts/serve_ui.py` in dev — configured with
+  `window.ATLAS_API_BASE` (`atlas/static/config.js`) pointing at the Atlas
+  origin. `ATLAS_CORS_ORIGINS` scopes which UI origins the browser is allowed
+  to call from; Bearer-token auth is the actual authorization boundary either
+  way.
+- **Headless + third-party app clients.** Non-browser clients (backend
+  services, automation) call `/api/*` directly with a scoped Bearer token —
+  no CORS applies (browsers only). `ATLAS_SERVE_UI=0` is optional here; it
+  only stops Atlas from also answering UI requests, which such clients never
+  make.
+
 ## Phase 4 Readiness
 
 Atlas already has stable boundaries for features thClaws does not expose natively today:

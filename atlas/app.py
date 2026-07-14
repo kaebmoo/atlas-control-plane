@@ -243,6 +243,9 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 with self.server.runtime.db.as_actor(self.auth_identity["username"]):
                     self._handle_api(method, path, parse_qs(parsed.query))
                 return
+            if not self.server.runtime.config.serve_ui:
+                self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                return
             self._handle_static(path)
         except ValueError as exc:
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -1138,7 +1141,14 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _cors_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        allowlist = self.server.runtime.config.cors_origins
+        if not allowlist:
+            self.send_header("Access-Control-Allow-Origin", "*")
+        else:
+            origin = self.headers.get("Origin")
+            if origin and origin in allowlist:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Headers", "authorization, content-type, x-filename")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 

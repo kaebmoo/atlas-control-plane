@@ -63,6 +63,9 @@
 - [API Reference (ไทย)](specs/api-reference-th.md) ·
   [English](specs/api-reference-en.md) · [OpenAPI 3.1](specs/openapi.yaml) — endpoints,
   authentication, payloads, SSE, files, errors และ client checklist
+- [API Integration Guide (ไทย)](guides/api-integration-guide-th.md) ·
+  [English](guides/api-integration-guide-en.md) — วิธีต่อ external web UI หรือ
+  application เข้ากับ Atlas headless API: auth, CORS, SSE, file handoff, dev workflow
 - [Visual Workflow Builder Specification (ไทย)](specs/workflow-visual-builder-spec-th.md) ·
   [English](specs/workflow-visual-builder-spec-en.md) — visual grammar, drag/drop rules,
   JSON mapping, validation, AI workflow และ QA criteria
@@ -136,7 +139,9 @@ docs/
 │   └── 0001-multi-tenancy-silo-vs-pooled.md
 ├── guides/
 │   ├── web-user-guide-th.md
-│   └── web-user-guide-en.md
+│   ├── web-user-guide-en.md
+│   ├── api-integration-guide-th.md
+│   └── api-integration-guide-en.md
 ├── ops/
 │   ├── deployment.md
 │   ├── backup-restore.md
