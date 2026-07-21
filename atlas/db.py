@@ -153,6 +153,8 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     for key in list_fields | json_fields:
         if key in data:
             data[key] = decode_json(data[key], [] if key in list_fields else {})
+    if "default_reply" in data:
+        data["default_reply"] = decode_json(data["default_reply"])
     return data
 
 
@@ -317,6 +319,7 @@ CREATE TABLE IF NOT EXISTS workflow_definitions (
   status TEXT NOT NULL DEFAULT 'draft',
   graph TEXT NOT NULL,
   policy TEXT NOT NULL DEFAULT '{}',
+  default_reply TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -622,6 +625,12 @@ def _migration_012_collection_inflight(conn: sqlite3.Connection) -> None:
     _add_missing_columns(conn, "jobs", {"collection_inflight": "INTEGER NOT NULL DEFAULT 0"})
 
 
+def _migration_013_workflow_default_reply(conn: sqlite3.Connection) -> None:
+    # A workflow-owned default is copied into each new run's input. Nullable keeps every
+    # definition created before this feature on the existing no-default behavior.
+    _add_missing_columns(conn, "workflow_definitions", {"default_reply": "TEXT"})
+
+
 # Ordered, append-only migration steps. A step is either a SQL string (run via
 # executescript) or a callable(conn). The 1-based index is the schema version.
 # Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
@@ -642,6 +651,7 @@ MIGRATIONS: list[str | Any] = [
     _migration_010_job_collect_files,
     _migration_011_session_leases,
     _migration_012_collection_inflight,
+    _migration_013_workflow_default_reply,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -1068,8 +1078,10 @@ class Database:
         with self._lock, self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO workflow_definitions(id, name, description, version, status, graph, policy, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO workflow_definitions(
+                  id, name, description, version, status, graph, policy, default_reply, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     definition_id,
@@ -1079,6 +1091,7 @@ class Database:
                     payload.get("status") or "draft",
                     encode_json(payload.get("graph") or {}),
                     encode_json(payload.get("policy") or {}),
+                    encode_json(payload["default_reply"]) if payload.get("default_reply") is not None else None,
                     now,
                     now,
                 ),
@@ -1107,11 +1120,20 @@ class Database:
             "status": "status",
             "graph": "graph",
             "policy": "policy",
+            "default_reply": "default_reply",
         }
         fields: dict[str, Any] = {}
         for key, column in allowed.items():
             if key in payload:
-                fields[column] = encode_json(payload[key]) if key in {"graph", "policy"} else payload[key]
+                if key in {"graph", "policy"}:
+                    # Always encoded: the columns are NOT NULL, so an explicit None must
+                    # become the JSON string "null" (reads back as None -> treated as {}).
+                    fields[column] = encode_json(payload[key])
+                elif key == "default_reply":
+                    # Nullable column: None means "clear the default", stored as SQL NULL.
+                    fields[column] = encode_json(payload[key]) if payload[key] is not None else None
+                else:
+                    fields[column] = payload[key]
         if not fields:
             return self.get_workflow_definition(definition_id)
         fields["updated_at"] = now_iso()

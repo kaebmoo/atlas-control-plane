@@ -913,7 +913,12 @@ paths:
                 graph:
                   $ref: './workflow-definition.schema.json#/$defs/graph'
                 policy:
-                  $ref: './workflow-definition.schema.json#/$defs/policy'
+                  oneOf:
+                    - $ref: './workflow-definition.schema.json#/$defs/policy'
+                    - type: 'null'
+                  description: null clears the policy; a cleared policy is treated as {}.
+                default_reply:
+                  $ref: '#/components/schemas/WorkflowDefaultReply'
       responses:
         '200':
           description: Updated workflow
@@ -2014,7 +2019,12 @@ components:
         graph:
           $ref: './workflow-definition.schema.json#/$defs/graph'
         policy:
-          $ref: './workflow-definition.schema.json#/$defs/policy'
+          oneOf:
+            - $ref: './workflow-definition.schema.json#/$defs/policy'
+            - type: 'null'
+          description: null after an explicit PUT clear; treated as {}.
+        default_reply:
+          $ref: '#/components/schemas/WorkflowDefaultReply'
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
       additionalProperties: true
@@ -2032,6 +2042,8 @@ components:
           $ref: './workflow-definition.schema.json#/$defs/graph'
         policy:
           $ref: './workflow-definition.schema.json#/$defs/policy'
+        default_reply:
+          $ref: '#/components/schemas/WorkflowDefaultReply'
       additionalProperties: true
 
     WorkflowTemplate:
@@ -2045,6 +2057,15 @@ components:
           $ref: './workflow-definition.schema.json#/$defs/graph'
         policy:
           $ref: './workflow-definition.schema.json#/$defs/policy'
+      additionalProperties: true
+
+    WorkflowDefaultReply:
+      type: [object, 'null']
+      description: Optional reply copied into input._meta.reply for new runs unless that run supplies input._meta.reply.
+      properties:
+        mode: {enum: [webhook, none], default: none}
+        callback_url: {type: [string, 'null'], minLength: 1}
+        correlation_id: {type: string}
       additionalProperties: true
 
     WorkflowPreview:

@@ -178,7 +178,9 @@ Bundle format: [pack-format.md](pack-format.md). Import reuses the workflow grap
 trigger validators (no bypass); an invalid bundle is rejected with a clear error. A
 signed bundle is verified with `ATLAS_SECRET_KEY` on import (a tampered signed pack is
 rejected); unsigned packs are accepted. `import` requires `workflows.manage`; the reads
-require `read`.
+require `read`. Export and import intentionally omit `default_reply`: its callback URL
+is deployment-specific, so a portable bundle never carries one — set it per instance
+after import via `PUT /api/workflows/{id}`.
 
 ### Runs, Artifacts, and Approvals
 
@@ -488,8 +490,19 @@ send the canonical [Workflow Definition Schema](workflow-definition.schema.json)
 Before persistence, the server validates graph, policy, worker/workspace
 references, and allowlists.
 
+`default_reply` is optional and uses the same shape as `input._meta.reply`, for example
+`{"mode":"webhook","callback_url":"https://relay.internal.nt.th/atlas/reply"}`.
+Atlas validates its callback against `ATLAS_OUTBOUND_ALLOWLIST` when the definition is
+created or updated. When a new run has no `input._meta.reply`, Atlas copies this default
+into the persisted run input; a run-level reply always wins. The stored default is
+re-checked against the current allowlist at the moment a run inherits it — a default made
+undeliverable by a later allowlist change rejects only runs that would use it, never a
+run that supplies its own reply. Use `{"mode":"none"}` for a default poll reply, or
+`null` in a `PUT` to clear the default.
+
 `PUT /api/workflows/{id}` is a partial update, but the merged graph/policy must
-remain valid. `DELETE` removes the definition and its triggers. Historical runs
+remain valid. `"policy": null` clears the policy (it then reads back as `null` and is
+treated as `{}`). `DELETE` removes the definition and its triggers. Historical runs
 remain, while their `workflow_definition_id` may become null according to the
 foreign-key behavior.
 
@@ -899,7 +912,7 @@ current allowlist); `POST /api/workflow-runs/{run_id}/deliver` (re)sends using
 the run's own `_meta.reply.callback_url` regardless of the original `mode`.
 Both routes require the run to have already completed.
 
-If `_meta.reply` is absent or `mode: "none"`, the adapter instead polls
+If the effective persisted `_meta.reply` is absent or `mode: "none"`, the adapter instead polls
 `GET /api/workflow-runs/{run_id}` until terminal, then reads
 `GET /api/workflow-runs/{run_id}/artifacts`.
 

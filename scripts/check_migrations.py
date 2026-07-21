@@ -24,6 +24,7 @@ def main() -> None:
         with db.connect() as conn:
             assert "handoff_prompt" in _columns(conn, "jobs")
             assert {"choices", "selected_choice"} <= _columns(conn, "approvals")
+            assert "default_reply" in _columns(conn, "workflow_definitions")
             rows = conn.execute("SELECT version FROM schema_version ORDER BY version").fetchall()
         assert [r[0] for r in rows] == list(range(1, SCHEMA_VERSION + 1)), rows
 
@@ -66,6 +67,8 @@ def main() -> None:
 
         migrated = Database(legacy)
         assert migrated.schema_version() == SCHEMA_VERSION, migrated.schema_version()
+        with migrated.connect() as conn:
+            assert "default_reply" in _columns(conn, "workflow_definitions")
         with migrated.connect() as conn:
             assert "handoff_prompt" in _columns(conn, "jobs")
             assert {"choices", "selected_choice"} <= _columns(conn, "approvals")

@@ -35,11 +35,18 @@ def main() -> None:
                 "name": "Smoke",
                 "graph": {"start": "a", "nodes": [], "edges": []},
                 "policy": {"max_jobs": 1},
+                "default_reply": {"mode": "none"},
             }
         )
         assert definition["graph"]["start"] == "a"
+        assert definition["default_reply"] == {"mode": "none"}
         assert db.list_workflow_definitions()[0]["id"] == definition["id"]
         assert db.update_workflow_definition(definition["id"], {"status": "active"})["status"] == "active"
+        assert db.update_workflow_definition(definition["id"], {"default_reply": None})["default_reply"] is None
+        # Regression: an explicit None graph/policy is encoded (NOT NULL columns), not
+        # written as SQL NULL — it reads back as None and downstream treats it as {}.
+        assert db.update_workflow_definition(definition["id"], {"policy": None})["policy"] is None
+        assert db.update_workflow_definition(definition["id"], {"policy": {"max_jobs": 1}})["policy"] == {"max_jobs": 1}
 
         run = db.create_workflow_run({"workflow_definition_id": definition["id"], "input": {"topic": "x"}})
         assert db.get_workflow_run(run["id"])["input"]["topic"] == "x"

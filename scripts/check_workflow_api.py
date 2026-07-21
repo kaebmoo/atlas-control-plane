@@ -31,6 +31,7 @@ def main() -> None:
                 enable_loopback_without_token=True,
                 upload_dir=Path(tmp) / "uploads",
                 max_upload_bytes=32,
+                outbound_allowlist=("127.0.0.1",),
             )
         )
         server = AtlasHttpServer(("127.0.0.1", 0), runtime)
@@ -85,14 +86,39 @@ def main() -> None:
                         "edges": [],
                     },
                     "policy": {"max_jobs": 1},
+                    "default_reply": {"mode": "webhook", "callback_url": "https://127.0.0.1/reply/default"},
                 },
             )["workflow"]
             workflow_id = workflow["id"]
+            assert workflow["default_reply"] == {"mode": "webhook", "callback_url": "https://127.0.0.1/reply/default"}
             assert request(base_url, "GET", "/api/workflows")["workflows"][0]["id"] == workflow_id
+            assert request(base_url, "GET", f"/api/workflows/{workflow_id}")["workflow"]["default_reply"] == workflow["default_reply"]
             assert request(base_url, "POST", f"/api/workflows/{workflow_id}/validate")["ok"]
+
+            rejected_default_reply = request_error(
+                base_url,
+                "POST",
+                "/api/workflows",
+                {
+                    "name": "blocked reply",
+                    "graph": {"start": "only", "nodes": [{"id": "only", "type": "worker"}], "edges": []},
+                    "default_reply": {"mode": "webhook", "callback_url": "https://10.1.2.3/reply"},
+                },
+            )
+            assert "default_reply.callback_url is not deliverable" in rejected_default_reply["error"], rejected_default_reply
 
             updated = request(base_url, "PUT", f"/api/workflows/{workflow_id}", {"description": "updated"})["workflow"]
             assert updated["description"] == "updated"
+            updated = request(base_url, "PUT", f"/api/workflows/{workflow_id}", {"default_reply": {"mode": "none"}})["workflow"]
+            assert updated["default_reply"] == {"mode": "none"}
+            assert request(base_url, "GET", f"/api/workflows/{workflow_id}")["workflow"]["default_reply"] == {"mode": "none"}
+            rejected_default_reply_update = request_error(
+                base_url,
+                "PUT",
+                f"/api/workflows/{workflow_id}",
+                {"default_reply": {"mode": "webhook", "callback_url": "https://10.1.2.3/reply"}},
+            )
+            assert "default_reply.callback_url is not deliverable" in rejected_default_reply_update["error"], rejected_default_reply_update
             # PUT must reject a non-integer version (would later break pack export) and a
             # status carrying unsafe characters; a valid integer version is accepted.
             bad_version = request_error(base_url, "PUT", f"/api/workflows/{workflow_id}", {"version": "1.0.0"})
@@ -105,6 +131,40 @@ def main() -> None:
 
             bad_input = request_error(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id, "input": [1, 2]})
             assert "input must be an object" in bad_input["error"], bad_input
+
+            inherited = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id, "input": {"topic": "inherited"}})["run"]
+            assert inherited["input"]["_meta"]["reply"] == {"mode": "none"}, inherited
+            updated = request(base_url, "PUT", f"/api/workflows/{workflow_id}", {"default_reply": {"mode": "webhook", "callback_url": "https://127.0.0.1/reply/default"}})["workflow"]
+            assert updated["default_reply"]["mode"] == "webhook"
+            overridden = request(
+                base_url,
+                "POST",
+                "/api/workflow-runs",
+                {"workflow_definition_id": workflow_id, "input": {"_meta": {"reply": {"mode": "none"}}}},
+            )["run"]
+            assert overridden["input"]["_meta"]["reply"] == {"mode": "none"}, overridden
+            request(base_url, "PUT", f"/api/workflows/{workflow_id}", {"default_reply": {"mode": "none"}})
+
+            # A stored default that a later allowlist change made undeliverable (simulated by
+            # writing it at the db layer, which does not re-validate) must reject ONLY a run
+            # that would inherit it — a run supplying its own reply still starts.
+            runtime.db.update_workflow_definition(workflow_id, {"default_reply": {"mode": "webhook", "callback_url": "https://10.9.9.9/stale"}})
+            stale_default = request_error(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id, "input": {"topic": "x"}})
+            assert "default_reply.callback_url is not deliverable" in stale_default["error"], stale_default
+            override_ok = request(
+                base_url,
+                "POST",
+                "/api/workflow-runs",
+                {"workflow_definition_id": workflow_id, "input": {"_meta": {"reply": {"mode": "none"}}}},
+            )["run"]
+            assert override_ok["input"]["_meta"]["reply"] == {"mode": "none"}, override_ok
+            request(base_url, "PUT", f"/api/workflows/{workflow_id}", {"default_reply": {"mode": "none"}})
+
+            # PUT policy:null must not 500 (regression: NULL write into a NOT NULL column);
+            # it clears the policy, which reads back as null and is treated as {} downstream.
+            cleared = request(base_url, "PUT", f"/api/workflows/{workflow_id}", {"policy": None})["workflow"]
+            assert cleared["policy"] is None, cleared
+            request(base_url, "PUT", f"/api/workflows/{workflow_id}", {"policy": {"max_jobs": 1}})
 
             run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id, "input": {"topic": "x"}})["run"]
             run = wait_for_api_run(base_url, run["id"], "failed")
@@ -153,6 +213,7 @@ def main() -> None:
                 f"/api/workflow-triggers/{trigger['id']}/fire",
                 {"payload": {"topic": "manual"}, "dedupe_key": "once"},
             )
+            assert fired["run"]["input"]["_meta"]["reply"] == {"mode": "none"}, fired
             assert wait_for_api_run(base_url, fired["run"]["id"], "failed")["state"] == "failed"
             ignored = request(
                 base_url,

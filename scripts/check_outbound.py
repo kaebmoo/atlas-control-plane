@@ -187,6 +187,25 @@ def main() -> None:
             assert hmac.compare_digest(posts_ok[0]["signature"], expected_sig)
             wait_for_audit(runtime, "delivery.delivered", delivery_a["id"])
 
+            # A2. A workflow-level default is copied into persisted run input before execution,
+            # so the unchanged completion delivery path sends it exactly like a run-level reply.
+            default_reply = {"mode": "webhook", "callback_url": f"{receiver_base}/reply/default"}
+            status, updated_definition = request_json(
+                base_url, "PUT", f"/api/workflows/{definition['id']}", {"default_reply": default_reply}
+            )
+            assert status == 200 and updated_definition["workflow"]["default_reply"] == default_reply, updated_definition
+            status, inherited_response = request_json(
+                base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": definition["id"], "input": {"topic": "inherited"}}
+            )
+            assert status == 202, inherited_response
+            inherited_run = inherited_response["run"]
+            assert inherited_run["input"]["_meta"]["reply"] == default_reply, inherited_run
+            wait_for_run(runtime, inherited_run["id"])
+            inherited_delivery = wait_for_delivery(runtime, inherited_run["id"], "delivered")
+            inherited_posts = [item for item in MockReceiverHandler.received if item["path"] == "/reply/default"]
+            assert len(inherited_posts) == 1 and inherited_posts[0]["body"]["delivery_id"] == inherited_delivery["id"], inherited_posts
+            request_json(base_url, "PUT", f"/api/workflows/{definition['id']}", {"default_reply": None})
+
             # B. A private-IP literal that is not in ATLAS_OUTBOUND_ALLOWLIST is blocked, never
             #    sent (tested against the delivery mechanism directly: IA-1 would already refuse
             #    a run promising this callback_url at ingress, so drive OB-1's own guard the way
