@@ -611,7 +611,10 @@ paths:
         input_sha256, output_sha256}`. `status` is commonly `started`, `ok`,
         `error`, or `denied`, but a worker may report any other value (treat it
         as an open string). The raw tool `input`/`output` is never emitted,
-        including on replay of older databases.
+        including on replay of older databases. Atlas sends `retry: 3000` on
+        connect and a `: keepalive` comment every 15 seconds while a live job is
+        quiet; those transport frames have no event sequence and are not
+        persisted timeline events.
       responses:
         '200':
           description: SSE frames with id, event, and JSON data

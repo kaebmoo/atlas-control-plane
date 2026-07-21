@@ -481,7 +481,10 @@ data: {"id":"t1","name":"Bash","status":"ok","output_bytes":20,"output_sha256":"
 ```
 
 Use `after=<last_seq>` to resume/replay. When the job is terminal and no events
-remain, the server sends `close` and closes the connection.
+remain, the server sends `close` and closes the connection. While a live job is
+quiet, Atlas emits an SSE comment `: keepalive` every 15 seconds and an initial
+`retry: 3000` reconnect hint; comments have no sequence and must not be persisted
+as timeline events.
 
 ## 7. Workflow Definitions and AI Builder
 

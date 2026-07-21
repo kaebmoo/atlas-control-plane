@@ -69,6 +69,11 @@ _CALLBACK_BODY_READ_DEADLINE_SECONDS = 60.0
 # worker open unbounded parallel connections that each pin a handler thread for the whole
 # read deadline. Legit deliveries beyond the bound get 503, which thClaws RETRIES (5xx).
 _CALLBACK_READ_SLOTS = 8
+# Keep a browser/proxy SSE connection visibly alive while a job has no new
+# worker event. 15 seconds stays comfortably below the production proxy's >45s
+# idle requirement in docs/ops/deployment.md.
+_SSE_HEARTBEAT_SECONDS = 15.0
+_SSE_RETRY_MILLISECONDS = 3000
 ROLE_PERMISSIONS = {
     "admin": frozenset({"read", "audit.read", "jobs.run", "workflows.run", "approvals.decide", "workflows.manage", "workers.poll", "resources.manage", "admin", "deliveries.read"}),
     "operator": frozenset({"read", "jobs.run", "workflows.run", "approvals.decide", "workflows.manage", "workers.poll", "resources.manage", "deliveries.read"}),
@@ -1060,7 +1065,14 @@ class AtlasHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
 
+        # An explicit reconnect hint makes browser behavior predictable after a
+        # deploy/proxy disconnect; comments below keep an otherwise quiet stream
+        # from tripping idle timeout without changing the persisted event sequence.
+        self.wfile.write(f"retry: {_SSE_RETRY_MILLISECONDS}\n\n".encode("ascii"))
+        self.wfile.flush()
+
         last_seq = after
+        last_heartbeat = time.monotonic()
         while True:
             rows = runtime.db.get_job_events_after(job_id, last_seq, limit=100)
             for row in rows:
@@ -1072,6 +1084,11 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 payload.setdefault("seq", last_seq)
                 payload.setdefault("created_at", row.get("created_at"))
                 self._write_sse(row["event_type"], payload, last_seq)
+
+            if time.monotonic() - last_heartbeat >= _SSE_HEARTBEAT_SECONDS:
+                self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+                last_heartbeat = time.monotonic()
 
             job = runtime.db.get_job(job_id)
             if not job or (job["state"] in TERMINAL_STATES and not rows):

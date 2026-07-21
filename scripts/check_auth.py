@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from atlas.app import AtlasHttpServer, AtlasRuntime
+from atlas import app as app_module
 from atlas.admin import main as admin_main
 from atlas.auth import LoginRateLimiter, hash_api_token
 from atlas.config import Config
@@ -114,6 +115,7 @@ def main() -> None:
             assert request(base_url, "GET", "/api/me")[0] == 401
             assert request(base_url, "GET", "/api/me", token="invalid-token")[0] == 401
             check_http_method_and_keepalive_safety(base_url, server.server_address[1])
+            check_sse_heartbeat(base_url, server.server_address[1], runtime, worker, admin_token)
 
             status, created = request(
                 base_url,
@@ -304,6 +306,30 @@ def check_http_method_and_keepalive_safety(base_url: str, port: int) -> None:
     with urllib.request.urlopen(request, timeout=5) as response:
         assert response.status == 200 and response.read() == b""
         assert int(response.headers["Content-Length"]) > 0
+
+
+def check_sse_heartbeat(base_url: str, port: int, runtime: AtlasRuntime, worker: dict, admin_token: str) -> None:
+    """A quiet active job emits retry guidance and a non-persisted keepalive comment."""
+    job = runtime.db.create_job({"worker_id": worker["id"], "prompt": "heartbeat", "state": "running"})
+    original = app_module._SSE_HEARTBEAT_SECONDS
+    app_module._SSE_HEARTBEAT_SECONDS = 0.05
+    raw = socket.create_connection(("127.0.0.1", port), timeout=3)
+    try:
+        raw.sendall(
+            (
+                f"GET /api/jobs/{job['id']}/events?after=0 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+                f"Authorization: Bearer {admin_token}\r\n\r\n"
+            ).encode("ascii")
+        )
+        deadline = time.monotonic() + 3
+        response = b""
+        while b": keepalive\n\n" not in response and time.monotonic() < deadline:
+            response += raw.recv(4096)
+        assert b"retry: 3000\n\n" in response and b": keepalive\n\n" in response, response[:400]
+    finally:
+        app_module._SSE_HEARTBEAT_SECONDS = original
+        raw.close()
+        runtime.db.update_job(job["id"], state="succeeded")
 
 
 def check_worker_token_migration(path: Path) -> None:

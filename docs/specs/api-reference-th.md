@@ -462,7 +462,9 @@ data: {"id":"t1","name":"Bash","status":"ok","output_bytes":20,"output_sha256":"
 ```
 
 ใช้ `after=<last_seq>` เพื่อ resume/replay เมื่อ job terminal และไม่มี event ค้าง server ส่ง
-`close` แล้วปิด connection
+`close` แล้วปิด connection ระหว่าง job ที่ยังทำงานแต่เงียบ Atlas ส่ง SSE comment
+`: keepalive` ทุก 15 วินาที และส่ง reconnect hint แรก `retry: 3000`; comment ไม่มี sequence
+จึงห้ามเก็บเป็น timeline event
 
 ## 7. Workflow Definitions และ AI Builder
 
