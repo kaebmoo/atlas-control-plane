@@ -72,9 +72,20 @@ Current limitations:
 Identity endpoints:
 
 - `POST /api/auth/login` with `username` and `password` returns a one-time raw
-  token response plus public user metadata.
+  **dashboard session** plus public user metadata and `session.expires_at`. Sessions
+  expire after 8 hours by default and are capped at five active sessions per user;
+  creating another revokes only the oldest session. `GET /api/me` repeats the
+  session metadata so a UI can warn before expiry.
 - `POST /api/auth/logout` revokes the current per-user token.
-- `GET /api/me` returns the authenticated username and role.
+- Failed login attempts are bounded in memory by normalized username + direct peer
+  IP before password verification (default: 5 attempts/minute, then 60-second
+  cooldown). A limited login returns `429` with `Retry-After`; Atlas deliberately
+  does not trust `X-Forwarded-For`. A process restart resets this short defensive
+  window, so production reverse proxies must also rate-limit their public edge.
+- Admin-created API tokens have immutable `purpose: "api"`; pass an optional future
+  UTC `expires_at` to `POST /api/tokens`, or omit it for an explicitly non-expiring
+  integration token. Token metadata exposes `purpose`, `expires_at`, and `revoked_at`,
+  never a raw token or hash.
 - Admin-only CRUD: `/api/users`, `/api/users/{id}`, `/api/tokens`, and
   `/api/tokens/{id}`. `POST /api/tokens/{id}/revoke` is an additive revoke alias.
 - Roles: `viewer` reads normal resources; `operator` runs jobs/workflows and
@@ -104,6 +115,8 @@ Every error uses one JSON shape:
 | `400` | Invalid payload, state transition, or reference |
 | `401` | Missing or incorrect token |
 | `403` | Authenticated role lacks the route permission |
+| `429` | Login rate limit reached; obey the `Retry-After` response header |
+| `405` | Method is unsupported; inspect the response `Allow` header |
 | `404` | Resource or route not found |
 | `500` | Exception not converted into a validation error |
 
@@ -113,6 +126,12 @@ Every error uses one JSON shape:
 - Job/run creation and some approval/trigger actions return `202` before background work finishes.
 - Continue with GET, workflow events, or job SSE to observe completion.
 - There is no general idempotency key; trigger fire supports `dedupe_key`.
+- `HEAD` mirrors a successful `GET` route's status and headers but has no body.
+  `PATCH` is not a partial-update contract in Atlas and returns `405` with `Allow`.
+- If Atlas rejects a request before consuming a declared request body (for example,
+  auth/RBAC or an unsupported method), it closes that HTTP/1.1 connection instead
+  of risking body bytes being parsed as the next keep-alive request. Clients should
+  retry only on a fresh connection.
 
 ## 4. Endpoint catalog
 
@@ -462,7 +481,10 @@ data: {"id":"t1","name":"Bash","status":"ok","output_bytes":20,"output_sha256":"
 ```
 
 Use `after=<last_seq>` to resume/replay. When the job is terminal and no events
-remain, the server sends `close` and closes the connection.
+remain, the server sends `close` and closes the connection. While a live job is
+quiet, Atlas emits an SSE comment `: keepalive` every 15 seconds and an initial
+`retry: 3000` reconnect hint; comments have no sequence and must not be persisted
+as timeline events.
 
 ## 7. Workflow Definitions and AI Builder
 
@@ -505,6 +527,11 @@ remain valid. `"policy": null` clears the policy (it then reads back as `null` a
 treated as `{}`). `DELETE` removes the definition and its triggers. Historical runs
 remain, while their `workflow_definition_id` may become null according to the
 foreign-key behavior.
+
+For a visual editor, send the version the client loaded as `expected_version`
+(and do not also send `version`). A matching save increments the definition's
+version atomically; a stale concurrent save returns `409`, so the editor can
+refresh, present a merge choice, and avoid silently overwriting another user.
 
 ### File handoff between nodes (`push_files`, T9b)
 
@@ -599,10 +626,11 @@ GET /api/workflow-runs?workflow_definition_id=wfd_xxx&limit=20
 ```
 
 Run detail contains `run`, runtime `nodes`, traversed `edges`, and `approvals`.
-Lifecycle events are a JSON list, not SSE:
+Lifecycle events are a JSON cursor page, not SSE. Persist `next_after`, then request
+only sequences after it; `has_more` says whether the same run has another page:
 
 ```text
-GET /api/workflow-runs/wfr_xxx/events?limit=500
+GET /api/workflow-runs/wfr_xxx/events?limit=500&after=0
 ```
 
 ### Pause, Resume, Recovery, and Cancel

@@ -769,6 +769,11 @@ policy สูงเกินความจำเป็น แต่ห้าม
 ให้ client validate ด้วย schema/semantic validator; ตอน Save backend จะ validate ซ้ำ ส่วน AI
 draft endpoint validate ผลลัพธ์ก่อนส่งกลับอยู่แล้ว
 
+**สัญญา Concurrent Save.** เมื่อแก้ definition ที่มีอยู่ ให้เก็บ `workflow.version` ที่โหลดมา
+และส่งเป็น `expected_version` ใน `PUT` (ห้ามส่งทั้ง `expected_version` และ `version`) save ที่
+สำเร็จจะเพิ่ม version; `409` แปลว่ามี editor คนอื่น save ก่อน ให้เก็บ graph ที่ยังไม่ save ไว้,
+โหลด definition จาก server แล้วเสนอทางเลือก merge/reload แทนการเขียนทับ
+
 ## 18. ตัวอย่างที่ครอบคลุม node ทุกชนิด
 
 ```json

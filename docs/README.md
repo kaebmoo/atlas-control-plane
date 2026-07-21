@@ -98,6 +98,8 @@
   API และ dashboard design
 - [Workflow Engine Coding Plan](plans/workflow-engine-coding-plan.md) — milestone และ
   implementation checklist
+- [Atlas UX Enablement Handoff](plans/atlas-ux-enablement.md) — contracts ready for a
+  separate UI, deployment boundary, and product/architecture decisions still required
 - [Sovereign Platform Plan (GA Gaps)](plans/sovereign-platform-plan.md) — สิ่งที่ยังขาด
   เพื่อไป GA: auth/RBAC, multi-tenant แบบ silo, metering/billing, fleet provisioning, hardening
 - Usage Metering & Billing Plan (`plans/usage-metering-billing-plan.md`, internal — not
@@ -147,6 +149,7 @@ docs/
 │   ├── backup-restore.md
 │   └── atlas.service
 ├── plans/
+│   ├── atlas-ux-enablement.md
 │   ├── workflow-engine-plan.md
 │   ├── workflow-engine-coding-plan.md
 │   ├── sovereign-platform-plan.md

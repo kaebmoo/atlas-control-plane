@@ -17,6 +17,14 @@ def _csv_env(name: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 @dataclass(frozen=True)
 class Config:
     host: str
@@ -39,6 +47,11 @@ class Config:
     callback_timeout_seconds: float = 3600.0
     serve_ui: bool = True
     cors_origins: tuple[str, ...] = ()
+    session_token_ttl_seconds: int = 8 * 60 * 60
+    max_active_sessions: int = 5
+    login_rate_limit_attempts: int = 5
+    login_rate_limit_window_seconds: int = 60
+    login_rate_limit_cooldown_seconds: int = 60
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -64,6 +77,11 @@ class Config:
             callback_timeout_seconds=float(os.getenv("ATLAS_CALLBACK_TIMEOUT_SECONDS", "3600")),
             serve_ui=_bool_env("ATLAS_SERVE_UI", True),
             cors_origins=_csv_env("ATLAS_CORS_ORIGINS"),
+            session_token_ttl_seconds=_positive_int_env("ATLAS_SESSION_TOKEN_TTL_SECONDS", 8 * 60 * 60),
+            max_active_sessions=_positive_int_env("ATLAS_MAX_ACTIVE_SESSIONS", 5),
+            login_rate_limit_attempts=_positive_int_env("ATLAS_LOGIN_RATE_LIMIT_ATTEMPTS", 5),
+            login_rate_limit_window_seconds=_positive_int_env("ATLAS_LOGIN_RATE_LIMIT_WINDOW_SECONDS", 60),
+            login_rate_limit_cooldown_seconds=_positive_int_env("ATLAS_LOGIN_RATE_LIMIT_COOLDOWN_SECONDS", 60),
         )
 
     @property

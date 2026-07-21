@@ -34,6 +34,7 @@ upload/download bodies — see §4–5). Every error is
 | `400` | Invalid payload, state transition, or reference |
 | `401` | Missing or incorrect token |
 | `403` | Authenticated role lacks the route permission |
+| `429` | Login rate limit; wait for the `Retry-After` duration |
 | `404` | Resource or route not found |
 | `500` | Unhandled exception |
 
@@ -51,7 +52,7 @@ Atlas uses per-user Bearer tokens (verified against `_is_authorized()` in
 curl -sS -X POST "$BASE_URL/api/auth/login" \
   -H 'content-type: application/json' \
   -d '{"username":"alice","password":"..."}'
-# -> {"token":"<raw token, shown once>", "user": {"id":"...","username":"alice","role":"operator",...}}
+# -> {"token":"<raw token, shown once>", "user": {"id":"...","username":"alice","role":"operator",...}, "session":{"token_id":"...","expires_at":"...Z"}}
 ```
 
 Store the returned `token` client-side (the dashboard uses
@@ -62,8 +63,17 @@ call:
 Authorization: Bearer <token>
 ```
 
-`POST /api/auth/logout` revokes the token currently in use; `GET /api/me`
-returns the authenticated identity.
+This is a `purpose=session` token, not a general integration credential: it expires
+after 8 hours by default and `GET /api/me` repeats `session.expires_at` so the UI
+can warn or sign out cleanly. Each user has at most five unexpired sessions; a new
+login revokes only the oldest excess session. `POST /api/auth/logout` revokes the
+token currently in use.
+
+Failed logins are limited before PBKDF2 by normalized username + direct peer IP
+(default 5/min, then a 60-second cooldown). A limit response is `429` with
+`Retry-After`; clients should wait rather than retrying. The limiter is a bounded
+in-memory layer and resets on Atlas restart, so deploy a rate limit at the reverse
+proxy/WAF as well. Atlas intentionally does not trust `X-Forwarded-For`.
 
 **Machine-to-machine (a backend service, no login flow):** an admin creates a
 user with the right role, then mints a token for it — both are admin-only:
@@ -75,11 +85,14 @@ curl -sS -X POST "$BASE_URL/api/users" -H 'content-type: application/json' \
 
 curl -sS -X POST "$BASE_URL/api/tokens" -H 'content-type: application/json' \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{"username":"reporting-bot","name":"reporting service"}'
+  -d '{"username":"reporting-bot","name":"reporting service","expires_at":"2026-12-31T00:00:00Z"}'
 # -> {"token": {...}, "api_token": "<raw secret, shown once — store it now>"}
 ```
 
-A token inherits its user's role — there is no separate per-token scope. Pick
+A machine token has immutable `purpose: "api"`; omit `expires_at` only when a
+deliberately non-expiring integration credential is required. List/get token
+metadata exposes `purpose`, `expires_at`, and revocation state, never a raw token
+or token hash. A token inherits its user's role — there is no separate per-token scope. Pick
 the role that matches the integration's job, **never share the admin token**
 with a client that only needs to read usage or run jobs:
 

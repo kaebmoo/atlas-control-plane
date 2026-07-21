@@ -37,7 +37,7 @@ paths:
     post:
       tags: [Identity]
       operationId: login
-      summary: Verify username/password and issue a per-user API token
+      summary: Verify username/password and issue a time-bounded dashboard session
       security: []
       requestBody:
         required: true
@@ -59,6 +59,8 @@ paths:
                 properties:
                   token: {type: string, writeOnly: true}
                   user: {$ref: '#/components/schemas/User'}
+                  session: {$ref: '#/components/schemas/Session'}
+        '429': {$ref: '#/components/responses/LoginRateLimited'}
         default: {$ref: '#/components/responses/Error'}
 
   /api/auth/logout:
@@ -84,6 +86,7 @@ paths:
                 type: object
                 properties:
                   user: {$ref: '#/components/schemas/User'}
+                  session: {$ref: '#/components/schemas/Session'}
         default: {$ref: '#/components/responses/Error'}
 
   /api/users:
@@ -157,8 +160,20 @@ paths:
                 user_id: {type: string}
                 username: {type: string}
                 name: {type: string}
+                expires_at:
+                  type: [string, 'null']
+                  format: date-time
+                  description: Optional future UTC expiry; null or omission makes a non-expiring API token.
       responses:
-        '201': {description: Token metadata and one-time raw api_token}
+        '201':
+          description: Token metadata and one-time raw api_token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: {$ref: '#/components/schemas/ApiToken'}
+                  api_token: {type: string, writeOnly: true}
         default: {$ref: '#/components/responses/Error'}
 
   /api/tokens/{token_id}:
@@ -596,7 +611,10 @@ paths:
         input_sha256, output_sha256}`. `status` is commonly `started`, `ok`,
         `error`, or `denied`, but a worker may report any other value (treat it
         as an open string). The raw tool `input`/`output` is never emitted,
-        including on replay of older databases.
+        including on replay of older databases. Atlas sends `retry: 3000` on
+        connect and a `: keepalive` comment every 15 seconds while a live job is
+        quiet; those transport frames have no event sequence and are not
+        persisted timeline events.
       responses:
         '200':
           description: SSE frames with id, event, and JSON data
@@ -909,6 +927,10 @@ paths:
                 name: {type: string}
                 description: {type: string}
                 version: {type: integer}
+                expected_version:
+                  type: integer
+                  minimum: 1
+                  description: Optional optimistic-concurrency precondition. Do not combine with version; a matching save increments version by one, a stale save returns 409.
                 status: {type: string}
                 graph:
                   $ref: './workflow-definition.schema.json#/$defs/graph'
@@ -928,6 +950,7 @@ paths:
                 type: object
                 properties:
                   workflow: {$ref: '#/components/schemas/WorkflowDefinition'}
+        '409': {$ref: '#/components/responses/Error'}
         default: {$ref: '#/components/responses/Error'}
     delete:
       tags: [Workflows]
@@ -1171,19 +1194,26 @@ paths:
       - name: limit
         in: query
         schema: {type: integer, default: 500, minimum: 1}
+      - name: after
+        in: query
+        description: Return only event sequence numbers greater than this cursor (default 0).
+        schema: {type: integer, minimum: 0, default: 0}
     get:
       tags: [Workflow Runs]
       operationId: listWorkflowRunEvents
       summary: List persisted workflow lifecycle events
       responses:
         '200':
-          description: Events
+          description: Sequence-cursor page of events
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   events: {type: array, items: {$ref: '#/components/schemas/WorkflowEvent'}}
+                  after: {type: integer, minimum: 0}
+                  next_after: {type: integer, minimum: 0}
+                  has_more: {type: boolean}
         default: {$ref: '#/components/responses/Error'}
 
   /api/workflow-runs/{run_id}/pause:
@@ -1657,7 +1687,7 @@ components:
 
   responses:
     Error:
-      description: Error response; normally 400, 401, 403, 404, or 500
+      description: Error response; normally 400, 401, 403, 404, 405, 429, or 500. Unsupported methods include an Allow header.
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
@@ -1670,6 +1700,15 @@ components:
             required: [deleted]
             properties:
               deleted: {type: boolean, const: true}
+    LoginRateLimited:
+      description: Login attempts exceeded the in-memory per-username-and-peer-IP limit.
+      headers:
+        Retry-After:
+          schema: {type: integer, minimum: 1}
+          description: Seconds until another login attempt may be made.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
     RunResponse:
       description: Updated workflow run
       content:
@@ -1754,6 +1793,27 @@ components:
         password: {type: string, format: password}
         role: {type: string, enum: [admin, operator, viewer, auditor]}
         status: {type: string, enum: [active, disabled]}
+
+    Session:
+      type: object
+      required: [token_id, expires_at]
+      properties:
+        token_id: {type: string, description: Public token metadata identifier, not the bearer secret.}
+        expires_at: {type: string, format: date-time}
+
+    ApiToken:
+      type: object
+      required: [id, user_id, name, purpose, created_at]
+      properties:
+        id: {type: string}
+        user_id: {type: string}
+        username: {type: string}
+        name: {type: string}
+        purpose: {type: string, enum: [api, session], description: Immutable token lifecycle class.}
+        expires_at: {type: [string, 'null'], format: date-time}
+        last_used_at: {type: [string, 'null'], format: date-time}
+        created_at: {type: string, format: date-time}
+        revoked_at: {type: [string, 'null'], format: date-time}
 
     Error:
       type: object

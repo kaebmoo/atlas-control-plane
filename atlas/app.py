@@ -18,8 +18,9 @@ from typing import Any, cast
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
+from .auth import LoginRateLimiter
 from .config import Config
-from .db import ARTIFACT_KINDS, WORKER_SYNC_MODES, Database, new_id, now_iso, resolve_in_store
+from .db import ARTIFACT_KINDS, WORKER_SYNC_MODES, Database, WorkflowVersionConflict, new_id, now_iso, resolve_in_store
 from .jobs import CallbackSessionPending, JobManager, TERMINAL_STATES, verify_callback_token
 from .outbound import OutboundService, OutboundSettings
 from .packs import export_pack, import_pack, list_available_packs
@@ -68,6 +69,11 @@ _CALLBACK_BODY_READ_DEADLINE_SECONDS = 60.0
 # worker open unbounded parallel connections that each pin a handler thread for the whole
 # read deadline. Legit deliveries beyond the bound get 503, which thClaws RETRIES (5xx).
 _CALLBACK_READ_SLOTS = 8
+# Keep a browser/proxy SSE connection visibly alive while a job has no new
+# worker event. 15 seconds stays comfortably below the production proxy's >45s
+# idle requirement in docs/ops/deployment.md.
+_SSE_HEARTBEAT_SECONDS = 15.0
+_SSE_RETRY_MILLISECONDS = 3000
 ROLE_PERMISSIONS = {
     "admin": frozenset({"read", "audit.read", "jobs.run", "workflows.run", "approvals.decide", "workflows.manage", "workers.poll", "resources.manage", "admin", "deliveries.read"}),
     "operator": frozenset({"read", "jobs.run", "workflows.run", "approvals.decide", "workflows.manage", "workers.poll", "resources.manage", "deliveries.read"}),
@@ -132,6 +138,14 @@ class AtlasRuntime:
         self.callback_reject_audited_at: dict[str, float] = {}
         self.callback_reject_audit_lock = threading.Lock()
         self.callback_read_slots = threading.BoundedSemaphore(_CALLBACK_READ_SLOTS)
+        # Login attempts are checked before the expensive PBKDF2 verification. The
+        # limiter intentionally keys on the direct TCP peer, never X-Forwarded-For,
+        # because Atlas does not own a trusted-proxy configuration boundary.
+        self.login_rate_limiter = LoginRateLimiter(
+            config.login_rate_limit_attempts,
+            config.login_rate_limit_window_seconds,
+            config.login_rate_limit_cooldown_seconds,
+        )
         # OB-1 restart recovery: no delivery-attempt thread survives a restart either. Off the
         # main thread since a large backlog of stuck/missing deliveries could otherwise block
         # server startup for as long as their retry loops take.
@@ -157,12 +171,18 @@ class AtlasHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_OPTIONS(self) -> None:
+        self._close_if_request_body_unread()
         self.send_response(HTTPStatus.NO_CONTENT)
         self._cors_headers()
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_GET(self) -> None:
+        self._dispatch("GET")
+
+    def do_HEAD(self) -> None:
+        # HEAD is the GET metadata contract with no response body. Reuse the exact
+        # authorization/RBAC/route code so it cannot drift from GET semantics.
         self._dispatch("GET")
 
     def do_POST(self) -> None:
@@ -174,11 +194,18 @@ class AtlasHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         self._dispatch("DELETE")
 
+    def do_PATCH(self) -> None:
+        # Atlas has no partial-update contract today. Say so explicitly instead of
+        # BaseHTTPRequestHandler's generic 501, and make the advertised methods
+        # discoverable to browser clients and reverse proxies.
+        self._method_not_allowed()
+
     def log_message(self, fmt: str, *args: Any) -> None:
         return
 
     def handle_one_request(self) -> None:
         self._t0 = time.monotonic()
+        self._request_body_consumed = False
         try:
             super().handle_one_request()
         except (ConnectionResetError, BrokenPipeError):
@@ -235,10 +262,12 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     self._handle_worker_callback(parts[2])
                     return
                 if not self._is_authorized():
+                    self._close_if_request_body_unread()
                     self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
                     return
                 permission = _required_permission(method, parts)
                 if permission not in ROLE_PERMISSIONS.get(self.auth_identity["role"], frozenset()):
+                    self._close_if_request_body_unread()
                     self._json({"error": "forbidden"}, HTTPStatus.FORBIDDEN)
                     return
                 with self.server.runtime.db.as_actor(self.auth_identity["username"]):
@@ -248,14 +277,22 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 return
             self._handle_static(path)
+        except WorkflowVersionConflict as exc:
+            self._close_if_request_body_unread()
+            self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
         except ValueError as exc:
+            self._close_if_request_body_unread()
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except FileNotFoundError:
+            self._close_if_request_body_unread()
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except BrokenPipeError:
             return
         except Exception as exc:
+            self._close_if_request_body_unread()
             self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        finally:
+            self._close_if_request_body_unread()
 
     def _handle_api(self, method: str, path: str, query: dict[str, list[str]]) -> None:
         runtime = self.server.runtime
@@ -265,14 +302,50 @@ class AtlasHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             username = str(payload.get("username") or "").strip()
             password = str(payload.get("password") or "")
+            client_ip = self.client_address[0] if self.client_address else "unknown"
+            decision = runtime.login_rate_limiter.check(username, client_ip)
+            if not decision.allowed:
+                self._json(
+                    {"error": "too many login attempts; retry later"},
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                    headers={"Retry-After": str(decision.retry_after_seconds)},
+                )
+                return
             user = runtime.db.verify_user_password(username, password)
             if not user:
+                decision = runtime.login_rate_limiter.record_failure(username, client_ip)
+                if not decision.allowed:
+                    if decision.newly_limited:
+                        runtime.db.audit(
+                            "auth.login_rate_limited",
+                            "login",
+                            username.casefold(),
+                            {"client_ip": client_ip, "retry_after_seconds": decision.retry_after_seconds},
+                            actor="system:login-rate-limit",
+                        )
+                    self._json(
+                        {"error": "too many login attempts; retry later"},
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                        headers={"Retry-After": str(decision.retry_after_seconds)},
+                    )
+                    return
                 self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
                 return
+            runtime.login_rate_limiter.record_success(username, client_ip)
             with runtime.db.as_actor(user["username"]):
-                token, raw_token = runtime.db.create_api_token(user["id"], "dashboard login")
+                token, raw_token = runtime.db.create_login_session(
+                    user["id"],
+                    ttl_seconds=runtime.config.session_token_ttl_seconds,
+                    max_active_sessions=runtime.config.max_active_sessions,
+                )
                 runtime.db.audit("auth.login", "user", user["id"], {"token_id": token["id"]})
-            self._json({"token": raw_token, "user": user})
+            self._json(
+                {
+                    "token": raw_token,
+                    "user": user,
+                    "session": {"token_id": token["id"], "expires_at": token["expires_at"]},
+                }
+            )
             return
 
         if parts == ["api", "auth", "logout"] and method == "POST":
@@ -284,7 +357,15 @@ class AtlasHandler(BaseHTTPRequestHandler):
             return
 
         if parts == ["api", "me"] and method == "GET":
-            self._json({"user": {key: self.auth_identity.get(key) for key in ("id", "username", "role", "status")}})
+            response: dict[str, Any] = {
+                "user": {key: self.auth_identity.get(key) for key in ("id", "username", "role", "status")}
+            }
+            if self.auth_identity.get("purpose") == "session":
+                response["session"] = {
+                    "token_id": self.auth_identity.get("token_id"),
+                    "expires_at": self.auth_identity.get("expires_at"),
+                }
+            self._json(response)
             return
 
         if parts == ["api", "users"]:
@@ -333,7 +414,11 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 if not user_id and payload.get("username"):
                     user = runtime.db.get_user_by_username(str(payload["username"]))
                     user_id = user["id"] if user else ""
-                token, raw_token = runtime.db.create_api_token(user_id, str(payload.get("name") or "api"))
+                token, raw_token = runtime.db.create_api_token(
+                    user_id,
+                    str(payload.get("name") or "api"),
+                    expires_at=payload.get("expires_at"),
+                )
                 self._json({"token": token, "api_token": raw_token}, HTTPStatus.CREATED)
                 return
 
@@ -714,7 +799,21 @@ class AtlasHandler(BaseHTTPRequestHandler):
             if not runtime.db.get_workflow_run(parts[2]):
                 raise FileNotFoundError()
             limit = _parse_limit(query, 500)
-            self._json({"events": runtime.db.list_workflow_events(parts[2], limit)})
+            try:
+                after = int(query.get("after", ["0"])[0])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("after must be a non-negative event sequence") from exc
+            if after < 0:
+                raise ValueError("after must be a non-negative event sequence")
+            events, has_more = runtime.db.list_workflow_events_after(parts[2], after, limit)
+            self._json(
+                {
+                    "events": events,
+                    "after": after,
+                    "next_after": events[-1]["seq"] if events else after,
+                    "has_more": has_more,
+                }
+            )
             return
 
         if len(parts) == 4 and parts[:2] == ["api", "workflow-runs"] and method == "POST":
@@ -870,7 +969,8 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, max-age=0")
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
-        self.wfile.write(content)
+        if self.command != "HEAD":
+            self.wfile.write(content)
 
     def _upload_workflow_file(self, run_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
         runtime = self.server.runtime
@@ -904,6 +1004,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     output.write(chunk)
                     digest.update(chunk)
                     remaining -= len(chunk)
+                self._request_body_consumed = True
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary, target)
@@ -947,7 +1048,8 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Disposition", disposition)
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
-        self.wfile.write(content)
+        if self.command != "HEAD":
+            self.wfile.write(content)
 
     def _stream_job_events(self, job_id: str, after: int) -> None:
         runtime = self.server.runtime
@@ -959,8 +1061,18 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
+        if self.command == "HEAD":
+            self.close_connection = True
+            return
+
+        # An explicit reconnect hint makes browser behavior predictable after a
+        # deploy/proxy disconnect; comments below keep an otherwise quiet stream
+        # from tripping idle timeout without changing the persisted event sequence.
+        self.wfile.write(f"retry: {_SSE_RETRY_MILLISECONDS}\n\n".encode("ascii"))
+        self.wfile.flush()
 
         last_seq = after
+        last_heartbeat = time.monotonic()
         while True:
             rows = runtime.db.get_job_events_after(job_id, last_seq, limit=100)
             for row in rows:
@@ -972,6 +1084,11 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 payload.setdefault("seq", last_seq)
                 payload.setdefault("created_at", row.get("created_at"))
                 self._write_sse(row["event_type"], payload, last_seq)
+
+            if time.monotonic() - last_heartbeat >= _SSE_HEARTBEAT_SECONDS:
+                self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+                last_heartbeat = time.monotonic()
 
             job = runtime.db.get_job(job_id)
             if not job or (job["state"] in TERMINAL_STATES and not rows):
@@ -1113,26 +1230,39 @@ class AtlasHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._json({"error": "callback body read timed out; retry"}, HTTPStatus.SERVICE_UNAVAILABLE)
             return None
+        self._request_body_consumed = True
         return bytes(chunks)
 
     def _read_json(self) -> dict[str, Any]:
+        if self.headers.get("Transfer-Encoding"):
+            # http.server does not decode chunked request bodies. Treating one as an
+            # empty JSON body would leave its bytes queued for the next keep-alive
+            # request, so reject it and let _dispatch close the connection.
+            raise ValueError("Transfer-Encoding is not supported")
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length <= 0:
+            self._request_body_consumed = True
             return {}
         raw = self.rfile.read(length).decode("utf-8")
+        self._request_body_consumed = True
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("JSON body must be an object")
         return data
 
-    def _json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _json(
+        self, payload: Any, status: HTTPStatus = HTTPStatus.OK, *, headers: dict[str, str] | None = None
+    ) -> None:
         body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self._cors_headers()
         self.send_header("Content-Type", "application/json")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _csv(self, content: str) -> None:
         body = content.encode("utf-8")
@@ -1142,7 +1272,33 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Disposition", 'attachment; filename="atlas-usage.csv"')
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _method_not_allowed(self) -> None:
+        self._close_if_request_body_unread()
+        self._json(
+            {"error": "method not allowed"},
+            HTTPStatus.METHOD_NOT_ALLOWED,
+            headers={"Allow": "GET, HEAD, POST, PUT, DELETE, OPTIONS"},
+        )
+
+    def _close_if_request_body_unread(self) -> None:
+        """Prevent an unread body from becoming the next HTTP/1.1 request line.
+
+        Route/auth validation occurs before a handler may call ``_read_json`` or an
+        upload reader. Draining an arbitrary rejected body would let a peer hold a
+        thread or consume unbounded bytes, so close the keep-alive connection
+        whenever a declared body remains unread instead.
+        """
+        if getattr(self, "_request_body_consumed", False):
+            return
+        try:
+            declared = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            declared = 1
+        if declared > 0 or self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
 
     def _cors_headers(self) -> None:
         allowlist = self.server.runtime.config.cors_origins

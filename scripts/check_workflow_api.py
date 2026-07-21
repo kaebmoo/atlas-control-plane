@@ -126,6 +126,18 @@ def main() -> None:
             bad_status = request_error(base_url, "PUT", f"/api/workflows/{workflow_id}", {"status": 'x" onmouseover="y'})
             assert "status" in bad_status["error"], bad_status
             assert request(base_url, "PUT", f"/api/workflows/{workflow_id}", {"version": 3})["workflow"]["version"] == 3
+            conditional = request(
+                base_url, "PUT", f"/api/workflows/{workflow_id}", {"name": "conditional", "expected_version": 3}
+            )["workflow"]
+            assert conditional["version"] == 4 and conditional["name"] == "conditional"
+            conflict = request_error(
+                base_url,
+                "PUT",
+                f"/api/workflows/{workflow_id}",
+                {"name": "stale", "expected_version": 3},
+                status=409,
+            )
+            assert "version conflict" in conflict["error"]
             assert "starts at only" in request(base_url, "POST", f"/api/workflows/{workflow_id}/explain")["explanation"]
             assert request(base_url, "POST", f"/api/workflows/{workflow_id}/repair")["draft"]["explanation"] == "Workflow already validates."
 
@@ -175,6 +187,14 @@ def main() -> None:
             run_events = request(base_url, "GET", f"/api/workflow-runs/{run['id']}/events")["events"]
             assert [event["seq"] for event in run_events] == list(range(1, len(run_events) + 1))
             assert {event["event_type"] for event in run_events} >= {"created", "node_started", "node_failed", "run_finished"}
+            first_page = request(base_url, "GET", f"/api/workflow-runs/{run['id']}/events?limit=1")
+            assert first_page["after"] == 0 and first_page["has_more"] is True
+            assert first_page["next_after"] == first_page["events"][0]["seq"]
+            second_page = request(
+                base_url, "GET", f"/api/workflow-runs/{run['id']}/events?limit=1&after={first_page['next_after']}"
+            )
+            assert second_page["events"][0]["seq"] > first_page["next_after"]
+            assert "non-negative" in request_error(base_url, "GET", f"/api/workflow-runs/{run['id']}/events?after=-1")["error"]
 
             paused = runtime.db.create_workflow_run(
                 {

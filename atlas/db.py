@@ -12,7 +12,7 @@ import threading
 import uuid
 import warnings
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -29,8 +29,30 @@ _WORKER_TOKEN_MARKER = "atlasenc:v1:"
 _AUDIT_ACTOR = contextvars.ContextVar("atlas_audit_actor", default="local")
 
 
+class WorkflowVersionConflict(ValueError):
+    """A conditional workflow-definition save saw a newer persisted version."""
+
+
 def now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _canonical_token_expiry(value: Any) -> str | None:
+    """Validate an optional API-token expiry and store it in one sortable UTC form."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError("expires_at must be an ISO 8601 UTC timestamp or null")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("expires_at must be an ISO 8601 UTC timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("expires_at must include a timezone")
+    canonical = parsed.astimezone(UTC).replace(microsecond=0)
+    if canonical <= datetime.now(UTC).replace(microsecond=0):
+        raise ValueError("expires_at must be in the future")
+    return canonical.isoformat().replace("+00:00", "Z")
 
 
 def new_id(prefix: str) -> str:
@@ -631,6 +653,57 @@ def _migration_013_workflow_default_reply(conn: sqlite3.Connection) -> None:
     _add_missing_columns(conn, "workflow_definitions", {"default_reply": "TEXT"})
 
 
+def _migration_014_token_lifecycle(conn: sqlite3.Connection) -> None:
+    """Add explicit token purpose/expiry without changing a published migration.
+
+    Older dashboard-login tokens were indistinguishable from API tokens.  When their
+    login audit entry identifies a token, reclassify then revoke it so the owner
+    signs in again and receives the bounded session lifecycle.  Unknown legacy
+    tokens intentionally remain ``api`` for an operator to review; guessing from a
+    mutable display name would risk revoking a real integration credential.
+    """
+    _add_missing_columns(
+        conn,
+        "api_tokens",
+        {
+            "expires_at": "TEXT",
+            "purpose": "TEXT NOT NULL DEFAULT 'api'",
+        },
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_api_tokens_session_active "
+        "ON api_tokens(user_id, created_at DESC) "
+        "WHERE purpose = 'session' AND revoked_at IS NULL"
+    )
+
+    token_ids: set[str] = set()
+    for row in conn.execute("SELECT details FROM audit_log WHERE action = 'auth.login'"):
+        details = decode_json(row["details"], {})
+        token_id = details.get("token_id") if isinstance(details, dict) else None
+        if isinstance(token_id, str) and token_id:
+            token_ids.add(token_id)
+    migrated_at = now_iso()
+    for token_id in token_ids:
+        cursor = conn.execute(
+            "UPDATE api_tokens SET purpose = 'session', revoked_at = COALESCE(revoked_at, ?) "
+            "WHERE id = ?",
+            (migrated_at, token_id),
+        )
+        if cursor.rowcount:
+            conn.execute(
+                "INSERT INTO audit_log(action, actor, resource_type, resource_id, details, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "auth.session_legacy_revoked",
+                    "system:migration",
+                    "api_token",
+                    token_id,
+                    encode_json({"reason": "identified_legacy_dashboard_login"}),
+                    migrated_at,
+                ),
+            )
+
+
 # Ordered, append-only migration steps. A step is either a SQL string (run via
 # executescript) or a callable(conn). The 1-based index is the schema version.
 # Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
@@ -652,6 +725,7 @@ MIGRATIONS: list[str | Any] = [
     _migration_011_session_leases,
     _migration_012_collection_inflight,
     _migration_013_workflow_default_reply,
+    _migration_014_token_lifecycle,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -920,14 +994,18 @@ class Database:
         return row_to_dict(row)
 
     def list_users(self) -> list[dict[str, Any]]:
+        current = now_iso()
         with self.connect() as conn:
             rows = conn.execute(
                 """
                 SELECT users.id, users.username, users.role, users.status, users.created_at, users.updated_at,
                   COUNT(api_tokens.id) AS token_count
-                FROM users LEFT JOIN api_tokens ON api_tokens.user_id = users.id AND api_tokens.revoked_at IS NULL
+                FROM users LEFT JOIN api_tokens ON api_tokens.user_id = users.id
+                  AND api_tokens.revoked_at IS NULL
+                  AND (api_tokens.expires_at IS NULL OR api_tokens.expires_at > ?)
                 GROUP BY users.id ORDER BY users.username COLLATE NOCASE
-                """
+                """,
+                (current,),
             ).fetchall()
         return [row_to_dict(row) or {} for row in rows]
 
@@ -977,30 +1055,107 @@ class Database:
             return None
         return {key: row[key] for key in ("id", "username", "role", "status", "created_at", "updated_at")}
 
-    def create_api_token(self, user_id: str, name: str = "") -> tuple[dict[str, Any], str]:
+    def create_api_token(
+        self, user_id: str, name: str = "", *, expires_at: str | None = None
+    ) -> tuple[dict[str, Any], str]:
         user = self.get_user(user_id)
         if not user:
             raise ValueError(f"Unknown user_id: {user_id}")
+        expiry = _canonical_token_expiry(expires_at)
         raw_token = generate_api_token()
         token_id = new_id("tok")
         created_at = now_iso()
         with self._lock, self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO api_tokens(id, user_id, token_hash, name, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO api_tokens(id, user_id, token_hash, name, expires_at, purpose, created_at)
+                VALUES (?, ?, ?, ?, ?, 'api', ?)
                 """,
-                (token_id, user_id, hash_api_token(raw_token), str(name or ""), created_at),
+                (token_id, user_id, hash_api_token(raw_token), str(name or ""), expiry, created_at),
             )
-        self.audit("api_token.create", "api_token", token_id, {"user_id": user_id, "name": str(name or "")})
+        self.audit(
+            "api_token.create",
+            "api_token",
+            token_id,
+            {"user_id": user_id, "name": str(name or ""), "expires_at": expiry, "purpose": "api"},
+        )
+        return self.get_api_token(token_id) or {}, raw_token
+
+    def create_login_session(
+        self, user_id: str, *, ttl_seconds: int, max_active_sessions: int
+    ) -> tuple[dict[str, Any], str]:
+        """Issue a bounded dashboard session and revoke only excess old sessions.
+
+        This deliberately uses an explicit immutable ``purpose`` instead of a token
+        name convention.  The whole cleanup/create/cap sequence is one SQLite
+        transaction, so concurrent logins cannot temporarily exceed the cap.
+        """
+        if ttl_seconds <= 0:
+            raise ValueError("session token TTL must be positive")
+        if max_active_sessions <= 0:
+            raise ValueError("maximum active sessions must be positive")
+        user = self.get_user(user_id)
+        if not user:
+            raise ValueError(f"Unknown user_id: {user_id}")
+        raw_token = generate_api_token()
+        token_id = new_id("tok")
+        created_at = now_iso()
+        expires_at = (datetime.now(UTC) + timedelta(seconds=ttl_seconds)).replace(microsecond=0).isoformat().replace(
+            "+00:00", "Z"
+        )
+        with self._lock, self.connect() as conn:
+            expired = conn.execute(
+                "SELECT id FROM api_tokens WHERE user_id = ? AND purpose = 'session' "
+                "AND revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at <= ?",
+                (user_id, created_at),
+            ).fetchall()
+            for row in expired:
+                conn.execute("UPDATE api_tokens SET revoked_at = ? WHERE id = ?", (created_at, row["id"]))
+                conn.execute(
+                    self._AUDIT_INSERT,
+                    self._audit_values(
+                        "auth.session_expired", "api_token", row["id"], {"reason": "login_cleanup"}, "system:token-lifecycle"
+                    ),
+                )
+            conn.execute(
+                """
+                INSERT INTO api_tokens(id, user_id, token_hash, name, expires_at, purpose, created_at)
+                VALUES (?, ?, ?, 'dashboard session', ?, 'session', ?)
+                """,
+                (token_id, user_id, hash_api_token(raw_token), expires_at, created_at),
+            )
+            active = conn.execute(
+                "SELECT id FROM api_tokens WHERE user_id = ? AND purpose = 'session' "
+                "AND revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC, rowid DESC",
+                (user_id, created_at),
+            ).fetchall()
+            for row in active[max_active_sessions:]:
+                conn.execute("UPDATE api_tokens SET revoked_at = ? WHERE id = ?", (created_at, row["id"]))
+                conn.execute(
+                    self._AUDIT_INSERT,
+                    self._audit_values(
+                        "auth.session_cap_revoked",
+                        "api_token",
+                        row["id"],
+                        {"max_active_sessions": max_active_sessions},
+                        "system:token-lifecycle",
+                    ),
+                )
+        self.audit(
+            "auth.session_create",
+            "api_token",
+            token_id,
+            {"user_id": user_id, "expires_at": expires_at, "purpose": "session"},
+        )
         return self.get_api_token(token_id) or {}, raw_token
 
     def get_api_token(self, token_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute(
                 """
-                SELECT api_tokens.id, api_tokens.user_id, api_tokens.name, api_tokens.last_used_at,
-                  api_tokens.created_at, api_tokens.revoked_at, users.username
+                SELECT api_tokens.id, api_tokens.user_id, api_tokens.name, api_tokens.purpose,
+                  api_tokens.expires_at, api_tokens.last_used_at, api_tokens.created_at,
+                  api_tokens.revoked_at, users.username
                 FROM api_tokens JOIN users ON users.id = api_tokens.user_id
                 WHERE api_tokens.id = ?
                 """,
@@ -1010,8 +1165,9 @@ class Database:
 
     def list_api_tokens(self, user_id: str | None = None) -> list[dict[str, Any]]:
         sql = """
-            SELECT api_tokens.id, api_tokens.user_id, api_tokens.name, api_tokens.last_used_at,
-              api_tokens.created_at, api_tokens.revoked_at, users.username
+            SELECT api_tokens.id, api_tokens.user_id, api_tokens.name, api_tokens.purpose,
+              api_tokens.expires_at, api_tokens.last_used_at, api_tokens.created_at,
+              api_tokens.revoked_at, users.username
             FROM api_tokens JOIN users ON users.id = api_tokens.user_id
         """
         params: tuple[Any, ...] = ()
@@ -1028,8 +1184,9 @@ class Database:
         with self._lock, self.connect() as conn:
             row = conn.execute(
                 """
-                SELECT api_tokens.id AS token_id, api_tokens.token_hash, users.id, users.username,
-                  users.role, users.status, users.created_at, users.updated_at
+                SELECT api_tokens.id AS token_id, api_tokens.token_hash, api_tokens.purpose,
+                  api_tokens.expires_at, users.id, users.username, users.role, users.status,
+                  users.created_at, users.updated_at
                 FROM api_tokens JOIN users ON users.id = api_tokens.user_id
                 WHERE api_tokens.token_hash = ? AND api_tokens.revoked_at IS NULL
                 """,
@@ -1037,13 +1194,27 @@ class Database:
             ).fetchone()
             if not row or row["status"] != "active" or not hmac.compare_digest(candidate, row["token_hash"]):
                 return None
-            conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (now_iso(), row["token_id"]))
+            current = now_iso()
+            if row["expires_at"] is not None and row["expires_at"] <= current:
+                conn.execute(
+                    "UPDATE api_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ?",
+                    (current, row["token_id"]),
+                )
+                action = "auth.session_expired" if row["purpose"] == "session" else "api_token.expired"
+                conn.execute(
+                    self._AUDIT_INSERT,
+                    self._audit_values(action, "api_token", row["token_id"], {"expires_at": row["expires_at"]}, "system:token-lifecycle"),
+                )
+                return None
+            conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (current, row["token_id"]))
         return {
             "id": row["id"],
             "username": row["username"],
             "role": row["role"],
             "status": row["status"],
             "token_id": row["token_id"],
+            "purpose": row["purpose"],
+            "expires_at": row["expires_at"],
         }
 
     def revoke_api_token(self, token_id: str) -> bool:
@@ -1113,6 +1284,12 @@ class Database:
         return [row_to_dict(row) or {} for row in rows]
 
     def update_workflow_definition(self, definition_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        expected_version = payload.get("expected_version")
+        if expected_version is not None:
+            if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version < 1:
+                raise ValueError("expected_version must be a positive integer")
+            if "version" in payload:
+                raise ValueError("expected_version cannot be combined with version")
         allowed = {
             "name": "name",
             "description": "description",
@@ -1136,10 +1313,24 @@ class Database:
                     fields[column] = payload[key]
         if not fields:
             return self.get_workflow_definition(definition_id)
+        if expected_version is not None:
+            # Conditional-save callers never choose a version; a successful save is
+            # exactly one monotonic step from the document they loaded.
+            fields["version"] = expected_version + 1
         fields["updated_at"] = now_iso()
         assignments = _set_clause(fields)
         with self._lock, self.connect() as conn:
-            cursor = conn.execute(f"UPDATE workflow_definitions SET {assignments} WHERE id = ?", list(fields.values()) + [definition_id])  # nosec B608
+            sql = f"UPDATE workflow_definitions SET {assignments} WHERE id = ?"  # nosec B608
+            params: list[Any] = [*fields.values(), definition_id]
+            if expected_version is not None:
+                sql += " AND version = ?"
+                params.append(expected_version)
+            cursor = conn.execute(sql, params)
+            exists = cursor.rowcount or conn.execute(
+                "SELECT 1 FROM workflow_definitions WHERE id = ?", (definition_id,)
+            ).fetchone()
+        if expected_version is not None and not cursor.rowcount and exists:
+            raise WorkflowVersionConflict("workflow version conflict; refresh and merge before saving")
         if cursor.rowcount:
             self.audit("workflow_definition.update", "workflow_definition", definition_id)
         return self.get_workflow_definition(definition_id)
@@ -1375,6 +1566,16 @@ class Database:
                 (run_id, limit),
             ).fetchall()
         return [row_to_dict(row) or {} for row in rows]
+
+    def list_workflow_events_after(self, run_id: str, after: int, limit: int) -> tuple[list[dict[str, Any]], bool]:
+        """Return one sequence-cursor page plus an exact continuation signal."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM workflow_events WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?",
+                (run_id, after, limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        return [row_to_dict(row) or {} for row in rows[:limit]], has_more
 
     def create_approval(self, payload: dict[str, Any]) -> dict[str, Any]:
         approval_id = payload.get("id") or new_id("apr")

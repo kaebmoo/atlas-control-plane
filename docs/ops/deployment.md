@@ -56,7 +56,7 @@ systemctl daemon-reload
 systemctl enable --now atlas
 ```
 
-## 2. Reverse proxy (TLS, gzip, request size)
+## 2. Reverse proxy (TLS, gzip, request size, and SSE)
 
 Atlas does not terminate TLS or compress responses itself. Front it with nginx or
 Caddy:
@@ -67,6 +67,10 @@ Caddy:
   `client_max_body_size 12m`) to back up Atlas's own `ATLAS_MAX_UPLOAD_BYTES`
   (default 10 MiB). Keep the proxy limit slightly above the app limit so Atlas
   returns its own clean error instead of the proxy cutting the connection.
+- **SSE** — disable proxy buffering for every `*/events` stream and keep its idle
+  timeout above 45 seconds. Buffering makes timelines look frozen even when Atlas
+  is sending events; a too-short idle timeout turns normal waiting into misleading
+  client reconnects.
 
 Minimal nginx example:
 
@@ -85,6 +89,14 @@ server {
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
   }
+  location ~ /events$ {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_set_header X-Accel-Buffering no;
+    proxy_read_timeout 60s;
+    proxy_set_header Host $host;
+  }
 }
 ```
 
@@ -97,11 +109,24 @@ proxy accepts a connection from. Keep `ATLAS_LOOPBACK_NO_AUTH=false` (the
 default, and what `scripts/run-prod.sh` enforces) whenever a reverse proxy —
 or anything else — sits in front of Atlas.
 
+Atlas uses the direct TCP peer IP for its pre-password login limit and deliberately
+does **not** trust `X-Forwarded-For`; configure a separate public-edge rate limit
+at the proxy/WAF. The Atlas limiter is a bounded in-memory second layer and resets
+when the process restarts.
+
 **Headless / split UI.** Set `ATLAS_SERVE_UI=false` to run Atlas as an
 API-only server and host the dashboard (or a custom UI) separately — see
 [API Integration Guide](../guides/api-integration-guide-en.md) for the full
 walkthrough and `scripts/serve_ui.py` for the local dev static server used
 while iterating on `atlas/static/` against a headless instance.
+
+**Separate Flow Designer deployment handoff.** The following are deployment-platform
+inputs for the UI repository, **not** Atlas environment variables and not values to
+commit here: `PUBLIC_ORIGIN`, `ATLAS_API_ORIGIN`, `SESSION_SECRET`, and Node.js 24.
+Set the first two to the public UI/API origins, store `SESSION_SECRET` only in the
+platform secret manager, and use Node 24 in that UI build/runtime. Atlas's side of
+the handoff is its TLS proxy, correct CORS allowlist, SSE configuration above, DB/
+upload/key persistence, and a tested backup-and-restore procedure.
 
 ## 3. Request logging
 
@@ -115,6 +140,10 @@ request to **stderr**. Response bodies and shapes are unaffected.
 Pipe stderr to your log collector (systemd captures it in the journal by default).
 Leave it off (`false`) to stay completely silent, as in dev.
 
+Configure the log sink to exclude HTTP request/response bodies, `Authorization`
+headers, and query strings. Atlas itself logs only the path (not its query string)
+because EventSource authentication can place a bearer token in `?token=`.
+
 ## 4. Configuration reference (production-relevant)
 
 | Env var | Default | Notes |
@@ -126,6 +155,11 @@ Leave it off (`false`) to stay completely silent, as in dev.
 | `ATLAS_PORT` | `8787` | Upstream port for the proxy. |
 | `ATLAS_SERVE_UI` | `true` | `false` runs Atlas headless — `GET /` and `GET /static/*` return 404 JSON; `/healthz` and `/api/*` are unaffected. Use when the dashboard is hosted elsewhere (see [API Integration Guide](../guides/api-integration-guide-en.md)). |
 | `ATLAS_CORS_ORIGINS` | unset (`*`) | Comma-separated allowlist of browser origins allowed to call `/api/*` cross-origin. Unset keeps today's `Access-Control-Allow-Origin: *`; set it when serving the dashboard (or a custom UI) from a different origin than the API. |
+| `ATLAS_SESSION_TOKEN_TTL_SECONDS` | `28800` | Dashboard-login session lifetime. Must be positive; default is 8 hours. |
+| `ATLAS_MAX_ACTIVE_SESSIONS` | `5` | Maximum unexpired dashboard sessions per user. A new login revokes only the oldest excess session. |
+| `ATLAS_LOGIN_RATE_LIMIT_ATTEMPTS` | `5` | Failed login attempts permitted in the rolling in-memory window per normalized username + direct peer IP. |
+| `ATLAS_LOGIN_RATE_LIMIT_WINDOW_SECONDS` | `60` | Rolling login-attempt window. Process restart clears this in-memory state. |
+| `ATLAS_LOGIN_RATE_LIMIT_COOLDOWN_SECONDS` | `60` | `429` cooldown after the failed-attempt threshold; clients must obey `Retry-After`. |
 | `ATLAS_DB` | `./data/atlas.sqlite` | SQLite path; WAL mode is enabled automatically. |
 | `ATLAS_MAX_UPLOAD_BYTES` | `10485760` | Upload cap; mirror at the proxy. |
 | `ATLAS_REQUEST_TIMEOUT` | `30` | Worker request timeout (seconds, per recv). |
