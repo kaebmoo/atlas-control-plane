@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 
 from atlas.app import AtlasHttpServer, AtlasRuntime
 from atlas.admin import main as admin_main
+from atlas.auth import LoginRateLimiter, hash_api_token
 from atlas.config import Config
 from atlas.db import Database
 
@@ -62,6 +63,7 @@ class MockThClawsHandler(BaseHTTPRequestHandler):
 def main() -> None:
     with TemporaryDirectory() as tmp:
         check_secure_config_default()
+        check_login_limiter_keying_and_restart()
         check_worker_token_migration(Path(tmp) / "legacy.sqlite")
         mock = ThreadingHTTPServer(("127.0.0.1", 0), MockThClawsHandler)
         mock_thread = threading.Thread(target=mock.serve_forever, daemon=True)
@@ -79,6 +81,10 @@ def main() -> None:
                 enable_loopback_without_token=False,
                 secret_key="test-atlas-secret-key",
                 upload_dir=Path(tmp) / "uploads",
+                max_active_sessions=5,
+                login_rate_limit_attempts=2,
+                login_rate_limit_window_seconds=60,
+                login_rate_limit_cooldown_seconds=1,
             )
         )
         with sqlite3.connect(db_path) as conn:
@@ -135,6 +141,18 @@ def main() -> None:
             assert renamed[0] == 200 and renamed[1]["token"]["name"] == "viewer renamed"
             assert request(base_url, "GET", "/api/me", token=viewer_token)[1]["user"]["username"] == "viewer"
 
+            # The per-(normalized username, peer IP) limiter rejects before expensive
+            # password verification. It returns a deterministic 429 + Retry-After,
+            # while a different username is not collateral damage.
+            assert request(base_url, "POST", "/api/auth/login", {"username": "viewer", "password": "wrong"})[0] == 401
+            status, limited, headers = request_with_headers(
+                base_url, "POST", "/api/auth/login", {"username": "viewer", "password": "wrong"}
+            )
+            assert status == 429 and limited["error"] == "too many login attempts; retry later"
+            assert int(headers["Retry-After"]) >= 1
+            assert request(base_url, "POST", "/api/auth/login", {"username": "different", "password": "wrong"})[0] == 401
+            time.sleep(1.05)
+
             status, _ = request(
                 base_url,
                 "POST",
@@ -178,12 +196,39 @@ def main() -> None:
             )
             assert status == 200 and logged_in["user"]["username"] == "viewer"
             login_token = logged_in["token"]
+            assert logged_in["session"]["expires_at"] and request(base_url, "GET", "/api/me", token=login_token)[1]["session"] == logged_in["session"]
             assert request(base_url, "POST", "/api/auth/logout", {}, login_token)[0] == 200
             assert request(base_url, "GET", "/api/me", token=login_token)[0] == 401
+
+            # A new login is a session (not a named API token). At the configured cap,
+            # only the oldest session is revoked; the independently-issued API token
+            # remains usable.
+            sessions: list[str] = []
+            for _ in range(runtime.config.max_active_sessions + 1):
+                status, session = request(
+                    base_url, "POST", "/api/auth/login", {"username": "viewer", "password": "viewer-password"}
+                )
+                assert status == 200 and session["session"]["expires_at"]
+                sessions.append(session["token"])
+            assert request(base_url, "GET", "/api/me", token=sessions[0])[0] == 401
+            assert request(base_url, "GET", "/api/me", token=viewer_token)[0] == 200
+
+            # Expiry is enforced for every bearer path, including EventSource query
+            # auth. The raw token/password never enter the audit log.
+            with runtime.db.connect() as conn:
+                conn.execute(
+                    "UPDATE api_tokens SET expires_at = ? WHERE token_hash = ?",
+                    ("2000-01-01T00:00:00Z", hash_api_token(sessions[-1])),
+                )
+            assert request(base_url, "GET", "/api/me", token=sessions[-1])[0] == 401
+            assert _raw_status(f"{base_url}/api/jobs/not-a-real-job/events?token={sessions[-1]}") == 401
 
             status, legacy_me = request(base_url, "GET", "/api/me", token="legacy-bootstrap-secret")
             assert status == 200 and legacy_me["user"]["role"] == "admin"
             assert any(row["action"] == "user.create" and row["actor"] == "admin" for row in runtime.db.list_audit(100))
+            audit_text = json.dumps(runtime.db.list_audit(200), sort_keys=True)
+            assert "auth.session_cap_revoked" in audit_text and "auth.session_expired" in audit_text and "auth.login_rate_limited" in audit_text
+            assert "viewer-password" not in audit_text and sessions[-1] not in audit_text and login_token not in audit_text
 
             # ?token= query auth is restricted to the SSE event streams (EventSource can't set a
             # header); it must be REJECTED on any normal endpoint so tokens don't leak into URLs.
@@ -211,6 +256,15 @@ def check_secure_config_default() -> None:
     finally:
         if previous is not None:
             os.environ["ATLAS_LOOPBACK_NO_AUTH"] = previous
+
+
+def check_login_limiter_keying_and_restart() -> None:
+    limiter = LoginRateLimiter(2, 60, 60)
+    assert limiter.record_failure("Alice", "192.0.2.1").allowed
+    assert not limiter.record_failure("alice", "192.0.2.1").allowed, "username normalization must share a bucket"
+    assert limiter.check("alice", "192.0.2.2").allowed, "a different peer IP must not share a bucket"
+    assert limiter.check("bob", "192.0.2.1").allowed, "a different username must not share a bucket"
+    assert LoginRateLimiter(2, 60, 60).check("alice", "192.0.2.1").allowed, "restart resets in-memory limiter state"
 
 
 def check_worker_token_migration(path: Path) -> None:
@@ -289,6 +343,17 @@ def request(
     payload: dict | None = None,
     token: str | None = None,
 ) -> tuple[int, dict]:
+    status, response, _headers = request_with_headers(base_url, method, path, payload, token)
+    return status, response
+
+
+def request_with_headers(
+    base_url: str,
+    method: str,
+    path: str,
+    payload: dict | None = None,
+    token: str | None = None,
+) -> tuple[int, dict, dict[str, str]]:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"} if body is not None else {}
     if token:
@@ -296,9 +361,9 @@ def request(
     req = urllib.request.Request(base_url + path, data=body, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=5) as response:
-            return response.status, json.loads(response.read() or b"{}")
+            return response.status, json.loads(response.read() or b"{}"), dict(response.headers.items())
     except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read() or b"{}")
+        return exc.code, json.loads(exc.read() or b"{}"), dict(exc.headers.items())
 
 
 def wait_for_job(runtime: AtlasRuntime, job_id: str) -> None:

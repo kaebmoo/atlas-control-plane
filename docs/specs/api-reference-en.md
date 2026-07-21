@@ -72,9 +72,20 @@ Current limitations:
 Identity endpoints:
 
 - `POST /api/auth/login` with `username` and `password` returns a one-time raw
-  token response plus public user metadata.
+  **dashboard session** plus public user metadata and `session.expires_at`. Sessions
+  expire after 8 hours by default and are capped at five active sessions per user;
+  creating another revokes only the oldest session. `GET /api/me` repeats the
+  session metadata so a UI can warn before expiry.
 - `POST /api/auth/logout` revokes the current per-user token.
-- `GET /api/me` returns the authenticated username and role.
+- Failed login attempts are bounded in memory by normalized username + direct peer
+  IP before password verification (default: 5 attempts/minute, then 60-second
+  cooldown). A limited login returns `429` with `Retry-After`; Atlas deliberately
+  does not trust `X-Forwarded-For`. A process restart resets this short defensive
+  window, so production reverse proxies must also rate-limit their public edge.
+- Admin-created API tokens have immutable `purpose: "api"`; pass an optional future
+  UTC `expires_at` to `POST /api/tokens`, or omit it for an explicitly non-expiring
+  integration token. Token metadata exposes `purpose`, `expires_at`, and `revoked_at`,
+  never a raw token or hash.
 - Admin-only CRUD: `/api/users`, `/api/users/{id}`, `/api/tokens`, and
   `/api/tokens/{id}`. `POST /api/tokens/{id}/revoke` is an additive revoke alias.
 - Roles: `viewer` reads normal resources; `operator` runs jobs/workflows and
@@ -104,6 +115,7 @@ Every error uses one JSON shape:
 | `400` | Invalid payload, state transition, or reference |
 | `401` | Missing or incorrect token |
 | `403` | Authenticated role lacks the route permission |
+| `429` | Login rate limit reached; obey the `Retry-After` response header |
 | `404` | Resource or route not found |
 | `500` | Exception not converted into a validation error |
 

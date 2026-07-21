@@ -37,7 +37,7 @@ paths:
     post:
       tags: [Identity]
       operationId: login
-      summary: Verify username/password and issue a per-user API token
+      summary: Verify username/password and issue a time-bounded dashboard session
       security: []
       requestBody:
         required: true
@@ -59,6 +59,8 @@ paths:
                 properties:
                   token: {type: string, writeOnly: true}
                   user: {$ref: '#/components/schemas/User'}
+                  session: {$ref: '#/components/schemas/Session'}
+        '429': {$ref: '#/components/responses/LoginRateLimited'}
         default: {$ref: '#/components/responses/Error'}
 
   /api/auth/logout:
@@ -84,6 +86,7 @@ paths:
                 type: object
                 properties:
                   user: {$ref: '#/components/schemas/User'}
+                  session: {$ref: '#/components/schemas/Session'}
         default: {$ref: '#/components/responses/Error'}
 
   /api/users:
@@ -157,8 +160,20 @@ paths:
                 user_id: {type: string}
                 username: {type: string}
                 name: {type: string}
+                expires_at:
+                  type: [string, 'null']
+                  format: date-time
+                  description: Optional future UTC expiry; null or omission makes a non-expiring API token.
       responses:
-        '201': {description: Token metadata and one-time raw api_token}
+        '201':
+          description: Token metadata and one-time raw api_token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: {$ref: '#/components/schemas/ApiToken'}
+                  api_token: {type: string, writeOnly: true}
         default: {$ref: '#/components/responses/Error'}
 
   /api/tokens/{token_id}:
@@ -1670,6 +1685,15 @@ components:
             required: [deleted]
             properties:
               deleted: {type: boolean, const: true}
+    LoginRateLimited:
+      description: Login attempts exceeded the in-memory per-username-and-peer-IP limit.
+      headers:
+        Retry-After:
+          schema: {type: integer, minimum: 1}
+          description: Seconds until another login attempt may be made.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
     RunResponse:
       description: Updated workflow run
       content:
@@ -1754,6 +1778,27 @@ components:
         password: {type: string, format: password}
         role: {type: string, enum: [admin, operator, viewer, auditor]}
         status: {type: string, enum: [active, disabled]}
+
+    Session:
+      type: object
+      required: [token_id, expires_at]
+      properties:
+        token_id: {type: string, description: Public token metadata identifier, not the bearer secret.}
+        expires_at: {type: string, format: date-time}
+
+    ApiToken:
+      type: object
+      required: [id, user_id, name, purpose, created_at]
+      properties:
+        id: {type: string}
+        user_id: {type: string}
+        username: {type: string}
+        name: {type: string}
+        purpose: {type: string, enum: [api, session], description: Immutable token lifecycle class.}
+        expires_at: {type: [string, 'null'], format: date-time}
+        last_used_at: {type: [string, 'null'], format: date-time}
+        created_at: {type: string, format: date-time}
+        revoked_at: {type: [string, 'null'], format: date-time}
 
     Error:
       type: object

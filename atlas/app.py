@@ -18,6 +18,7 @@ from typing import Any, cast
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
+from .auth import LoginRateLimiter
 from .config import Config
 from .db import ARTIFACT_KINDS, WORKER_SYNC_MODES, Database, new_id, now_iso, resolve_in_store
 from .jobs import CallbackSessionPending, JobManager, TERMINAL_STATES, verify_callback_token
@@ -132,6 +133,14 @@ class AtlasRuntime:
         self.callback_reject_audited_at: dict[str, float] = {}
         self.callback_reject_audit_lock = threading.Lock()
         self.callback_read_slots = threading.BoundedSemaphore(_CALLBACK_READ_SLOTS)
+        # Login attempts are checked before the expensive PBKDF2 verification. The
+        # limiter intentionally keys on the direct TCP peer, never X-Forwarded-For,
+        # because Atlas does not own a trusted-proxy configuration boundary.
+        self.login_rate_limiter = LoginRateLimiter(
+            config.login_rate_limit_attempts,
+            config.login_rate_limit_window_seconds,
+            config.login_rate_limit_cooldown_seconds,
+        )
         # OB-1 restart recovery: no delivery-attempt thread survives a restart either. Off the
         # main thread since a large backlog of stuck/missing deliveries could otherwise block
         # server startup for as long as their retry loops take.
@@ -265,14 +274,50 @@ class AtlasHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             username = str(payload.get("username") or "").strip()
             password = str(payload.get("password") or "")
+            client_ip = self.client_address[0] if self.client_address else "unknown"
+            decision = runtime.login_rate_limiter.check(username, client_ip)
+            if not decision.allowed:
+                self._json(
+                    {"error": "too many login attempts; retry later"},
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                    headers={"Retry-After": str(decision.retry_after_seconds)},
+                )
+                return
             user = runtime.db.verify_user_password(username, password)
             if not user:
+                decision = runtime.login_rate_limiter.record_failure(username, client_ip)
+                if not decision.allowed:
+                    if decision.newly_limited:
+                        runtime.db.audit(
+                            "auth.login_rate_limited",
+                            "login",
+                            username.casefold(),
+                            {"client_ip": client_ip, "retry_after_seconds": decision.retry_after_seconds},
+                            actor="system:login-rate-limit",
+                        )
+                    self._json(
+                        {"error": "too many login attempts; retry later"},
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                        headers={"Retry-After": str(decision.retry_after_seconds)},
+                    )
+                    return
                 self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
                 return
+            runtime.login_rate_limiter.record_success(username, client_ip)
             with runtime.db.as_actor(user["username"]):
-                token, raw_token = runtime.db.create_api_token(user["id"], "dashboard login")
+                token, raw_token = runtime.db.create_login_session(
+                    user["id"],
+                    ttl_seconds=runtime.config.session_token_ttl_seconds,
+                    max_active_sessions=runtime.config.max_active_sessions,
+                )
                 runtime.db.audit("auth.login", "user", user["id"], {"token_id": token["id"]})
-            self._json({"token": raw_token, "user": user})
+            self._json(
+                {
+                    "token": raw_token,
+                    "user": user,
+                    "session": {"token_id": token["id"], "expires_at": token["expires_at"]},
+                }
+            )
             return
 
         if parts == ["api", "auth", "logout"] and method == "POST":
@@ -284,7 +329,15 @@ class AtlasHandler(BaseHTTPRequestHandler):
             return
 
         if parts == ["api", "me"] and method == "GET":
-            self._json({"user": {key: self.auth_identity.get(key) for key in ("id", "username", "role", "status")}})
+            response: dict[str, Any] = {
+                "user": {key: self.auth_identity.get(key) for key in ("id", "username", "role", "status")}
+            }
+            if self.auth_identity.get("purpose") == "session":
+                response["session"] = {
+                    "token_id": self.auth_identity.get("token_id"),
+                    "expires_at": self.auth_identity.get("expires_at"),
+                }
+            self._json(response)
             return
 
         if parts == ["api", "users"]:
@@ -333,7 +386,11 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 if not user_id and payload.get("username"):
                     user = runtime.db.get_user_by_username(str(payload["username"]))
                     user_id = user["id"] if user else ""
-                token, raw_token = runtime.db.create_api_token(user_id, str(payload.get("name") or "api"))
+                token, raw_token = runtime.db.create_api_token(
+                    user_id,
+                    str(payload.get("name") or "api"),
+                    expires_at=payload.get("expires_at"),
+                )
                 self._json({"token": token, "api_token": raw_token}, HTTPStatus.CREATED)
                 return
 
@@ -1125,11 +1182,15 @@ class AtlasHandler(BaseHTTPRequestHandler):
             raise ValueError("JSON body must be an object")
         return data
 
-    def _json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _json(
+        self, payload: Any, status: HTTPStatus = HTTPStatus.OK, *, headers: dict[str, str] | None = None
+    ) -> None:
         body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self._cors_headers()
         self.send_header("Content-Type", "application/json")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
