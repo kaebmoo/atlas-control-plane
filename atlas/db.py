@@ -1543,6 +1543,16 @@ class Database:
             ).fetchall()
         return [row_to_dict(row) or {} for row in rows]
 
+    def list_workflow_events_after(self, run_id: str, after: int, limit: int) -> tuple[list[dict[str, Any]], bool]:
+        """Return one sequence-cursor page plus an exact continuation signal."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM workflow_events WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?",
+                (run_id, after, limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        return [row_to_dict(row) or {} for row in rows[:limit]], has_more
+
     def create_approval(self, payload: dict[str, Any]) -> dict[str, Any]:
         approval_id = payload.get("id") or new_id("apr")
         now = now_iso()

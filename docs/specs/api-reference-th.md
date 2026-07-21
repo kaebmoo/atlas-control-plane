@@ -590,10 +590,11 @@ GET /api/workflow-runs?workflow_definition_id=wfd_xxx&limit=20
 ```
 
 Run detail มี `run`, runtime `nodes`, traversed `edges`, `approvals` ส่วน lifecycle
-events เป็น JSON list ไม่ใช่ SSE:
+events เป็น JSON cursor page ไม่ใช่ SSE ให้เก็บ `next_after` แล้วขอเฉพาะ sequence ที่ใหม่กว่า;
+`has_more` บอกว่ายังมีหน้าเพิ่มใน run เดิมหรือไม่:
 
 ```text
-GET /api/workflow-runs/wfr_xxx/events?limit=500
+GET /api/workflow-runs/wfr_xxx/events?limit=500&after=0
 ```
 
 ### Pause, Resume, Recovery และ Cancel

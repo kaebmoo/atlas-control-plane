@@ -1186,19 +1186,26 @@ paths:
       - name: limit
         in: query
         schema: {type: integer, default: 500, minimum: 1}
+      - name: after
+        in: query
+        description: Return only event sequence numbers greater than this cursor (default 0).
+        schema: {type: integer, minimum: 0, default: 0}
     get:
       tags: [Workflow Runs]
       operationId: listWorkflowRunEvents
       summary: List persisted workflow lifecycle events
       responses:
         '200':
-          description: Events
+          description: Sequence-cursor page of events
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   events: {type: array, items: {$ref: '#/components/schemas/WorkflowEvent'}}
+                  after: {type: integer, minimum: 0}
+                  next_after: {type: integer, minimum: 0}
+                  has_more: {type: boolean}
         default: {$ref: '#/components/responses/Error'}
 
   /api/workflow-runs/{run_id}/pause:

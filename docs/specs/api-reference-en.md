@@ -618,10 +618,11 @@ GET /api/workflow-runs?workflow_definition_id=wfd_xxx&limit=20
 ```
 
 Run detail contains `run`, runtime `nodes`, traversed `edges`, and `approvals`.
-Lifecycle events are a JSON list, not SSE:
+Lifecycle events are a JSON cursor page, not SSE. Persist `next_after`, then request
+only sequences after it; `has_more` says whether the same run has another page:
 
 ```text
-GET /api/workflow-runs/wfr_xxx/events?limit=500
+GET /api/workflow-runs/wfr_xxx/events?limit=500&after=0
 ```
 
 ### Pause, Resume, Recovery, and Cancel

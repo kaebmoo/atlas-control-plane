@@ -791,7 +791,21 @@ class AtlasHandler(BaseHTTPRequestHandler):
             if not runtime.db.get_workflow_run(parts[2]):
                 raise FileNotFoundError()
             limit = _parse_limit(query, 500)
-            self._json({"events": runtime.db.list_workflow_events(parts[2], limit)})
+            try:
+                after = int(query.get("after", ["0"])[0])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("after must be a non-negative event sequence") from exc
+            if after < 0:
+                raise ValueError("after must be a non-negative event sequence")
+            events, has_more = runtime.db.list_workflow_events_after(parts[2], after, limit)
+            self._json(
+                {
+                    "events": events,
+                    "after": after,
+                    "next_after": events[-1]["seq"] if events else after,
+                    "has_more": has_more,
+                }
+            )
             return
 
         if len(parts) == 4 and parts[:2] == ["api", "workflow-runs"] and method == "POST":
