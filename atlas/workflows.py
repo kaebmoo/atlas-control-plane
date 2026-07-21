@@ -90,6 +90,32 @@ def _trigger_chain_blocks(target_workflow_id: Any, source_workflow_id: Any, chai
     return len(chain) >= MAX_TRIGGER_CHAIN_DEPTH
 
 
+def validate_reply_config(reply: Any, outbound_allowlist: tuple[str, ...], field: str = "_meta.reply") -> None:
+    """Validate the reply object shared by run input and workflow defaults."""
+    if not isinstance(reply, dict):
+        raise ValueError(f"{field} must be an object")
+    mode = reply.get("mode") or "none"
+    if mode not in _META_REPLY_MODES:
+        raise ValueError(f"{field}.mode must be one of {sorted(_META_REPLY_MODES)}")
+    callback_url = reply.get("callback_url")
+    if callback_url is not None:
+        if not isinstance(callback_url, str) or not callback_url:
+            raise ValueError(f"{field}.callback_url must be a non-empty string")
+        target = resolve_outbound_target(callback_url, outbound_allowlist)
+        if not target.allowed:
+            raise ValueError(f"{field}.callback_url is not deliverable: {target.reason}")
+    elif mode == "webhook":
+        raise ValueError(f"{field}.callback_url is required when mode is webhook")
+    correlation_id = reply.get("correlation_id")
+    if correlation_id is not None and not isinstance(correlation_id, str):
+        raise ValueError(f"{field}.correlation_id must be a string")
+
+
+def validate_workflow_default_reply(default_reply: Any, outbound_allowlist: tuple[str, ...]) -> None:
+    if default_reply is not None:
+        validate_reply_config(default_reply, outbound_allowlist, "default_reply")
+
+
 def validate_run_input_envelope(input: dict[str, Any], outbound_allowlist: tuple[str, ...]) -> None:
     """IA-1: validate the reserved `_meta` object on run input, if present, on BOTH ingress
     paths (they share this one choke point: WorkflowRunner.start_workflow). `_meta` and every
@@ -113,23 +139,7 @@ def validate_run_input_envelope(input: dict[str, Any], outbound_allowlist: tuple
                 raise ValueError(f"_meta.source.{key} must be a string")
     reply = meta.get("reply")
     if reply is not None:
-        if not isinstance(reply, dict):
-            raise ValueError("_meta.reply must be an object")
-        mode = reply.get("mode") or "none"
-        if mode not in _META_REPLY_MODES:
-            raise ValueError(f"_meta.reply.mode must be one of {sorted(_META_REPLY_MODES)}")
-        callback_url = reply.get("callback_url")
-        if callback_url is not None:
-            if not isinstance(callback_url, str) or not callback_url:
-                raise ValueError("_meta.reply.callback_url must be a non-empty string")
-            target = resolve_outbound_target(callback_url, outbound_allowlist)
-            if not target.allowed:
-                raise ValueError(f"_meta.reply.callback_url is not deliverable: {target.reason}")
-        elif mode == "webhook":
-            raise ValueError("_meta.reply.callback_url is required when mode is webhook")
-        correlation_id = reply.get("correlation_id")
-        if correlation_id is not None and not isinstance(correlation_id, str):
-            raise ValueError("_meta.reply.correlation_id must be a string")
+        validate_reply_config(reply, outbound_allowlist)
 
 
 def _audit_input_provenance(db: Database, run_id: str, input: dict[str, Any]) -> None:
@@ -401,6 +411,7 @@ class WorkflowRunner:
         definition = self.db.get_workflow_definition(workflow_definition_id)
         if not definition:
             raise ValueError(f"Unknown workflow_definition_id: {workflow_definition_id}")
+        input = self._with_default_reply(definition, input)
         return self.run_graph(
             definition["graph"],
             definition.get("policy") or {},
@@ -421,6 +432,7 @@ class WorkflowRunner:
             # Normalize only None -> {}; a falsy non-object ([], "", 0, False) must be rejected,
             # not silently coerced to an empty object.
             raise ValueError("workflow input must be an object")
+        input = self._with_default_reply(definition, input)
         validate_run_input_envelope(input, self.outbound_allowlist)
         validate_workflow_graph(graph, policy)
         self._validate_callback_nodes_supported(graph)
@@ -428,6 +440,30 @@ class WorkflowRunner:
         _audit_input_provenance(self.db, run["id"], input)
         self._start_background(run["id"], graph, policy, input)
         return self.db.get_workflow_run(run["id"]) or run
+
+    def _with_default_reply(self, definition: dict[str, Any], input: Any) -> Any:
+        """Copy a definition default only when the caller did not supply `_meta.reply`.
+        The stored default is re-validated against the CURRENT allowlist only when it is
+        about to be applied: a run that supplies its own reply must not be blocked by a
+        default that a later allowlist change made undeliverable."""
+        default_reply = definition.get("default_reply")
+        if default_reply is None:
+            return input
+
+        def apply(base: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+            validate_workflow_default_reply(default_reply, self.outbound_allowlist)
+            return {**base, "_meta": {**meta, "reply": dict(default_reply)}}
+
+        if input is None:
+            return apply({}, {})
+        if not isinstance(input, dict):
+            return input
+        if "_meta" not in input:
+            return apply(input, {})
+        meta = input.get("_meta")
+        if isinstance(meta, dict) and "reply" not in meta:
+            return apply(input, meta)
+        return input
 
     def _validate_callback_nodes_supported(self, graph: dict[str, Any]) -> None:
         """Reject a run whose graph opts into execution:'callback' when the deployment cannot

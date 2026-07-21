@@ -35,6 +35,7 @@ from .workflows import (
     _worker_matches_role,
     next_fire_at_for_trigger,
     validate_workflow_graph,
+    validate_workflow_default_reply,
     validate_workflow_policy,
     validate_workflow_references,
     validate_workflow_trigger_payload,
@@ -593,7 +594,10 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 payload = self._read_json()
                 graph = payload.get("graph", workflow["graph"])
                 policy = payload.get("policy", workflow.get("policy") or {})
-                _validate_workflow_payload(runtime, {"graph": graph, "policy": policy})
+                validation_payload = {"graph": graph, "policy": policy}
+                if "default_reply" in payload:
+                    validation_payload["default_reply"] = payload["default_reply"]
+                _validate_workflow_payload(runtime, validation_payload)
                 _validate_workflow_metadata(payload)
                 updated = runtime.db.update_workflow_definition(workflow_id, payload)
                 self._json({"workflow": updated})
@@ -1275,6 +1279,8 @@ def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any], r
     validate_workflow_references(runtime.db, graph, policy)
     _validate_workflow_policy(policy)
     _validate_workflow_draft_triggers(payload.get("triggers") or [])
+    if "default_reply" in payload:
+        validate_workflow_default_reply(payload["default_reply"], runtime.config.outbound_allowlist)
 
 
 _WORKFLOW_DRAFT_FIELDS = {"name", "description", "graph", "policy", "triggers", "explanation", "warnings"}

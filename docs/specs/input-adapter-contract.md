@@ -154,8 +154,10 @@ allowlisted `callback_url`, OB-1 delivers a signed result on `workflow_run_compl
 }
 ```
 
-signed with `X-Atlas-Signature`. If `_meta.reply` is absent or `mode: "none"`, the adapter
-instead **polls** `GET /api/workflow-runs/{id}` until terminal, then reads
+signed with `X-Atlas-Signature`. A workflow may supply `default_reply`; Atlas copies it into
+the persisted `_meta.reply` only when this envelope does not provide `_meta.reply`. If the
+effective reply is absent or `mode: "none"`, the adapter instead **polls**
+`GET /api/workflow-runs/{id}` until terminal, then reads
 `GET /api/workflow-runs/{id}/artifacts`. Full delivery semantics (allowlist, bounded
 retries, failure isolation, `deliveries` table + API) are in the
 [plan](../plans/input-adapter-return-path-plan.md) §OB-1.

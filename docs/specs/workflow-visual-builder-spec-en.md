@@ -145,6 +145,7 @@ The visual editor sends this payload to `POST /api/workflows` or
 {
   "name": "Research approval",
   "description": "Research, review, and request a publishing decision.",
+  "default_reply": {"mode": "none"},
   "graph": {
     "start": "researcher",
     "nodes": [],
@@ -162,7 +163,10 @@ The visual editor sends this payload to `POST /api/workflows` or
 
 Canonical rules:
 
-- The root must contain `name`, `graph`, and `policy`; `description` is an optional string.
+- The root must contain `name`, `graph`, and `policy`; `description` and `default_reply` are optional.
+- `default_reply`, when present, uses the `input._meta.reply` shape. It is copied to a new
+  run only when that run does not provide `_meta.reply`; `webhook` requires a non-empty,
+  allowlisted `callback_url`, while `none` may omit it. The inspector must allow clearing it.
 - `graph` must contain `start`, `nodes`, and `edges`, even when `edges` is `[]`.
 - The serializer must write `condition` on every edge; normalize a missing value to `{"type":"always"}`.
 - `join.mode` must always be written; import defaults a missing value to `all`.
