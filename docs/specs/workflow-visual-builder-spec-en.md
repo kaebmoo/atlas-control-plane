@@ -795,6 +795,12 @@ Current API limitation: Validate requires a saved workflow ID. For an unsaved
 draft, run schema/semantic validation on the client; Save causes the backend to
 validate again. The AI draft endpoint validates its result before returning it.
 
+**Concurrent Save contract.** When editing an existing definition, retain the
+loaded `workflow.version` and send it as `expected_version` on `PUT` (never send
+both `expected_version` and `version`). A successful save increments the version;
+`409` means another editor saved first. Keep the local unsaved graph, reload the
+server definition, and present a merge/reload decision rather than overwriting it.
+
 ## 18. Example covering every node type
 
 ```json

@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from . import __version__
 from .auth import LoginRateLimiter
 from .config import Config
-from .db import ARTIFACT_KINDS, WORKER_SYNC_MODES, Database, new_id, now_iso, resolve_in_store
+from .db import ARTIFACT_KINDS, WORKER_SYNC_MODES, Database, WorkflowVersionConflict, new_id, now_iso, resolve_in_store
 from .jobs import CallbackSessionPending, JobManager, TERMINAL_STATES, verify_callback_token
 from .outbound import OutboundService, OutboundSettings
 from .packs import export_pack, import_pack, list_available_packs
@@ -272,6 +272,9 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 return
             self._handle_static(path)
+        except WorkflowVersionConflict as exc:
+            self._close_if_request_body_unread()
+            self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
         except ValueError as exc:
             self._close_if_request_body_unread()
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)

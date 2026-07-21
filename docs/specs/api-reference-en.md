@@ -525,6 +525,11 @@ treated as `{}`). `DELETE` removes the definition and its triggers. Historical r
 remain, while their `workflow_definition_id` may become null according to the
 foreign-key behavior.
 
+For a visual editor, send the version the client loaded as `expected_version`
+(and do not also send `version`). A matching save increments the definition's
+version atomically; a stale concurrent save returns `409`, so the editor can
+refresh, present a merge choice, and avoid silently overwriting another user.
+
 ### File handoff between nodes (`push_files`, T9b)
 
 An edge can hand previously-collected files (see `collect_files`, T9a) to the

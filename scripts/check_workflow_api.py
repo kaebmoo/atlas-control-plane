@@ -126,6 +126,18 @@ def main() -> None:
             bad_status = request_error(base_url, "PUT", f"/api/workflows/{workflow_id}", {"status": 'x" onmouseover="y'})
             assert "status" in bad_status["error"], bad_status
             assert request(base_url, "PUT", f"/api/workflows/{workflow_id}", {"version": 3})["workflow"]["version"] == 3
+            conditional = request(
+                base_url, "PUT", f"/api/workflows/{workflow_id}", {"name": "conditional", "expected_version": 3}
+            )["workflow"]
+            assert conditional["version"] == 4 and conditional["name"] == "conditional"
+            conflict = request_error(
+                base_url,
+                "PUT",
+                f"/api/workflows/{workflow_id}",
+                {"name": "stale", "expected_version": 3},
+                status=409,
+            )
+            assert "version conflict" in conflict["error"]
             assert "starts at only" in request(base_url, "POST", f"/api/workflows/{workflow_id}/explain")["explanation"]
             assert request(base_url, "POST", f"/api/workflows/{workflow_id}/repair")["draft"]["explanation"] == "Workflow already validates."
 

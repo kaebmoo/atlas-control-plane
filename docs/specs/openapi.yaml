@@ -924,6 +924,10 @@ paths:
                 name: {type: string}
                 description: {type: string}
                 version: {type: integer}
+                expected_version:
+                  type: integer
+                  minimum: 1
+                  description: Optional optimistic-concurrency precondition. Do not combine with version; a matching save increments version by one, a stale save returns 409.
                 status: {type: string}
                 graph:
                   $ref: './workflow-definition.schema.json#/$defs/graph'
@@ -943,6 +947,7 @@ paths:
                 type: object
                 properties:
                   workflow: {$ref: '#/components/schemas/WorkflowDefinition'}
+        '409': {$ref: '#/components/responses/Error'}
         default: {$ref: '#/components/responses/Error'}
     delete:
       tags: [Workflows]

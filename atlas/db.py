@@ -29,6 +29,10 @@ _WORKER_TOKEN_MARKER = "atlasenc:v1:"
 _AUDIT_ACTOR = contextvars.ContextVar("atlas_audit_actor", default="local")
 
 
+class WorkflowVersionConflict(ValueError):
+    """A conditional workflow-definition save saw a newer persisted version."""
+
+
 def now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -1280,6 +1284,12 @@ class Database:
         return [row_to_dict(row) or {} for row in rows]
 
     def update_workflow_definition(self, definition_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        expected_version = payload.get("expected_version")
+        if expected_version is not None:
+            if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version < 1:
+                raise ValueError("expected_version must be a positive integer")
+            if "version" in payload:
+                raise ValueError("expected_version cannot be combined with version")
         allowed = {
             "name": "name",
             "description": "description",
@@ -1303,10 +1313,24 @@ class Database:
                     fields[column] = payload[key]
         if not fields:
             return self.get_workflow_definition(definition_id)
+        if expected_version is not None:
+            # Conditional-save callers never choose a version; a successful save is
+            # exactly one monotonic step from the document they loaded.
+            fields["version"] = expected_version + 1
         fields["updated_at"] = now_iso()
         assignments = _set_clause(fields)
         with self._lock, self.connect() as conn:
-            cursor = conn.execute(f"UPDATE workflow_definitions SET {assignments} WHERE id = ?", list(fields.values()) + [definition_id])  # nosec B608
+            sql = f"UPDATE workflow_definitions SET {assignments} WHERE id = ?"  # nosec B608
+            params: list[Any] = [*fields.values(), definition_id]
+            if expected_version is not None:
+                sql += " AND version = ?"
+                params.append(expected_version)
+            cursor = conn.execute(sql, params)
+            exists = cursor.rowcount or conn.execute(
+                "SELECT 1 FROM workflow_definitions WHERE id = ?", (definition_id,)
+            ).fetchone()
+        if expected_version is not None and not cursor.rowcount and exists:
+            raise WorkflowVersionConflict("workflow version conflict; refresh and merge before saving")
         if cursor.rowcount:
             self.audit("workflow_definition.update", "workflow_definition", definition_id)
         return self.get_workflow_definition(definition_id)
