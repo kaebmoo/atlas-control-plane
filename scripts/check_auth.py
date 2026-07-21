@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import sqlite3
 import sys
 import threading
@@ -112,6 +113,7 @@ def main() -> None:
         try:
             assert request(base_url, "GET", "/api/me")[0] == 401
             assert request(base_url, "GET", "/api/me", token="invalid-token")[0] == 401
+            check_http_method_and_keepalive_safety(base_url, server.server_address[1])
 
             status, created = request(
                 base_url,
@@ -265,6 +267,43 @@ def check_login_limiter_keying_and_restart() -> None:
     assert limiter.check("alice", "192.0.2.2").allowed, "a different peer IP must not share a bucket"
     assert limiter.check("bob", "192.0.2.1").allowed, "a different username must not share a bucket"
     assert LoginRateLimiter(2, 60, 60).check("alice", "192.0.2.1").allowed, "restart resets in-memory limiter state"
+
+
+def check_http_method_and_keepalive_safety(base_url: str, port: int) -> None:
+    """A pre-auth rejection with an unread body must close, and HEAD/PATCH are explicit."""
+    raw = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        body = b"POISON-NEXT-REQUEST"
+        raw.sendall(
+            (
+                f"POST /api/me HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+                f"Content-Length: {len(body)}\r\nContent-Type: application/json\r\n\r\n"
+            ).encode("ascii")
+            + body
+        )
+        response = b""
+        closed = False
+        while True:
+            try:
+                chunk = raw.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                closed = True
+                break
+            response += chunk
+        assert b" 401 " in response.split(b"\r\n", 1)[0], response[:120]
+        assert closed, "unread rejected body must close the keep-alive connection"
+    finally:
+        raw.close()
+
+    status, payload, headers = request_with_headers(base_url, "PATCH", "/api/me")
+    assert status == 405 and payload == {"error": "method not allowed"}
+    assert "GET" in headers["Allow"] and "HEAD" in headers["Allow"]
+    request = urllib.request.Request(base_url + "/healthz", method="HEAD")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200 and response.read() == b""
+        assert int(response.headers["Content-Length"]) > 0
 
 
 def check_worker_token_migration(path: Path) -> None:

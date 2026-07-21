@@ -166,12 +166,18 @@ class AtlasHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_OPTIONS(self) -> None:
+        self._close_if_request_body_unread()
         self.send_response(HTTPStatus.NO_CONTENT)
         self._cors_headers()
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_GET(self) -> None:
+        self._dispatch("GET")
+
+    def do_HEAD(self) -> None:
+        # HEAD is the GET metadata contract with no response body. Reuse the exact
+        # authorization/RBAC/route code so it cannot drift from GET semantics.
         self._dispatch("GET")
 
     def do_POST(self) -> None:
@@ -183,11 +189,18 @@ class AtlasHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         self._dispatch("DELETE")
 
+    def do_PATCH(self) -> None:
+        # Atlas has no partial-update contract today. Say so explicitly instead of
+        # BaseHTTPRequestHandler's generic 501, and make the advertised methods
+        # discoverable to browser clients and reverse proxies.
+        self._method_not_allowed()
+
     def log_message(self, fmt: str, *args: Any) -> None:
         return
 
     def handle_one_request(self) -> None:
         self._t0 = time.monotonic()
+        self._request_body_consumed = False
         try:
             super().handle_one_request()
         except (ConnectionResetError, BrokenPipeError):
@@ -244,10 +257,12 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     self._handle_worker_callback(parts[2])
                     return
                 if not self._is_authorized():
+                    self._close_if_request_body_unread()
                     self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
                     return
                 permission = _required_permission(method, parts)
                 if permission not in ROLE_PERMISSIONS.get(self.auth_identity["role"], frozenset()):
+                    self._close_if_request_body_unread()
                     self._json({"error": "forbidden"}, HTTPStatus.FORBIDDEN)
                     return
                 with self.server.runtime.db.as_actor(self.auth_identity["username"]):
@@ -258,13 +273,18 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 return
             self._handle_static(path)
         except ValueError as exc:
+            self._close_if_request_body_unread()
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except FileNotFoundError:
+            self._close_if_request_body_unread()
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except BrokenPipeError:
             return
         except Exception as exc:
+            self._close_if_request_body_unread()
             self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+        finally:
+            self._close_if_request_body_unread()
 
     def _handle_api(self, method: str, path: str, query: dict[str, list[str]]) -> None:
         runtime = self.server.runtime
@@ -927,7 +947,8 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, max-age=0")
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
-        self.wfile.write(content)
+        if self.command != "HEAD":
+            self.wfile.write(content)
 
     def _upload_workflow_file(self, run_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
         runtime = self.server.runtime
@@ -961,6 +982,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     output.write(chunk)
                     digest.update(chunk)
                     remaining -= len(chunk)
+                self._request_body_consumed = True
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary, target)
@@ -1004,7 +1026,8 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Disposition", disposition)
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
-        self.wfile.write(content)
+        if self.command != "HEAD":
+            self.wfile.write(content)
 
     def _stream_job_events(self, job_id: str, after: int) -> None:
         runtime = self.server.runtime
@@ -1016,6 +1039,9 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
+        if self.command == "HEAD":
+            self.close_connection = True
+            return
 
         last_seq = after
         while True:
@@ -1170,13 +1196,21 @@ class AtlasHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._json({"error": "callback body read timed out; retry"}, HTTPStatus.SERVICE_UNAVAILABLE)
             return None
+        self._request_body_consumed = True
         return bytes(chunks)
 
     def _read_json(self) -> dict[str, Any]:
+        if self.headers.get("Transfer-Encoding"):
+            # http.server does not decode chunked request bodies. Treating one as an
+            # empty JSON body would leave its bytes queued for the next keep-alive
+            # request, so reject it and let _dispatch close the connection.
+            raise ValueError("Transfer-Encoding is not supported")
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length <= 0:
+            self._request_body_consumed = True
             return {}
         raw = self.rfile.read(length).decode("utf-8")
+        self._request_body_consumed = True
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("JSON body must be an object")
@@ -1193,7 +1227,8 @@ class AtlasHandler(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _csv(self, content: str) -> None:
         body = content.encode("utf-8")
@@ -1203,7 +1238,33 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Disposition", 'attachment; filename="atlas-usage.csv"')
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _method_not_allowed(self) -> None:
+        self._close_if_request_body_unread()
+        self._json(
+            {"error": "method not allowed"},
+            HTTPStatus.METHOD_NOT_ALLOWED,
+            headers={"Allow": "GET, HEAD, POST, PUT, DELETE, OPTIONS"},
+        )
+
+    def _close_if_request_body_unread(self) -> None:
+        """Prevent an unread body from becoming the next HTTP/1.1 request line.
+
+        Route/auth validation occurs before a handler may call ``_read_json`` or an
+        upload reader. Draining an arbitrary rejected body would let a peer hold a
+        thread or consume unbounded bytes, so close the keep-alive connection
+        whenever a declared body remains unread instead.
+        """
+        if getattr(self, "_request_body_consumed", False):
+            return
+        try:
+            declared = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            declared = 1
+        if declared > 0 or self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
 
     def _cors_headers(self) -> None:
         allowlist = self.server.runtime.config.cors_origins

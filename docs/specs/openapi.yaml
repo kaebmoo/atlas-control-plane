@@ -1672,7 +1672,7 @@ components:
 
   responses:
     Error:
-      description: Error response; normally 400, 401, 403, 404, or 500
+      description: Error response; normally 400, 401, 403, 404, 405, 429, or 500. Unsupported methods include an Allow header.
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}

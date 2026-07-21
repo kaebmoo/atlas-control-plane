@@ -116,6 +116,7 @@ Every error uses one JSON shape:
 | `401` | Missing or incorrect token |
 | `403` | Authenticated role lacks the route permission |
 | `429` | Login rate limit reached; obey the `Retry-After` response header |
+| `405` | Method is unsupported; inspect the response `Allow` header |
 | `404` | Resource or route not found |
 | `500` | Exception not converted into a validation error |
 
@@ -125,6 +126,12 @@ Every error uses one JSON shape:
 - Job/run creation and some approval/trigger actions return `202` before background work finishes.
 - Continue with GET, workflow events, or job SSE to observe completion.
 - There is no general idempotency key; trigger fire supports `dedupe_key`.
+- `HEAD` mirrors a successful `GET` route's status and headers but has no body.
+  `PATCH` is not a partial-update contract in Atlas and returns `405` with `Allow`.
+- If Atlas rejects a request before consuming a declared request body (for example,
+  auth/RBAC or an unsupported method), it closes that HTTP/1.1 connection instead
+  of risking body bytes being parsed as the next keep-alive request. Clients should
+  retry only on a fresh connection.
 
 ## 4. Endpoint catalog
 
