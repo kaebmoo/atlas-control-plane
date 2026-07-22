@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Atlas Control Plane</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260711-ux3">
+    <link rel="stylesheet" href="/static/styles.css?v=20260722-ops1">
   </head>
   <body class="is-loading">
     <a class="skip-link" href="#main">Skip to content</a>
@@ -64,14 +64,6 @@
             <button class="nav-item" type="button" data-view="overview" aria-current="page">
               <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg></span>
               <span class="nav-label"><span class="th">ภาพรวม</span><span class="en">Overview</span></span>
-            </button>
-            <button class="nav-item" type="button" data-view="command">
-              <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
-              <span class="nav-label"><span class="th">สั่งงาน</span><span class="en">Command</span></span>
-            </button>
-            <button class="nav-item" type="button" data-view="workflows">
-              <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="15" y="15" width="6" height="6" rx="1"/><rect x="15" y="3" width="6" height="6" rx="1"/><path d="M6 9v6a2 2 0 0 0 2 2h7M18 9v3"/></svg></span>
-              <span class="nav-label"><span class="th">เวิร์กโฟลว์</span><span class="en">Workflows</span></span>
             </button>
             <button class="nav-item" type="button" data-view="monitor">
               <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
@@ -202,267 +194,9 @@
           </div>
         </section>
 
-        <!-- COMMAND -->
-        <section class="view" id="view-command" data-view="command" tabindex="-1">
-          <div class="composer">
-            <div class="card">
-              <div class="route-preview">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--nt-grey-600)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-                <span id="routePreview">เลือก worker อัตโนมัติตามสถานะและบริบท</span>
-              </div>
-
-              <label class="field composer-prompt">
-                <span>คำสั่ง · Prompt</span>
-                <textarea id="promptInput" rows="6" placeholder="อธิบายงานที่ต้องการให้ worker ทำ…"></textarea>
-              </label>
-
-              <div class="row-2">
-                <label class="field"><span>Worker</span><select id="workerSelect"></select></label>
-                <label class="field"><span>Workspace</span><select id="workspaceSelect"></select></label>
-                <label class="field"><span>บทสนทนา · Conversation</span><select id="conversationSelect"></select></label>
-                <label class="field"><span>โมเดล · Model</span><input id="modelInput" placeholder="ค่าเริ่มต้นของ worker"></label>
-                <label class="field"><span>เก็บไฟล์ · Collect files <span class="hint-inline">— T5 · relative paths คั่นด้วย comma</span></span><input id="collectFilesInput" placeholder="reports/out.md, data/summary.csv"></label>
-                <div class="field toggle-field"><span>Async (callback) <span class="hint-inline">— T3 · ต้องตั้ง ATLAS_PUBLIC_BASE_URL ที่ server</span></span>
-                  <label class="switch"><input id="jobExecutionCallback" type="checkbox"><span class="slider"></span></label>
-                </div>
-              </div>
-
-              <div class="handoff-box" id="handoffBox">
-                <div class="handoff-head">
-                  <label class="switch"><input id="handoffEnabled" type="checkbox"><span class="slider"></span></label>
-                  <div>
-                    <div class="handoff-title">ส่งต่อเมื่อสำเร็จ · Hand off after success</div>
-                    <div class="handoff-desc">เมื่องาน A สำเร็จ Atlas จะเริ่มงาน B อัตโนมัติ พร้อมส่งผลลัพธ์เข้า prompt</div>
-                  </div>
-                </div>
-                <div class="handoff-body" id="handoffBody">
-                  <div class="row-2">
-                    <label class="field"><span>ส่งไปยัง worker</span><select id="handoffWorkerSelect"></select></label>
-                    <label class="field"><span>ส่งไปยัง workspace</span><select id="handoffWorkspaceSelect"></select></label>
-                  </div>
-                  <label class="field"><span>Handoff prompt <span class="hint-inline">— ใช้ตัวแปร {result}, {source_prompt}, {source_job_id}</span></span><textarea id="handoffPromptInput" rows="5"></textarea></label>
-                </div>
-              </div>
-
-              <div class="composer-actions">
-                <button id="submitJobBtn" class="primary-btn composer-run" type="button"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>เรียกใช้งาน</button>
-                <span class="composer-hint">หรือกด <b>⌘ + Enter</b></span>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- WORKFLOWS -->
-        <section class="view" id="view-workflows" data-view="workflows" tabindex="-1">
-          <div class="wf-toolbar">
-            <div class="wf-toolbar-title">
-              <span class="wf-dirty-dot" title="มีการแก้ไขที่ยังไม่บันทึก" aria-hidden="true"></span>
-              <h2 id="workflowName">เวิร์กโฟลว์</h2>
-              <span class="chip" id="workflowMeta">ยังไม่ได้เลือก</span>
-              <span class="dirty-badge" title="The editor has changes that are not saved">ยังไม่บันทึก</span>
-            </div>
-            <div class="head-actions">
-              <button id="newWorkflowBtn" class="secondary-btn" type="button">ใหม่</button>
-              <button id="validateWorkflowBtn" class="preview-btn" type="button">ตรวจสอบ</button>
-              <button id="explainWorkflowBtn" class="preview-btn" type="button">อธิบาย</button>
-              <button id="repairWorkflowBtn" class="preview-btn" type="button">ซ่อม</button>
-              <button id="saveWorkflowBtn" class="secondary-btn" type="button">บันทึก</button>
-              <button id="runWorkflowBtn" class="primary-btn" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>เรียกใช้</button>
-            </div>
-          </div>
-
-          <div class="wf-layout">
-            <div class="card card-pad-0 wf-rail">
-              <div class="card-head"><h3>Definitions</h3></div>
-              <div id="workflowList" class="wf-rail-list"><div class="empty">กำลังโหลด…</div></div>
-              <div class="wf-rail-foot">
-                <label class="field"><span>เริ่มจากเทมเพลต</span><select id="workflowTemplateSelect"><option value="">เลือกเทมเพลต</option></select></label>
-                <button id="applyWorkflowTemplateBtn" class="preview-btn block-btn" type="button">คัดลอกเทมเพลตมาที่ตัวแก้ไข</button>
-                <div class="rail-sep" aria-hidden="true"></div>
-                <div class="rail-mini-title">แพ็ก · Packs</div>
-                <div id="packList" class="pack-list"></div>
-                <input id="packFileInput" type="file" accept="application/json,.json" hidden>
-                <button id="importPackBtn" class="preview-btn block-btn" type="button">นำเข้าแพ็กจากไฟล์ (.json)</button>
-                <button id="exportPackBtn" class="preview-btn block-btn" type="button">ส่งออกเวิร์กโฟลว์นี้เป็นแพ็ก</button>
-              </div>
-            </div>
-
-            <div class="wf-main">
-              <div class="wf-canvas">
-                <div class="wf-legend">
-                  <span><span class="lg-sq worker"></span>worker</span>
-                  <span><span class="lg-sq gate"></span>human gate</span>
-                  <span><span class="lg-sq manager"></span>manager</span>
-                </div>
-                <div class="wf-canvas-fit" id="workflowGraph"><div class="wf-canvas-empty">Graph JSON ไม่ถูกต้อง หรือยังไม่มีโหนด</div></div>
-                <div class="wf-zoom">
-                  <button id="wfZoomOut" class="icon-btn" type="button" aria-label="zoom out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/></svg></button>
-                  <button id="wfZoomIn" class="icon-btn" type="button" aria-label="zoom in"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
-                </div>
-              </div>
-
-              <div class="wf-sec-tabs" role="tablist" aria-label="Workflow sections">
-                <button class="wf-sec-tab is-active" type="button" data-wf-section="design"><span class="th">ออกแบบ</span><span class="en">Design</span></button>
-                <button class="wf-sec-tab" type="button" data-wf-section="policy"><span class="th">นโยบาย</span><span class="en">Policy</span></button>
-                <button class="wf-sec-tab" type="button" data-wf-section="run"><span class="th">เรียกใช้</span><span class="en">Run</span></button>
-                <button class="wf-sec-tab" type="button" data-wf-section="assist"><span class="th">ผู้ช่วย AI</span><span class="en">Assist</span></button>
-              </div>
-
-              <div class="wf-sec-pane" data-wf-section-pane="design">
-              <div class="card card-pad-0 wf-inspector">
-                <div class="wf-insp-side">
-                  <div class="tabs-pill">
-                    <button class="tab-pill is-active" type="button" data-wf-tab="node">โหนด</button>
-                    <button class="tab-pill" type="button" data-wf-tab="json">Graph JSON</button>
-                  </div>
-                  <div class="wf-insp-head">
-                    <div id="wfNodeLabel">เลือกโหนด</div>
-                    <p id="wfNodeType">คลิกโหนดในกราฟเพื่อดูรายละเอียด</p>
-                  </div>
-                </div>
-                <div class="wf-insp-body">
-                  <div data-wf-pane="node" id="workflowNodeInspector"><div class="hint">คลิกโหนดในกราฟด้านบนเพื่อดูฟิลด์ของโหนด</div></div>
-                  <div data-wf-pane="json" hidden>
-                    <div class="code-label"><span>Graph JSON</span><span class="tag tag-edit">Raw · editable</span></div>
-                    <textarea id="workflowGraphInput" class="code-area" rows="12" spellcheck="false" wrap="off"></textarea>
-                  </div>
-                </div>
-              </div>
-
-              <div class="card">
-                <div class="card-head"><h3>รายละเอียด · Definition</h3></div>
-                <div class="row-2">
-                  <label class="field"><span>ชื่อ · Name</span><input id="workflowNameInput" placeholder="News workflow"></label>
-                  <label class="field"><span>คำอธิบาย · Description</span><input id="workflowDescriptionInput" placeholder="optional"></label>
-                </div>
-
-                <details class="builder">
-                  <summary>Builder Lite — เพิ่มโหนดและเส้นเข้า Graph JSON</summary>
-                  <div class="builder-body">
-                    <p class="hint"><span class="tag tag-preview">Preview only</span> Builder แก้ Graph JSON; ยังไม่บันทึกจนกว่าจะกดบันทึก</p>
-                    <div class="field-group">
-                      <div class="field-group-title">Node</div>
-                      <div class="row-3">
-                        <label class="field"><span>Node ID</span><input id="builderNodeIdInput" placeholder="reviewer"></label>
-                        <label class="field"><span>Node type</span><select id="builderNodeTypeSelect">
-                          <option value="worker">worker</option>
-                          <option value="manager">manager</option>
-                          <option value="join">join</option>
-                          <option value="human_gate">human_gate</option>
-                        </select></label>
-                        <label class="field"><span>Role / label</span><input id="builderNodeRoleInput" placeholder="reviewer"></label>
-                        <label class="field"><span>Prompt / reason</span><input id="builderNodePromptInput" placeholder="Review {artifact.draft}"></label>
-                        <label class="field"><span>Outputs</span><input id="builderNodeOutputsInput" placeholder="review"></label>
-                        <label class="field"><span>Collect files <span class="hint-inline">— T9a · glob ได้ คั่นด้วย comma</span></span><input id="builderNodeCollectFilesInput" placeholder="reports/*.md, out/data.csv"></label>
-                        <label class="field"><span>Budget units</span><input id="builderNodeBudgetInput" type="number" min="1" value="1"></label>
-                        <label class="field"><span>Human choices</span><input id="builderHumanChoicesInput" placeholder="publish:Publish, revise:Revise"></label>
-                        <label class="field"><span>Join mode</span><select id="builderJoinModeSelect"><option value="all">all</option><option value="any">any</option><option value="quorum">quorum</option></select></label>
-                        <label class="field"><span>Join quorum</span><input id="builderJoinQuorumInput" type="number" min="1" value="2"></label>
-                      </div>
-                      <button id="builderAddNodeBtn" class="preview-btn" type="button">Add node</button>
-                    </div>
-                    <div class="field-group">
-                      <div class="field-group-title">Edge</div>
-                      <div class="row-3">
-                        <label class="field"><span>From</span><input id="builderEdgeFromInput" placeholder="writer"></label>
-                        <label class="field"><span>To</span><input id="builderEdgeToInput" placeholder="reviewer"></label>
-                        <label class="field"><span>Condition</span><select id="builderConditionTypeSelect">
-                          <option value="always">always</option>
-                          <option value="artifact_equals">artifact_equals</option>
-                          <option value="artifact_in">artifact_in</option>
-                          <option value="manager_selected">manager_selected</option>
-                          <option value="human_selected">human_selected</option>
-                          <option value="max_iterations_below">max_iterations_below</option>
-                        </select></label>
-                        <label class="field"><span>Artifact / node</span><input id="builderConditionSubjectInput" placeholder="fact_check"></label>
-                        <label class="field"><span>Path</span><input id="builderConditionPathInput" placeholder="verdict"></label>
-                        <label class="field"><span>Value(s) / max</span><input id="builderConditionValueInput" placeholder="approved or approved,rewrite"></label>
-                        <label class="field"><span>Push files <span class="hint-inline">— T6 · artifact-key globs, ต้องเปิด policy file handoff</span></span><input id="builderEdgePushFilesInput" placeholder="files.coder.*"></label>
-                      </div>
-                      <button id="builderAddEdgeBtn" class="preview-btn" type="button">Add edge</button>
-                    </div>
-                  </div>
-                </details>
-
-              </div>
-              </div>
-
-              <div class="wf-sec-pane" data-wf-section-pane="policy" hidden>
-              <div class="card">
-                <div class="card-head"><div><h3>Policy</h3><p class="card-sub">ลิมิตความปลอดภัยของ run · แก้ได้จากฟอร์มโดยไม่ต้องแตะ JSON</p></div></div>
-                <div id="workflowPolicyForm" class="row-3">
-                  <label class="field"><span>Max jobs</span><input id="policyMaxJobsInput" type="number" min="1"></label>
-                  <label class="field"><span>Max iterations</span><input id="policyMaxIterationsInput" type="number" min="1"></label>
-                  <label class="field"><span>Max attempts / node</span><input id="policyMaxAttemptsInput" type="number" min="1"></label>
-                  <label class="field"><span>Max minutes</span><input id="policyMaxMinutesInput" type="number" min="1"></label>
-                  <label class="field"><span>Human after iterations</span><input id="policyHumanAfterInput" type="number" min="1"></label>
-                  <label class="field"><span>Max budget units</span><input id="policyMaxBudgetInput" type="number" min="1"></label>
-                  <label class="field"><span>Allowed worker IDs</span><input id="policyAllowedWorkersInput" placeholder="wrk_one, wrk_two"></label>
-                  <label class="field"><span>Allowed workspace IDs</span><input id="policyAllowedWorkspacesInput" placeholder="wsp_one, wsp_two"></label>
-                  <div class="field toggle-field"><span>Stop on first failure</span>
-                    <label class="switch"><input id="policyStopOnFailureInput" type="checkbox" checked><span class="slider"></span></label>
-                  </div>
-                  <div class="field toggle-field"><span>File handoff <span class="hint-inline">— T6 · เปิดใช้ edge push_files</span></span>
-                    <label class="switch"><input id="policyFileHandoffInput" type="checkbox"><span class="slider"></span></label>
-                  </div>
-                </div>
-                <details class="fold">
-                  <summary>Policy JSON — Raw · stays in sync</summary>
-                  <div class="field code-field">
-                    <textarea id="workflowPolicyInput" class="code-area" rows="5" spellcheck="false" wrap="off"></textarea>
-                  </div>
-                </details>
-              </div>
-              </div>
-
-              <div class="wf-sec-pane" data-wf-section-pane="run" hidden>
-              <div class="card">
-                <div class="card-head"><div><h3>เรียกใช้ · Run</h3><p class="card-sub">อินพุตของ run ใหม่ · ปุ่มเรียกใช้อยู่มุมขวาบน</p></div></div>
-                <label class="field code-field">
-                  <span>Run input JSON <span class="hint-inline">— เช่น {"topic": "ข่าวเช้า"}</span></span>
-                  <textarea id="workflowRunInput" class="code-area" rows="4" spellcheck="false" wrap="off">{}</textarea>
-                </label>
-              </div>
-
-              <div class="card">
-                <div class="card-head"><div><h3>Worker resolution</h3><p class="card-sub">จับคู่ role ของโหนดกับ worker จริงในฟลีตก่อนเรียกใช้</p></div></div>
-                <div class="item-actions">
-                  <button id="suggestWorkersBtn" class="preview-btn" type="button">Suggest workers</button>
-                </div>
-                <div id="workerSuggestionList" class="stack-list short-list"></div>
-              </div>
-              </div>
-
-              <div class="wf-sec-pane" data-wf-section-pane="assist" hidden>
-              <div class="card">
-                <div class="card-head"><h3>Draft from plain language</h3><span class="tag tag-preview">Preview only</span></div>
-                <label class="field"><span>Prompt</span><textarea id="draftPromptInput" rows="4" placeholder="Describe the workflow in plain language"></textarea></label>
-                <button id="draftWorkflowBtn" class="preview-btn" type="button">Draft</button>
-                <pre id="draftResult" class="code-block"></pre>
-              </div>
-
-              <div class="card">
-                <div class="card-head"><h3>Explanation</h3><span class="tag tag-preview">Display only</span></div>
-                <pre id="workflowExplanation" class="code-block"></pre>
-              </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
         <!-- MONITOR -->
         <section class="view" id="view-monitor" data-view="monitor" tabindex="-1">
           <div class="mon">
-            <div class="card card-pad-0">
-              <div class="mon-aq-head">
-                <span class="mon-aq-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span>
-                <h3>คิวรออนุมัติจากคน</h3>
-                <span class="mon-aq-count" id="approvalCount">0 รายการรออยู่</span>
-                <span class="mon-aq-note">จากหลาย run ที่ทำงานพร้อมกัน</span>
-              </div>
-              <div id="approvalList" class="mon-aq-grid"><div class="empty">ไม่มีรายการรออนุมัติ</div></div>
-            </div>
-
             <div class="mon-grid">
               <div class="card card-pad-0 mon-runs">
                 <div class="card-head">
@@ -506,67 +240,11 @@
               <summary>Artifacts</summary>
               <div id="workflowArtifactDownloads" class="stack-list short-list"></div>
               <pre id="workflowArtifactList" class="code-block"></pre>
-              <div class="field-group">
-                <div class="field-group-title">Upload to selected run</div>
-                <div class="row-2">
-                  <label class="field"><span>File key</span><input id="workflowFileKeyInput" placeholder="attachment"></label>
-                  <label class="field"><span>File</span><input id="workflowFileInput" type="file"></label>
-                </div>
-                <button id="uploadWorkflowFileBtn" class="secondary-btn" type="button">Upload file</button>
-              </div>
-            </details>
-
-            <details class="card mon-more">
-              <summary>Manager decisions</summary>
-              <div id="managerDecisionList" class="stack-list short-list"></div>
             </details>
 
             <details class="card mon-more">
               <summary>Run detail (raw JSON)</summary>
               <pre id="workflowRunDetail" class="code-block"></pre>
-            </details>
-
-            <details class="card mon-more">
-              <summary>Triggers</summary>
-              <div class="field-group">
-                <div class="row-3">
-                  <label class="field"><span>Quick trigger</span><select id="triggerQuickTypeSelect">
-                    <option value="manual">manual</option>
-                    <option value="webhook">webhook</option>
-                    <option value="interval">schedule interval</option>
-                    <option value="daily">schedule daily</option>
-                  </select></label>
-                  <label class="field"><span>Quick value</span><input id="triggerQuickValueInput" placeholder="15 or 09:30"></label>
-                  <button id="applyTriggerQuickBtn" class="preview-btn" type="button">Apply to JSON</button>
-                </div>
-                <div class="row-3">
-                  <label class="field"><span>Name</span><input id="triggerNameInput" placeholder="Manual"></label>
-                  <label class="field"><span>Type</span><select id="triggerTypeSelect">
-                    <option value="manual">manual</option>
-                    <option value="schedule">schedule</option>
-                    <option value="webhook">webhook</option>
-                    <option value="workflow_run_completed">workflow_run_completed</option>
-                    <option value="artifact_created">artifact_created</option>
-                    <option value="worker_status_changed">worker_status_changed</option>
-                  </select></label>
-                  <div class="field toggle-field"><span>Enabled</span>
-                    <label class="switch"><input id="triggerEnabledInput" type="checkbox" checked><span class="slider"></span></label>
-                  </div>
-                </div>
-                <label class="field code-field"><span>Config JSON</span><textarea id="triggerConfigInput" class="code-area" rows="3" spellcheck="false" wrap="off">{}</textarea></label>
-                <div class="item-actions">
-                  <button id="saveTriggerBtn" class="secondary-btn" type="button">Create trigger</button>
-                  <button id="suggestTriggersBtn" class="preview-btn" type="button">Suggest triggers</button>
-                </div>
-              </div>
-              <div id="triggerList" class="stack-list short-list"></div>
-              <pre id="triggerEventList" class="code-block"></pre>
-            </details>
-
-            <details class="card mon-more" id="deliveriesPanel">
-              <summary>Deliveries (webhook ขาออก)</summary>
-              <p class="hint">ผลการส่ง callback ของ run ไปยัง URL ปลายทาง · retry ได้เมื่อ failed</p>
-              <div id="deliveryList" class="stack-list short-list"><div class="empty">ยังไม่มี delivery</div></div>
             </details>
             </div>
           </div>
@@ -784,7 +462,7 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/static/config.js?v=20260711-ux3"></script>
-    <script src="/static/app.js?v=20260711-ux3" type="module"></script>
+    <script src="/static/config.js?v=20260722-ops1"></script>
+    <script src="/static/app.js?v=20260722-ops1" type="module"></script>
   </body>
 </html>

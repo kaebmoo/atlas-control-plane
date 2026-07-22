@@ -521,10 +521,9 @@ def check_milestones_9_and_10(base_url: str) -> None:
     assert suggestions[0]["state"] == "matched" and suggestions[0]["worker_id"] == reporter["id"]
     assert suggestions[1]["state"] == "unavailable" and "No configured worker" in suggestions[1]["reason"]
 
-    html = request_text(base_url, "/")
+    # The embedded UI is a minimal ops console; workflow editing/AI-assist surfaces live in the
+    # external frontend, so only the security-sensitive UI markers are asserted here.
     javascript = request_text(base_url, "/static/app.js")
-    assert all(marker in html for marker in ["workflowPolicyForm", "explainWorkflowBtn", "repairWorkflowBtn", "suggestWorkersBtn"])
-    assert all(marker in javascript for marker in ["syncPolicyFormFromJson", "Validated repair copied", "applyWorkerSuggestion", "toggleTrigger"])
     # Security regression guards: status is whitelist-sanitized before it reaches a class
     # attribute (stored-XSS), and artifact downloads go through an authenticated fetch
     # rather than a token-less <a href> (401 under auth).
@@ -692,11 +691,6 @@ def check_milestone_8(base_url: str) -> None:
         )["workflow"]
         assert created["graph"] == template["graph"]
         assert created["policy"] == template["policy"]
-
-    html = request_text(base_url, "/")
-    javascript = request_text(base_url, "/static/app.js")
-    assert 'id="workflowTemplateSelect"' in html
-    assert "template.graph" in javascript and "template.policy" in javascript
 
 
 def check_milestone_14(runtime: AtlasRuntime, base_url: str) -> None:

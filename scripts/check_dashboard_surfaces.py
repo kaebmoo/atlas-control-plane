@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""Dashboard-surface gate for the T1/T3/T9a/T6 features on the web UI.
+"""Dashboard-surface gate for the minimal ops console.
 
 Hermetic: reads the static frontend files directly (no server, no DB) and asserts the markers
-+ wiring that surface, on the dashboard, features the earlier milestones added only to the API:
++ wiring the embedded UI still owns. Job submission and the visual workflow builder moved to
+the external frontend (flow-designer), so their markers are gone by design; what remains is
+the ops surface:
 
   T1a/T1b — the Usage view shows token totals and the estimated (non-billable) cost.
-  T3      — the Start-a-Job form can opt a job into async (execution: "callback").
-  T9a     — the Start-a-Job form can request Job Artifact collect_files on stream/callback.
-  T6      — the visual builder can set policy.file_handoff (default-OFF) and edge push_files,
-            and the run timeline shows files_pushed detail (count/bytes/target).
+  T6      — the run timeline shows files_pushed detail (count/bytes/target).
+  T9a     — a job's collected files are downloadable from the Jobs view.
 
 Mutation targets (break the code -> this file goes red):
 - drop the usageTokens/usageEstCost lines in loadUsage -> the render assertions fail.
-- drop `payload.collect_files` / `payload.execution` in submitJob -> the wiring assertions fail.
-- flip the file_handoff boolean_off read from `value === true` to `value !== false`
-  (so a missing file_handoff would wrongly render CHECKED) -> the exact-string assertion fails.
-- drop `edge.push_files` in addBuilderEdge -> the assertion fails.
 - drop the files_pushed detail branch in the event render -> the assertion fails.
+- window the run timeline back to the FIRST 14 events -> the slice assertions fail.
+- drop the stream-close artifact refresh in openJobStream -> the call-count assertion fails.
 """
 from __future__ import annotations
 
@@ -44,27 +42,9 @@ need('$("#usageTokens").textContent' in JS, "loadUsage does not render #usageTok
 need("totals.tokens_prompt" in JS and "totals.tokens_output" in JS, "loadUsage ignores token totals")
 need('$("#usageEstCost").textContent' in JS and "totals.estimated_cost_usd" in JS, "loadUsage ignores estimated_cost_usd")
 
-# --- T3/T9a: Start-a-Job form gains execution + collect_files ------------------------------
-need('id="collectFilesInput"' in HTML, "job form missing #collectFilesInput")
-need('id="jobExecutionCallback"' in HTML, "job form missing #jobExecutionCallback toggle")
-need("payload.collect_files = collectFiles" in JS, "submitJob does not send collect_files")
-need('payload.execution = "callback"' in JS, "submitJob does not send execution: callback")
-# T9a explicitly supports collection on callback jobs; the dashboard must not reject the
-# combination client-side.
-need("asyncCallback && collectFiles.length" not in JS, "submitJob must allow collect_files + callback")
-# the async toggle must reset after submit, or the next job silently inherits callback mode.
-need('$("#jobExecutionCallback").checked = false' in JS, "submitJob must reset the async toggle after submit")
-
-# --- T6: builder policy.file_handoff (default-off) + edge push_files ----------------------
-need('id="policyFileHandoffInput"' in HTML, "builder missing #policyFileHandoffInput toggle")
-need('id="builderEdgePushFilesInput"' in HTML, "builder missing #builderEdgePushFilesInput")
-need('["file_handoff", "#policyFileHandoffInput", "boolean_off"]' in JS, "file_handoff not a boolean_off policy field")
-# default-OFF correctness: a missing file_handoff must render UNCHECKED. The exact expression
-# is load-bearing — flipping it to `value !== false` (the stop_on_first_failure default-ON rule)
-# would silently enable handoff on every workflow, so pin the exact string.
-need("$(selector).checked = value === true" in JS, "boolean_off read must be `value === true` (default-off)")
-need("else delete policy[key]" in JS, "boolean_off write must drop the key when unchecked")
-need("edge.push_files = pushFiles" in JS, "addBuilderEdge does not attach push_files")
+# --- ops-console scope: no job submission / builder in the embedded UI ---------------------
+need('id="promptInput"' not in HTML, "job composer must not return to the embedded UI (flow-designer owns it)")
+need('id="builderEdgePushFilesInput"' not in HTML, "workflow builder must not return to the embedded UI")
 
 # --- T6: run timeline shows files_pushed detail ------------------------------------------
 need('type === "files_pushed"' in JS, "run timeline does not surface files_pushed detail")
@@ -91,8 +71,6 @@ need(JS.count("loadJobArtifacts(jobId).catch") >= 2, "loadJobArtifacts must run 
 
 # --- existing anchors must not regress (careless rewrite guard) ---------------------------
 need('id="usageBudgetUnits"' in HTML, "existing Usage marker regressed")
-need('id="promptInput"' in HTML, "existing job-form marker regressed")
-need("function submitJob(" in JS and "function addBuilderEdge(" in JS, "core job/builder functions regressed")
 
 if problems:
     print("check_dashboard_surfaces FAILED:")
