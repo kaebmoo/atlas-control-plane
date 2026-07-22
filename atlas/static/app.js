@@ -671,14 +671,25 @@ function renderAudit() {
     const details = entry.details && typeof entry.details === "object"
       ? Object.entries(entry.details).map(([key, value]) => `${key}=${value}`).join(" · ")
       : String(entry.details || "");
+    // Cross-nav: route a row to its target view by the resource id/type. job_* → Jobs (open its
+    // stream), wfr_* → Monitor (select that run), any worker resource → Fleet. Non-routable rows
+    // stay plain divs. The id is escaped and only fed to openJobStream/selectWorkflowRun (which
+    // fetch by id), so a bad/stale id degrades to a 404 handled below — never an injection.
+    const rid = entry.resource_id || "";
+    const rtype = entry.resource_type || "";
+    let nav = "";
+    if (/^job_/.test(rid)) nav = ` data-nav-view="jobs" data-nav-job="${escapeHtml(rid)}"`;
+    else if (/^wfr_/.test(rid)) nav = ` data-nav-view="monitor" data-nav-run="${escapeHtml(rid)}"`;
+    else if (rtype.includes("worker")) nav = ` data-nav-view="fleet"`;
+    const tag = nav ? `button type="button"` : "div";
     return `
-    <div class="audit-row">
+    <${tag} class="audit-row"${nav}>
       <span class="audit-time">${escapeHtml(formatTime(entry.created_at))}</span>
       <span class="audit-action ${tone}">${escapeHtml(action)}</span>
       <span class="audit-target">${escapeHtml(entry.resource_id || entry.resource_type || "")}</span>
       <span class="audit-detail">${escapeHtml(details)}</span>
       <span class="audit-actor"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>${escapeHtml(entry.actor || "system")}</span>
-    </div>`;
+    </${nav ? "button" : "div"}>`;
   }).join("");
 }
 
@@ -1452,6 +1463,33 @@ for (const chip of document.querySelectorAll(".audit-chip[data-audit-filter]")) 
     renderAudit();
   });
 }
+// Audit cross-nav: a routable row jumps to its target view and selects the resource there.
+document.getElementById("auditList")?.addEventListener("click", (event) => {
+  const row = event.target.closest(".audit-row[data-nav-view]");
+  if (!row) return;
+  if (row.dataset.navJob) openJobStream(row.dataset.navJob);
+  else if (row.dataset.navRun) selectWorkflowRun(row.dataset.navRun).catch((error) => toast(error.message));
+  showView(row.dataset.navView);
+});
+
+// Theme: light/dark toggle persisted to localStorage. The <head> inline script sets the
+// initial data-theme before first paint (no flash); this reflects it on the toggle and flips it.
+function applyTheme(theme) {
+  const dark = theme === "dark";
+  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  const label = document.getElementById("themeToggleLabel");
+  if (label) label.textContent = dark ? "Light" : "Dark";
+}
+(function initTheme() {
+  let saved = "light";
+  try { saved = localStorage.getItem("atlas-theme") || "light"; } catch { /* private mode */ }
+  applyTheme(saved === "dark" ? "dark" : "light");
+})();
+document.getElementById("themeToggle")?.addEventListener("click", () => {
+  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  try { localStorage.setItem("atlas-theme", next); } catch { /* private mode */ }
+  applyTheme(next);
+});
 $("#loadUsageBtn").addEventListener("click", () => loadUsage().catch((error) => toast(error.message)));
 $("#usageJsonBtn").addEventListener("click", () => downloadUsage("").catch((error) => toast(error.message)));
 $("#usageCsvBtn").addEventListener("click", () => downloadUsage("csv").catch((error) => toast(error.message)));
