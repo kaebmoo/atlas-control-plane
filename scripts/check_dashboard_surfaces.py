@@ -69,6 +69,16 @@ need(JS.count("loadJobArtifacts(jobId).catch") >= 2, "loadJobArtifacts must run 
 # NB: the backend GET /api/jobs/{id}/artifacts route is behaviour-tested end-to-end in
 # scripts/check_job_artifacts.py (a static substring can't tell a working route from a broken one).
 
+# --- Overview recent jobs → Jobs detail cross-navigation -------------------------------
+need('<button class="dash-job" type="button"' in JS,
+     "Overview recent jobs must be keyboard-activatable buttons")
+need('data-job-id="${escapeHtml(job.id)}"' in JS,
+     "Overview recent jobs must carry the selected job id")
+need('event.target.closest(".job-row, .dash-job")' in JS,
+     "job click handler must include Overview recent jobs")
+need('state.jobRunFilter = "all"' in JS and 'showView("jobs")' in JS,
+     "Overview recent jobs must open the Jobs detail view without a stale run filter")
+
 # --- existing anchors must not regress (careless rewrite guard) ---------------------------
 need('id="usageBudgetUnits"' in HTML, "existing Usage marker regressed")
 

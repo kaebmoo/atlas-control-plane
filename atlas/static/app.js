@@ -376,7 +376,7 @@ function renderOverviewLists() {
     const recent = state.jobs.slice(0, 5);
     jobsBox.innerHTML = recent.length
       ? recent.map((job) => `
-        <div class="dash-job">
+        <button class="dash-job" type="button" data-job-id="${escapeHtml(job.id)}">
           <span class="status ${statusClass(job.state)} dot-only" aria-hidden="true"></span>
           <div class="grow">
             <div class="title">${escapeHtml(job.prompt || job.id)}</div>
@@ -384,7 +384,7 @@ function renderOverviewLists() {
           </div>
           <span class="status ${statusClass(job.state)}">${escapeHtml(job.state)}</span>
           <span class="ago">${escapeHtml(formatTime(job.created_at))}</span>
-        </div>`).join("")
+        </button>`).join("")
       : '<div class="empty">ยังไม่มีงาน</div>';
   }
   const apBox = document.getElementById("overviewApproval");
@@ -1454,8 +1454,14 @@ document.addEventListener("click", async (event) => {
       .catch((error) => toast(error.message));
     return;
   }
-  const jobItem = event.target.closest(".job-row");
+  const jobItem = event.target.closest(".job-row, .dash-job");
   if (jobItem) {
+    if (jobItem.classList.contains("dash-job")) {
+      // Recent jobs on Overview should open the same selected detail in Jobs, even when a
+      // previous visit left the list filtered to a specific workflow run.
+      state.jobRunFilter = "all";
+      showView("jobs");
+    }
     openJobStream(jobItem.dataset.jobId);
   }
 });

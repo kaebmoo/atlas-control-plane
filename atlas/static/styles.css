@@ -57,6 +57,10 @@ body {
   margin: 0; font-family: var(--font); font-size: 17px; line-height: 1.45;
   color: var(--ink); background: var(--app-bg);
   -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  /* The NT brand font has a small x-height (~0.375) so it renders visibly smaller than a
+     normal font at the same px. Normalize apparent size to a standard x-height so NT and the
+     Thai/system fallback read at the same, expected size. */
+  font-size-adjust: 0.5;
 }
 h1, h2, h3, h4, h5, h6, p { margin: 0; }
 h1, h2, h3, h4, h5, h6, strong, b { color: inherit; }
