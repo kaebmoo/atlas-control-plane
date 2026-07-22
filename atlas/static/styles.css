@@ -362,6 +362,9 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 .nchip.run .d { animation: nt-pulse 1.5s infinite; }
 .nchip.wait { background: rgba(255,209,0,.22); color: var(--warn-ink); border-color: transparent; }
 .nchip.err { background: rgba(225,82,62,.14); color: var(--err-ink); border-color: transparent; }
+.nchip.is-nav { cursor: pointer; transition: filter var(--fast); }
+.nchip.is-nav:hover { filter: brightness(.94); }
+.nchip .njob { opacity: .6; font-size: 11px; }
 
 .mon-timeline { display: flex; flex-direction: column; }
 .mon-timeline:empty::before { content: "ยังไม่มีเหตุการณ์"; color: var(--faint); font-size: 13px; }
@@ -403,6 +406,14 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 .job-detail-id { font-size: 12px; color: var(--faint); font-family: var(--mono); }
 .job-detail-prompt { font-size: 15px; font-weight: 700; line-height: 1.4; max-height: 26vh; overflow-y: auto; }
 .job-detail-route { font-size: 12.5px; color: var(--mut); margin-top: 3px; }
+.job-run-chip { display: inline-flex; align-items: center; padding: 3px 11px; border-radius: var(--r-pill); background: rgba(255,209,0,.22); color: var(--warn-ink); font-size: 11.5px; font-weight: 700; font-family: var(--mono); transition: background var(--fast); }
+.job-run-chip:hover { background: rgba(255,209,0,.38); }
+.job-run-chip[hidden] { display: none; }
+.job-filters { display: flex; gap: 6px; padding: 12px 16px; border-bottom: 1px solid var(--line2); flex-wrap: wrap; }
+.job-filters[hidden] { display: none; }
+.job-filter { padding: 5px 12px; border: 1px solid var(--line); border-radius: var(--r-pill); font-size: 11.5px; font-weight: 700; font-family: var(--mono); color: var(--mut); background: transparent; }
+.job-filter:hover { border-color: var(--faint); }
+.job-filter.is-active { background: var(--ink900); color: #fff; border-color: var(--ink900); }
 
 .tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 14px 22px 0; border-bottom: 1px solid var(--line2); }
 .tab { padding: 9px 15px; font-size: 13px; font-weight: 700; color: var(--faint); border-bottom: 2.5px solid transparent; background: none; }

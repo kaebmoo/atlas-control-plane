@@ -17,6 +17,7 @@ const state = {
   apiTokens: [],
   eventSource: null,
   auditFilter: "all",
+  jobRunFilter: "all",
   streamText: "",
   events: [],
 };
@@ -480,15 +481,45 @@ function renderSelects() {
   )).join("");
 }
 
+// Filter chips over the job list, one per workflow run that produced jobs (+ Manual for
+// non-workflow jobs). Runs are labelled from state.workflowRuns; run_id comes from the API.
+function renderJobFilters() {
+  const box = document.getElementById("jobFilters");
+  if (!box) return;
+  const filter = state.jobRunFilter || "all";
+  const runIds = [];
+  const seen = new Set();
+  for (const job of state.jobs) {
+    if (job.run_id && !seen.has(job.run_id)) { seen.add(job.run_id); runIds.push(job.run_id); }
+  }
+  box.hidden = runIds.length === 0;  // no workflow jobs → no filter row at all
+  if (box.hidden) { box.innerHTML = ""; return; }
+  const runName = (id) => state.workflowRuns.find((run) => run.id === id)?.name || shortId(id);
+  const chip = (value, label) => `<button class="job-filter ${filter === value ? "is-active" : ""}" type="button" data-job-filter="${escapeHtml(value)}">${escapeHtml(label)}</button>`;
+  const chips = [chip("all", "All · ทั้งหมด")];
+  for (const id of runIds) chips.push(chip(id, `${shortId(id)} · ${runName(id)}`));
+  if (state.jobs.some((job) => !job.run_id)) chips.push(chip("manual", "Manual · สั่งตรง"));
+  box.innerHTML = chips.join("");
+}
+
 function renderJobs() {
   const list = $("#jobList");
   const count = document.getElementById("jobCount");
-  if (count) count.textContent = `${state.jobs.length} รายการ`;
-  if (!state.jobs.length) {
+  let filter = state.jobRunFilter || "all";
+  // A stale run filter (its run no longer has jobs) falls back to "all" so nothing is hidden.
+  if (filter !== "all" && filter !== "manual" && !state.jobs.some((job) => job.run_id === filter)) {
+    filter = state.jobRunFilter = "all";
+  }
+  renderJobFilters();
+  const jobs = filter === "all" ? state.jobs
+    : filter === "manual" ? state.jobs.filter((job) => !job.run_id)
+    : state.jobs.filter((job) => job.run_id === filter);
+  if (count) count.textContent = `${jobs.length} รายการ`;
+  if (!jobs.length) {
     list.innerHTML = '<div class="empty">ยังไม่มีงาน</div>';
     return;
   }
-  list.innerHTML = state.jobs.map((job) => {
+  list.innerHTML = jobs.map((job) => {
     const handoff = job.handoff_error
       ? { label: "handoff error", cls: "err" }
       : job.handoff_job_id
@@ -535,8 +566,14 @@ function wfBarColor(runState) {
   if (cls === "succeeded") return "var(--nt-success)";
   return "var(--nt-yellow-500)";
 }
-function nodeChip(stateName, label) {
-  return `<span class="nchip ${stateName}"><span class="d"></span>${escapeHtml(label)}</span>`;
+// A node with a resolved job renders as a button (click → open that job in Jobs); a node
+// without one stays a plain span. jobId/runId are escaped and only fed to openJobStream by id.
+function nodeChip(stateName, label, jobId, runId) {
+  const key = String(label);
+  if (jobId) {
+    return `<button class="nchip ${stateName} is-nav" type="button" data-node-job="${escapeHtml(jobId)}" data-node-run="${escapeHtml(runId || "")}" title="เปิด job ของโหนดนี้"><span class="d"></span>${escapeHtml(key)}<span class="njob">${escapeHtml(shortId(jobId))}</span></button>`;
+  }
+  return `<span class="nchip ${stateName}"><span class="d"></span>${escapeHtml(key)}</span>`;
 }
 function renderNodeChips(run) {
   const definition = state.workflows.find((item) => item.id === run.workflow_definition_id);
@@ -545,8 +582,16 @@ function renderNodeChips(run) {
   const done = new Set(counters.completed_nodes || []);
   const failed = new Set(counters.failed_nodes || []);
   const waiting = new Set(state.approvals.filter((approval) => approval.run_id === run.id).map((approval) => approval.node_key));
+  // node_key → job_id from the loaded run detail (nodes[] is the authoritative linkage).
+  const jobByNode = {};
+  if (state.workflowRunDetail?.run?.id === run.id) {
+    for (const runtimeNode of state.workflowRunDetail.nodes || []) {
+      if (runtimeNode.job_id) jobByNode[runtimeNode.node_key] = runtimeNode.job_id;
+    }
+  }
   if (!Array.isArray(nodes) || !nodes.length) {
-    const chips = [...done].map((id) => nodeChip("done", id)).concat([...failed].map((id) => nodeChip("err", id)));
+    const chips = [...done].map((id) => nodeChip("done", id, jobByNode[id], run.id))
+      .concat([...failed].map((id) => nodeChip("err", id, jobByNode[id], run.id)));
     return chips.length ? chips.join("") : '<span class="hint">ไม่มีข้อมูลโหนด</span>';
   }
   let markedRun = false;
@@ -557,7 +602,7 @@ function renderNodeChips(run) {
     else if (waiting.has(node.id)) stateName = "wait";
     else if (run.state === "running" && !markedRun) { stateName = "run"; markedRun = true; }
     else stateName = "pend";
-    return nodeChip(stateName, node.id);
+    return nodeChip(stateName, node.id, jobByNode[node.id], run.id);
   }).join("");
 }
 
@@ -1064,6 +1109,16 @@ function updateStreamHeader() {
       ? `${job.route_reason || `${job.worker_name || shortId(job.worker_id)} · ${job.workspace_key || "auto"}`}${job.handoff_job_id ? ` · handoff ${shortId(job.handoff_job_id)}` : ""}`
       : "";
   });
+  // When the job belongs to a workflow run, surface a chip that jumps to that run in Monitor.
+  set("jobDetailRunChip", (n) => {
+    const runId = job?.run_id;
+    n.hidden = !runId;
+    if (runId) {
+      n.dataset.runId = runId;
+      const name = state.workflowRuns.find((run) => run.id === runId)?.name || shortId(runId);
+      n.textContent = `${shortId(runId)} · ${name} →`;
+    }
+  });
   const live = !!job && ["queued", "running", "cancel_requested"].includes(job.state);
   const operator = ["admin", "operator"].includes(state.currentUser?.role);
   set("cancelJobBtn", (n) => { n.disabled = !job || !operator || !["queued", "running", "cancel_requested"].includes(job.state); });
@@ -1467,9 +1522,34 @@ for (const chip of document.querySelectorAll(".audit-chip[data-audit-filter]")) 
 document.getElementById("auditList")?.addEventListener("click", (event) => {
   const row = event.target.closest(".audit-row[data-nav-view]");
   if (!row) return;
-  if (row.dataset.navJob) openJobStream(row.dataset.navJob);
+  if (row.dataset.navJob) { state.jobRunFilter = "all"; openJobStream(row.dataset.navJob); }  // "all" so the job is visible in the list
   else if (row.dataset.navRun) selectWorkflowRun(row.dataset.navRun).catch((error) => toast(error.message));
   showView(row.dataset.navView);
+});
+
+// Jobs filter chips: filter the list by the workflow run that produced each job.
+document.getElementById("jobFilters")?.addEventListener("click", (event) => {
+  const chip = event.target.closest("[data-job-filter]");
+  if (!chip) return;
+  state.jobRunFilter = chip.dataset.jobFilter;
+  renderJobs();
+});
+
+// Monitor node chip → open that node's job in Jobs, filtered to the run it belongs to.
+document.getElementById("monNodeChips")?.addEventListener("click", (event) => {
+  const chip = event.target.closest(".nchip[data-node-job]");
+  if (!chip) return;
+  if (chip.dataset.nodeRun) state.jobRunFilter = chip.dataset.nodeRun;
+  openJobStream(chip.dataset.nodeJob);
+  showView("jobs");
+});
+
+// Job detail → open the job's workflow run in Monitor (reverse of the node chip).
+document.getElementById("jobDetailRunChip")?.addEventListener("click", (event) => {
+  const runId = event.currentTarget.dataset.runId;
+  if (!runId) return;
+  selectWorkflowRun(runId).catch((error) => toast(error.message));
+  showView("monitor");
 });
 
 // Theme: light/dark toggle persisted to localStorage. The <head> inline script sets the

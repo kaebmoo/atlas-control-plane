@@ -255,9 +255,10 @@
             <div class="view-wrap jobs">
               <div class="card card-pad-0 jobs-list-card">
                 <div class="card-head">
-                  <div><h3>All jobs</h3><p class="card-sub">งานทั้งฟลีต</p></div>
+                  <div><h3>All jobs</h3><p class="card-sub">แยกตาม flow ที่ run</p></div>
                   <span class="card-count" id="jobCount">0 รายการ</span>
                 </div>
+                <div id="jobFilters" class="job-filters" hidden></div>
                 <div id="jobList" class="jobs-scroll"><div class="empty">กำลังโหลด…</div></div>
               </div>
 
@@ -268,6 +269,7 @@
                     <div class="job-detail-meta">
                       <span class="status queued" id="jobDetailChip">—</span>
                       <span class="job-detail-id" id="jobDetailId"></span>
+                      <button id="jobDetailRunChip" class="job-run-chip" type="button" title="เปิด workflow run นี้ใน Monitor" hidden></button>
                     </div>
                     <div class="job-detail-prompt" id="jobDetailPrompt">เลือกงานจากรายการเพื่อดูสตรีมสด</div>
                     <div class="job-detail-route" id="jobDetailRoute"></div>
