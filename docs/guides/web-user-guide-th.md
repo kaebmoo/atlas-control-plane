@@ -1,10 +1,18 @@
 # คู่มือใช้งาน Atlas ผ่านเว็บ
 
-คู่มือนี้อธิบายหน้าเว็บ Atlas Control Plane รุ่นปัจจุบันครบทุกเมนู ตั้งแต่เพิ่ม
-thClaws worker ไปจนถึงสร้างและติดตาม workflow
+คู่มือนี้อธิบาย web UI ที่ฝังมากับ Atlas Control Plane — คอนโซลปฏิบัติการ
+(ops console) แบบมินิมอล สำหรับลงทะเบียน thClaws worker, ติดตามงานและ workflow
+run, ดู audit/usage และจัดการบัญชีผู้ใช้
 
 > Atlas เป็น control plane ส่วน thClaws worker เป็นตัวประมวลผลงานจริง
 > path ของ workspace จึงต้องมีอยู่บนเครื่อง worker ไม่ใช่เครื่องที่เปิด Atlas
+
+> **ขอบเขต** — UI ที่ฝังมาตั้งใจให้มินิมอล การสั่งงาน (submit job), การสร้าง/แก้ไข
+> workflow, การตัดสิน approval และการจัดการ triggers / packs / deliveries
+> ทำผ่าน REST API (ดู [API Reference](../specs/api-reference-en.md) และ
+> [Workflow Examples](../workflow-examples.md)) หรือ frontend ภายนอกที่สร้างบน
+> API เดียวกัน คอนโซลนี้เน้นสิ่งที่ operator ต้องเห็นได้ทันที: สุขภาพฟลีต,
+> ผลงานแบบสด, ความคืบหน้าของ run, audit, usage และการจัดการผู้ใช้
 
 ## 1. เริ่มระบบ
 
@@ -47,158 +55,94 @@ Atlas ใช้ SQLite ที่ `data/atlas.sqlite` โดยปริยาย
 
 ## 2. ภาพรวมหน้าเว็บ
 
-เมนูหลักมี 9 หน้า:
+เมนูหลักมี 7 หน้า:
 
 | เมนู | ใช้ทำอะไร |
 | --- | --- |
-| **Overview** | หน้าแรกเริ่มต้น: สรุป fleet, job, run และ approval แบบ stat tile พร้อมงานล่าสุด |
-| **Command** | ส่ง prompt แบบงานเดียวหรือ handoff สองช่วง |
-| **Workflows** | สร้าง ตรวจสอบ อธิบาย ซ่อม และสั่งรัน workflow |
-| **Monitor** | ติดตาม workflow run, approval, artifact และ trigger |
-| **Jobs** | ดู job, output แบบสด, event และยกเลิก job |
-| **Audit** | ตรวจสอบ action ล่าสุดของ control plane |
-| **Usage** | ยอด run/job/budget ต่อช่วงเวลา, แจ้งเตือน quota และดาวน์โหลด JSON/CSV |
-| **Fleet** | จัดการ worker และ workspace |
-| **Accounts** | เฉพาะ `admin`: จัดการผู้ใช้และ API token (ดู [§11](#11-บัญชี-ผู้ใช้และ-api-token)) |
+| **ภาพรวม (Overview)** | หน้าแรกเริ่มต้น: สรุป fleet, job, run และ approval แบบ stat tile พร้อมงานล่าสุด |
+| **ติดตาม (Monitor)** | ดู workflow run: ความคืบหน้า สถานะรายโหนด ไทม์ไลน์ artifacts และปุ่มกู้คืน |
+| **งาน (Jobs)** | ดู job, output แบบสด, ไทม์ไลน์เครื่องมือ, event, ไฟล์ และยกเลิก job |
+| **ตรวจสอบ (Audit)** | ตรวจสอบ action ล่าสุดของ control plane |
+| **การใช้งาน (Usage)** | ยอด run/job/budget ต่อช่วงเวลา, แจ้งเตือน quota และดาวน์โหลด JSON/CSV |
+| **ฟลีต (Fleet)** | จัดการ worker และ workspace |
+| **บัญชี (Accounts)** | เฉพาะ admin: จัดการผู้ใช้และ API token (ดู [§9](#9-บัญชี-ผู้ใช้และ-api-token)) |
 
-แถบด้านซ้ายแสดงจำนวน worker, job ที่กำลังทำงาน และ approval ที่รออนุมัติ ป้ายตัวเลข
-ที่ **Monitor** คือ approval ที่รอคนตัดสิน ส่วนป้ายที่ **Jobs** คือ job สถานะ
-`queued`, `running` หรือ `cancel_requested`
+ตัวเลข badge บน sidebar แสดงจำนวน worker, งานที่ยัง active และรายการรออนุมัติ
+badge ของหน้า ติดตาม นับรายการรออนุมัติ (ตัดสินผ่าน
+`POST /api/approvals/{id}/approve|reject|choose`) ส่วน badge ของหน้า งาน นับ
+job สถานะ `queued`, `running` และ `cancel_requested`
 
-ปุ่ม **Refresh & poll** โหลดข้อมูลใหม่และ poll worker ทุกตัวทันที หน้าเว็บโหลดข้อมูล
-ใหม่อัตโนมัติทุก 5 วินาที และ poll worker ทุก 60 วินาที
+ปุ่ม **รีเฟรช** โหลดข้อมูลใหม่และ poll worker ทุกตัวทันที นอกจากนี้ UI โหลด
+ข้อมูลใหม่ทุก 5 วินาที และ poll worker ทุก 60 วินาทีโดยอัตโนมัติ
 
-ลำดับเริ่มใช้งานที่แนะนำคือ **Fleet → Command → Jobs** และค่อยใช้
-**Workflows → Monitor** เมื่อต้องการงานหลายขั้น
+การตั้งค่าครั้งแรก: ใช้ **ฟลีต** ลงทะเบียน worker และ workspace แล้วสั่งงานผ่าน
+API จากนั้นดูผลใน **งาน** หรือ **ติดตาม**
 
-`admin` และ `auditor` มีหน้า **Usage** (ยอดต่อช่วงเวลา, แจ้งเตือน quota และดาวน์โหลด)
-ส่วน API และ CLI ตาม [§10](#10-usage-metering-และ-offline-export) ยังใช้ได้สำหรับงานอัตโนมัติ
-และไฟล์ signed export แบบ air-gap
+## 3. ฟลีต: worker และ workspace
 
-```mermaid
-flowchart TD
-  fleet["Fleet — ลงทะเบียน worker และ workspace"]
-  fleet --> q{"งานเดียวหรือหลายขั้น?"}
-  q -->|"งานเดียว / handoff"| cmd["Command — ส่งงาน"] --> jobs["Jobs — ดู output และ event"]
-  q -->|"งานหลายขั้น"| wf["Workflows — สร้าง ตรวจ รัน"] --> mon["Monitor — run, approval, artifact, trigger"]
-```
+### เพิ่ม worker
 
-## 3. Fleet: จัดการ worker และ workspace
+เปิด **ฟลีต** กด **เพิ่ม worker** แล้วกรอก:
 
-### 3.1 เพิ่ม worker
-
-ไปที่ **Fleet** แล้วกด **Add worker** กรอกข้อมูลดังนี้:
-
-| ช่อง | ความหมาย |
+| ฟิลด์ | ความหมาย |
 | --- | --- |
 | **Name** | ชื่อที่อ่านง่าย เช่น `Reporter` |
 | **Base URL** | URL ของ thClaws เช่น `http://127.0.0.1:4317` |
 | **Token** | ค่า `THCLAWS_API_TOKEN` ของ worker |
-| **Role** | หน้าที่หลักที่ใช้ route งาน เช่น `reporter` |
-| **Tags** | คำช่วย route คั่นด้วย comma เช่น `local,news,thai` |
+| **Role** | role หลักสำหรับ routing เช่น `reporter` |
+| **Tags** | คำใบ้ routing คั่นด้วย comma เช่น `local,news,thai` |
 
-กด **Save Worker** แล้ว Atlas จะ poll ทันที ถ้า URL เข้าถึงได้และ token ถูกต้อง
+กด **Save Worker** — Atlas จะ poll ทันที ถ้าเข้าถึงได้และ token ถูกต้อง
 สถานะจะเป็น `online`
 
-การ์ด worker มีคำสั่ง:
+การ์ด worker แต่ละใบมี:
 
-- **Poll** ตรวจสุขภาพและ capability ของ worker ตัวนั้น
-- **Edit** แก้ข้อมูลเดิม; เว้น Token ว่างเพื่อเก็บ token เดิม
-- **Delete** ลบ worker พร้อม workspace ของ worker นั้น ต้องยืนยันก่อนลบ
-- ปุ่มลูกศร **Poll all workers** ที่หัวการ์ดตรวจ worker ทุกตัว
+- **Poll** — รีเฟรชสุขภาพและความสามารถของ worker ตัวนั้น
+- **แก้ไข** — อัปเดตข้อมูล; เว้น Token ว่างเพื่อคง token เดิม
+- **ลบ** — ลบ worker และ workspace ของมันหลังยืนยัน
+- **Poll ทุกเครื่อง** — ปุ่มลูกศรที่หัวรายการ Workers
 
-สถานะที่พบบ่อยคือ `online`, `offline` และ `unknown` ข้อผิดพลาดการเชื่อมต่อจะดูได้
-จาก **Audit**
+สถานะที่พบบ่อยคือ `online`, `offline`, `unknown` — ความล้มเหลวของการ poll
+ดูได้ใน **ตรวจสอบ (Audit)**
 
-### 3.2 เพิ่ม workspace
+### เพิ่ม workspace
 
-กด **Add workspace** (ต้องมี worker ก่อน) แล้วกรอก:
+กด **เพิ่ม workspace** หลังมี worker อย่างน้อยหนึ่งตัว:
 
-| ช่อง | ความหมาย |
+| ฟิลด์ | ความหมาย |
 | --- | --- |
-| **Worker** | worker เจ้าของ directory นี้ |
-| **Key** | ชื่ออ้างอิงสำหรับ route เช่น `atlas` หรือ `company-a` |
-| **Directory** | absolute path บนเครื่อง worker |
-| **Company** | ชื่อองค์กรหรือขอบเขตข้อมูล ใช้ช่วย auto route |
-| **Tags** | คำช่วย route คั่นด้วย comma |
+| **Worker** | worker ที่เป็นเจ้าของไดเรกทอรี |
+| **Key** | key สำหรับ routing เช่น `atlas` หรือ `company-a` |
+| **Directory** | path สัมบูรณ์บนเครื่อง worker |
+| **Company** | ขอบเขตองค์กร/ข้อมูล ใช้เป็นคำใบ้ routing |
+| **Tags** | คำใบ้ routing คั่นด้วย comma |
 
-กด **Save Workspace** การ์ด workspace มี **Edit** และ **Delete** การลบต้องยืนยัน
-ก่อนทุกครั้ง
+กด **Save Workspace** — แถว workspace มีปุ่ม **แก้ไข** และ **ลบ** (ยืนยันก่อน)
 
-ปุ่ม **Cancel**, ปุ่ม **×** หรือปุ่ม `Escape` ปิด modal Add/Edit โดยไม่บันทึก
+ปุ่ม **Cancel**, ปุ่ม **×** หรือ `Escape` ปิดหน้าต่าง Add/Edit โดยไม่บันทึก
 
-## 4. Command: ส่งงานเดี่ยวและ handoff
+## 4. งาน: ผลลัพธ์และเหตุการณ์
 
-### 4.1 ช่องส่งงาน
+job ถูกสร้างผ่าน `POST /api/jobs` (ดู
+[API Reference](../specs/api-reference-en.md)) — หน้าจอ งาน คือที่สำหรับดูและ
+จัดการ job เหล่านั้น
 
-| ช่อง | วิธีใช้ |
-| --- | --- |
-| **Prompt** | งานที่ต้องการให้ worker ทำ; เป็นช่องบังคับ |
-| **Conversation** | เลือก `New conversation` หรือบทสนทนาเดิมเพื่อใช้ session binding เดิม |
-| **Worker** | `Auto route` หรือระบุ worker โดยตรง |
-| **Workspace** | `Auto route` หรือระบุ workspace โดยตรง |
-| **Model** | model override แบบ optional; เว้นว่างเพื่อใช้ค่าของ worker |
-| **เก็บไฟล์ · Collect files** | relative path คั่นด้วย comma เพื่อ freeze เป็น job artifact เมื่อสำเร็จ ดู [API Reference: Frozen Job Artifacts](../specs/api-reference-th.md#frozen-job-artifacts-collect_files-t9a) |
-| **Async (callback)** | เปิดเพื่อรันแบบ fire-and-forget ด้วย `execution: "callback"`; server ต้องตั้ง `ATLAS_PUBLIC_BASE_URL` ดู [API Reference: รันแบบ async](../specs/api-reference-th.md#รันแบบ-async-execution-callback) |
+รายการ job แสดง worker สถานะ เวลา ID สั้น ความสัมพันธ์ handoff และ prompt
+เลือกการ์ดเพื่อเปิดดู
 
-ข้อความใต้หัว **Command** เป็น route preview:
+**สตรีมสด** เล่นย้อนและตาม output ของ worker แบบสด **ไทม์ไลน์** แสดงการเรียก
+เครื่องมือ/สกิลรายตัว — ชื่อ สถานะ (started/ok/error/denied) ระยะเวลา และขนาด
+ไบต์ พร้อมตัวนับต่อ job (เรียก / ปฏิเสธ / ล้มเหลว) ไทม์ไลน์สร้างจาก
+**structural metadata เท่านั้น**: ไม่เก็บและไม่แสดง input/output ของเครื่องมือ
+(เก็บเพียงขนาดไบต์และ SHA-256) จึงไม่มีทางที่ payload จะรั่วความลับ
+**เหตุการณ์** แสดง event log ดิบ — route, session, state, error, completion,
+cancellation, handoff, message, close และ structured events ของ worker
+(`thinking`, `tool_use_*`, `skill_*`, `usage` ฯลฯ) **ไฟล์** แสดงรายการ
+ดาวน์โหลดของ job artifacts ที่เก็บผ่าน `collect_files`
 
-- เลือก workspace: workspace มีลำดับสูงสุด
-- เลือก worker: route ไป worker นั้น
-- เลือก conversation เดิม: Atlas พยายามใช้ binding เดิมก่อน
-- Auto ทั้งหมด: Atlas พิจารณาสถานะ online, workspace key, company, tags, role
-  และคำใบ้ใน prompt
-
-```mermaid
-flowchart TD
-  start(["ส่ง job"]) --> ws{"ระบุ workspace?"}
-  ws -->|ใช่| useWs["ใช้ workspace นั้น"]
-  ws -->|ไม่| wk{"ระบุ worker?"}
-  wk -->|ใช่| useWk["ใช้ worker นั้น"]
-  wk -->|ไม่| conv{"มี binding ของ conversation เดิม?"}
-  conv -->|ใช่| useConv["ใช้ session ที่ผูกไว้"]
-  conv -->|ไม่| auto["Auto route: สถานะ online, workspace key,<br/>company, tags, role, คำใบ้ใน prompt"]
-```
-
-กด **Run** แล้ว Atlas จะสร้าง job, ล้างช่อง Prompt, เปิดหน้า **Jobs** และเลือก job
-ใหม่ให้อัตโนมัติ
-
-### 4.2 Handoff หลังงานสำเร็จ
-
-เปิด **Hand off after success** เมื่อต้องการให้ job B เริ่มหลัง job A สำเร็จ:
-
-| ช่อง | วิธีใช้ |
-| --- | --- |
-| **Send to worker** | worker ปลายทาง |
-| **Send to workspace** | workspace ปลายทาง; ถ้าเลือกช่องนี้จะมีผลเหนือ worker |
-| **Handoff prompt** | prompt ของ job ลูก |
-
-ตัวแปรที่ใช้ใน Handoff prompt:
-
-- `{result}` — output ของ job ต้นทาง
-- `{source_prompt}` — prompt ต้นทาง
-- `{source_job_id}` — ID ของ job ต้นทาง
-
-ต้องเลือก worker หรือ workspace ปลายทางอย่างน้อยหนึ่งอย่าง Handoff จะไม่เริ่มถ้า job
-ต้นทางไม่สำเร็จ และสถานะ `handoff armed`, `handoff ->`, `child of` หรือ
-`handoff error` จะปรากฏบนการ์ด job
-
-## 5. Jobs: ดูผลและ event
-
-รายการด้านซ้ายแสดง worker, state, workspace, เวลา, ID แบบย่อ, ความสัมพันธ์ handoff
-และ prompt กดการ์ดใดก็ได้เพื่อเปิดรายละเอียดด้านขวา
-
-ส่วน **Live stream** แสดง output ที่ส่งมาจาก worker แบบต่อเนื่อง ส่วน **Timeline**
-แสดงไทม์ไลน์การเรียก tool และ skill ต่อ job — ชื่อ, สถานะ (started/ok/error/denied),
-ระยะเวลา และขนาดเป็น byte พร้อมตัวนับต่อ job (tools ที่รัน / ถูกปฏิเสธ / ล้มเหลว)
-สร้างจาก **structural metadata เท่านั้น**: input/output ของ tool ไม่ถูกเก็บหรือแสดง
-(มีแค่ขนาด byte และ SHA-256) จึงไม่มีทาง leak secret ผ่าน payload ส่วน **Events** แสดง
-log เหตุการณ์ดิบ เช่น `route`, `session`, `state`, `error`, `done`, `handoff_started`,
-`close` และ structured event ของ worker (`thinking`, `tool_use_*`, `skill_*`, `usage` ฯลฯ)
-ส่วน **Files** แสดงลิงก์ดาวน์โหลด job artifact ที่เก็บผ่าน `collect_files`
-
-ปุ่ม **Cancel** ใช้ได้กับ job ที่ยังไม่จบ การยกเลิกเป็น best effort ที่ชั้น Atlas:
-สถานะจะเปลี่ยนเป็น `cancel_requested` ก่อน และ worker อาจทำ side effect ไปแล้ว
+**ยกเลิกงาน** ใช้ได้ระหว่าง job ยัง active การยกเลิกเป็น best effort ที่ชั้น
+Atlas: job เปลี่ยนเป็น `cancel_requested` ก่อน และ worker อาจทำ side effect
+ไปแล้ว
 
 ```mermaid
 stateDiagram-v2
@@ -206,8 +150,8 @@ stateDiagram-v2
   queued --> running
   running --> succeeded
   running --> failed
-  queued --> cancel_requested: Cancel
-  running --> cancel_requested: Cancel
+  queued --> cancel_requested: ยกเลิก
+  running --> cancel_requested: ยกเลิก
   cancel_requested --> cancelled
   cancel_requested --> succeeded: best effort
   cancel_requested --> failed: best effort
@@ -216,341 +160,124 @@ stateDiagram-v2
   cancelled --> [*]
 ```
 
-สถานะ job ที่พบบ่อย:
-
 | สถานะ | ความหมาย |
 | --- | --- |
 | `queued` | รอเริ่ม |
 | `running` | worker กำลังทำงาน |
 | `cancel_requested` | Atlas รับคำขอยกเลิกแล้ว |
 | `succeeded` | สำเร็จ |
-| `failed` | ล้มเหลว; ดู event/error เพิ่มเติม |
-| `cancelled` | ยกเลิกแล้ว |
+| `failed` | ล้มเหลว; ดู event และข้อมูล error |
+| `cancelled` | ถูกยกเลิก |
 
-ถ้า stream หลุด ให้เลือกการ์ด job อีกครั้งเพื่อ replay event ตั้งแต่ต้น
+ถ้าสตรีมหลุด เลือกการ์ด job อีกครั้งเพื่อเล่น event ย้อนหลัง
 
-## 6. Workflows: สร้างงานหลายขั้น
+## 5. ติดตาม: workflow run
 
-ใต้ผัง graph ตัวแก้ไขแบ่งเป็น 4 แท็บ: **Design** (Graph JSON และ Builder Lite),
-**Policy**, **Run** (Run input และ worker resolution) และ **Assist** (Draft from
-plain language) — แสดงเฉพาะฟิลด์ของแท็บที่เลือกอยู่
+### รายการ run และปุ่มควบคุม
 
-### 6.1 เลือกหรือเริ่ม definition
+**Runs** แสดง workflow run ทั้งหมด เลือก run เพื่อดูสถานะ งาน budget โหนดที่
+เสร็จ/ล้มเหลว ความคืบหน้าของ join ชิปสถานะรายโหนด ไทม์ไลน์เหตุการณ์ล่าสุด
+และ JSON รายละเอียดเต็ม
 
-- **New** ล้าง editor เพื่อเริ่ม definition ใหม่
-- กด definition ในรายการ **Definitions** เพื่อโหลดมาแก้ไข
-- จุดสีข้างชื่อหน้า Workflows หมายถึงมี preview ที่แก้แล้วแต่ยังไม่ได้บันทึก
-- เลือก **Template** แล้วกด **Copy template to editor** เพื่อคัดลอก template มาเป็น
-  preview; ยังไม่บันทึกจนกว่าจะกด **Save**
-
-Template ที่มีให้คือ News Desk, Researcher → Writer → Reviewer,
-Coder → Tester → Reviewer และ Manager-directed loop
-
-ก่อนกด New, เลือก definition อื่น, คัดลอก template หรือ Draft ให้บันทึกข้อความที่
-ต้องการเก็บก่อน เพราะ action เหล่านี้อาจแทนที่ preview และหน้าเว็บยังไม่ถามยืนยัน
-ตอนสลับ definition ไม่มีปุ่มลบ workflow definition ใน UI รุ่นนี้
-
-### 6.2 Packs
-
-รายการ **Packs** ในแถบข้างแสดงไฟล์ `atlas.pack.v1` ที่มีอยู่บนเครื่อง server กด
-**นำเข้าแพ็กจากไฟล์ (.json)** เพื่อโหลดแพ็ก ระบบจะสร้าง workflow definition และ
-trigger ของแพ็กนั้นหลัง validate graph ตามปกติ เลือก workflow แล้วกด
-**ส่งออกเวิร์กโฟลว์นี้เป็นแพ็ก** เพื่อดาวน์โหลดเป็นไฟล์ JSON ที่แชร์ได้ ดูโครงสร้าง
-ไฟล์ใน [Solution Pack Format](../specs/pack-format.md)
-
-### 6.3 Definition และ Graph JSON
-
-กรอก **Name**, **Description** และ **Graph JSON** โดย graph ต้องมี `start`, `nodes`
-และ `edges` ตัวอย่างขั้นต่ำ:
-
-```json
-{
-  "start": "reporter",
-  "nodes": [
-    {
-      "id": "reporter",
-      "type": "worker",
-      "role": "reporter",
-      "prompt": "Research {input.topic}",
-      "outputs": ["notes"]
-    },
-    {
-      "id": "writer",
-      "type": "worker",
-      "role": "writer",
-      "prompt": "Write from {artifact.notes}"
-    }
-  ],
-  "edges": [
-    {"from": "reporter", "to": "writer", "condition": {"type": "always"}}
-  ]
-}
-```
-
-ในตัวอย่างนี้ `outputs: ["notes"]` หมายถึง เมื่อ reporter สำเร็จ Atlas จะเก็บคำตอบ
-ทั้งก้อนเป็น artifact ชื่อ `notes` ของ run นี้ แล้ว writer อ่านด้วย
-`{artifact.notes}` ถ้าไม่ใส่ `outputs` คำตอบยังดูได้ในหน้า Jobs แต่ node ถัดไปจะไม่มี
-artifact ชื่อนี้ให้เรียกใช้ Engine รุ่นปัจจุบันใช้ key ตัวแรกใน `outputs`
-
-ชนิด node:
-
-| Type | หน้าที่ |
-| --- | --- |
-| `worker` | สร้าง job บน thClaws worker |
-| `manager` | ให้ worker เสนอ node ถัดไปภายใต้ edge/policy ที่กำหนด |
-| `join` | รวม fan-out แบบ `all`, `any` หรือ `quorum`; ไม่สร้าง job |
-| `human_gate` | หยุดรอผู้ใช้อนุมัติ ปฏิเสธ หรือเลือกขั้นตอนถัดไป; ไม่สร้าง job |
-
-โหมด join: `all` รอ upstream **ทุกตัว**, `any` ไปต่อเมื่อ branch **แรก** เสร็จ และ
-`quorum` ไปต่อเมื่อมี branch เสร็จครบ **`quorum`** ตัว
-
-ชนิด condition ใน UI คือ `always`, `artifact_equals`, `artifact_in`,
-`manager_selected`, `human_selected` และ `max_iterations_below`
-
-Prompt อ้าง input ด้วย `{input.topic}` และ artifact ด้วย `{artifact.notes}` ดู graph
-ฉบับเต็มใน [Workflow Examples](../workflow-examples.md) และดูนิยามทุกตัว (node type,
-join mode, condition, artifact kind, policy, trigger) ใน
-[Concepts & Reference](../concepts-th.md)
-
-### 6.4 Builder Lite
-
-เปิด **Builder Lite — add nodes & edges...** เพื่อเพิ่มข้อมูลลง Graph JSON preview
-โดยไม่บันทึกอัตโนมัติ
-
-ส่วน Add node มี:
-
-- **Node ID**, **Node type**, **Role / label**, **Prompt / reason**
-- **Outputs** สำหรับ worker, **Collect files** (frozen job artifact, glob คั่นด้วย
-  comma) สำหรับ worker, **Budget units** สำหรับ worker/manager
-- **Human choices** รูปแบบ `publish:Publish, revise:Revise`
-- **Join mode** และ **Join quorum** สำหรับ join
-
-ส่วน Add edge มี **From**, **To**, **Condition**, **Artifact / node**, **Path**,
-**Value(s) / max** และ **Push files** (artifact-key glob ที่ส่งต่อให้ node ปลายทาง;
-ต้องเปิด Policy **File handoff** ก่อน) ช่องที่ถูกใช้ขึ้นกับ condition ที่เลือก
-
-กด **Suggest workers** เพื่อวิเคราะห์ node ที่ยัง resolve worker ไม่ได้ ถ้ามีข้อเสนอ
-กด **Apply To JSON** เพื่อใส่ `worker_id`/`workspace_id` ลง preview แล้วตรวจสอบก่อน Save
-
-### 6.5 Policy
-
-ฟอร์ม Policy และ **Policy JSON** sync กันเมื่อ JSON ถูกต้อง:
-
-| ช่อง | ข้อจำกัด |
-| --- | --- |
-| **Max jobs** | จำนวน job สูงสุดต่อ run |
-| **Max iterations** | จำนวนรอบสูงสุด |
-| **Max attempts / node** | จำนวนครั้งสูงสุดต่อ node |
-| **Max minutes** | เวลารวมสูงสุด |
-| **Human after iterations** | บังคับรอคนหลังครบจำนวน iteration |
-| **Max budget units** | budget จำนวนเต็มสูงสุด; ไม่ใช่เงินหรือ token |
-| **Allowed worker IDs** | allowlist คั่นด้วย comma |
-| **Allowed workspace IDs** | allowlist คั่นด้วย comma |
-| **Stop on first failure** | หยุดทันทีเมื่อ branch แรก fail; ปิดเพื่อให้ branch อิสระไปต่อ |
-| **File handoff** | ต้องเปิดก่อน edge ที่มี `push_files` จึงจะมีผล; ปิดโดยปริยาย |
-
-ถ้าแก้ raw JSON จน parse ไม่ได้ ฟอร์มจะไม่เขียนทับ JSON นั้น ให้แก้ syntax ก่อน
-
-### 6.6 ปุ่มด้านบน
-
-| ปุ่ม | ผลลัพธ์ |
-| --- | --- |
-| **Save** | สร้างหรืออัปเดต definition |
-| **Validate** | ตรวจ graph/policy ใน editor; ต้อง Save ให้มี definition ก่อน |
-| **Explain** | อธิบาย definition ที่บันทึกไว้; แสดงผลอย่างเดียว |
-| **Repair** | ขอฉบับซ่อมที่ validate แล้วและคัดลอกลง preview; ไม่ Save อัตโนมัติ |
-
-ตรวจ preview จาก Repair ทุกครั้ง แล้วกด **Save** เองหากต้องการใช้จริง
-
-### 6.7 รัน workflow
-
-ต้อง **Save** ก่อน ใส่ **Run input JSON** เช่น:
-
-```json
-{"topic": "technology news"}
-```
-
-กด **Run workflow** ระบบจะสร้าง run และเปิด **Monitor** ให้ทันที
-
-### 6.8 Draft from plain language
-
-ต้องมี worker ที่ role หรือ tag เป็น `workflow_builder` ใส่คำอธิบาย workflow ในช่อง
-**Prompt** แล้วกด **Draft** ผลลัพธ์ graph/policy จะเข้า editor และ explanation,
-warning, trigger draft จะแสดงด้านล่าง ทั้งหมดยังเป็น preview
-
-## 7. Monitor: ติดตาม workflow
-
-### 7.1 Runs และ Run detail
-
-รายการ **Runs** แสดง run ล่าสุดของ workflow ที่เลือก หรือทุก run ถ้าไม่ได้เลือก
-definition กดการ์ดเพื่อดู state, jobs, budget, node ที่สำเร็จ/ล้มเหลว, join progress
-และ JSON รายละเอียด
-
-คำสั่งควบคุม:
-
-- **Pause** หยุด run ที่กำลังทำงาน
-- **Resume** ทำ run ที่ pause ไว้ต่อ โดยไม่ทำ completed node ซ้ำ
-- **Cancel** ยกเลิก run ที่ยังไม่จบ
-- **Retry interrupted** ใช้เฉพาะ `recovery_required` และต้องยืนยันความเสี่ยง side
-  effect ซ้ำก่อน
+- **หยุดชั่วคราว** — หยุด run ที่กำลังทำงาน
+- **ทำต่อ** — เดินต่อ run ที่หยุดไว้ โดยไม่ทำโหนดที่เสร็จแล้วซ้ำ
+- **ยกเลิก** — ยกเลิก run ที่ยังไม่จบ
+- **กู้คืนงานที่ค้าง** — เฉพาะสถานะ `recovery_required` และต้องยืนยันความเสี่ยง
+  ที่ side effect ฝั่ง worker อาจซ้ำ
 
 ```mermaid
 stateDiagram-v2
   [*] --> running
-  running --> paused: Pause
-  paused --> running: Resume
-  running --> waiting_for_human: ถึงจุดรอการตัดสินใจ
-  waiting_for_human --> running: Approve / เลือก choice
-  waiting_for_human --> failed: Reject
-  running --> succeeded: ทุก node เสร็จ
-  running --> failed: node fail หรือ guard ทำงาน
-  running --> cancelled: Cancel
-  running --> recovery_required: Atlas restart กลางคัน
-  recovery_required --> running: Retry interrupted
+  running --> paused: หยุดชั่วคราว
+  paused --> running: ทำต่อ
+  running --> waiting_for_human: ถึง human gate
+  waiting_for_human --> running: อนุมัติ / เลือก (ผ่าน API)
+  waiting_for_human --> failed: ปฏิเสธ (ผ่าน API)
+  running --> succeeded: ทุกโหนดเสร็จ
+  running --> failed: โหนดล้มเหลวหรือชน guard
+  running --> cancelled: ยกเลิก
+  running --> recovery_required: Atlas restart กลาง run
+  recovery_required --> running: กู้คืนงานที่ค้าง
   succeeded --> [*]
   failed --> [*]
   cancelled --> [*]
 ```
 
-หลัง Atlas restart, worker/manager node ที่ขาดช่วงจะไม่ถูก retry อัตโนมัติ ให้ตรวจ
-node/job ใน warning ก่อนอนุญาต **Retry interrupted**
+หลัง Atlas restart โหนด worker/manager ที่ค้างอยู่จะไม่ถูก retry อัตโนมัติ
+ตรวจ node และ job ID ในคำเตือนก่อนอนุญาตให้ retry
 
-### 7.2 Artifacts
+run ที่อยู่สถานะ `waiting_for_human` ตัดสินผ่าน API:
+`POST /api/approvals/{id}/approve`, `/reject` หรือ `/choose` — ชิปโหนดจะบอกว่า
+gate ไหนกำลังรอ
 
-Artifact คือผลลัพธ์ที่ตั้งชื่อและเก็บกับ workflow run เพื่อให้ node ถัดไป, condition,
-trigger หรือคนตรวจสอบนำไปใช้ต่อ ตัวอย่างเช่น reporter สร้าง artifact `notes`, writer
-อ่าน `{artifact.notes}` แล้วสร้าง artifact `script`
+### Artifacts
 
-ส่วน **Artifacts** แสดง key, kind, content และ metadata ของ run ที่เลือก:
+artifact คือผลลัพธ์ที่ตั้งชื่อและบันทึกไว้กับ workflow run เพื่อให้โหนดถัดไป
+เงื่อนไข trigger หรือผู้ตรวจนำไปใช้ เช่น reporter สร้าง `notes` แล้ว writer
+อ่านผ่าน `{artifact.notes}` และสร้าง `script`
 
-| สิ่งที่เห็น | ความหมาย |
+**Artifacts** แสดง key ชนิด เนื้อหา และ metadata ของ run ที่เลือก พร้อมปุ่ม
+ดาวน์โหลดสำหรับ artifact ชนิด `file_ref` ทุกรายการ:
+
+| ค่าที่แสดง | ความหมาย |
 | --- | --- |
 | `notes` / `script` | key ที่ workflow ใช้อ้างผลลัพธ์ |
-| `text` / `json` | ข้อมูลที่ node ถัดไปอ่านผ่าน `{artifact.KEY}` ได้ |
-| `file_ref` | ตัวชี้ไปไฟล์ binary ที่ Atlas เก็บ ไม่ใช่เนื้อไฟล์ใน prompt |
-| filename, size, SHA-256 | metadata สำหรับตรวจชื่อ ขนาด และความถูกต้องของไฟล์ |
+| `text` / `json` | ข้อมูลที่โหนดถัดไปใช้ได้ผ่าน `{artifact.KEY}` |
+| `file_ref` | ตัวชี้ไปยังไบต์ไบนารีที่ Atlas เก็บ ไม่ใช่เนื้อไฟล์ที่แทรกใน prompt |
+| filename, size, SHA-256 | metadata สำหรับระบุและตรวจสอบไฟล์ |
 
-อัปโหลดไฟล์โดยเลือก run, ใส่ **File key**, เลือก **File** แล้วกด **Upload file**
-ค่าเริ่มต้นจำกัด 10 MiB และผู้ดูแลเปลี่ยนได้ด้วย `ATLAS_MAX_UPLOAD_BYTES`
+การแนบไฟล์เข้า run (เช่น PDF สัญญาสำหรับ human gate) ทำผ่าน API:
+`POST /api/workflow-runs/{id}/files?key=<key>` ขนาดเริ่มต้นไม่เกิน 10 MiB
+(ผู้ดูแลปรับได้ด้วย `ATLAS_MAX_UPLOAD_BYTES`) การดาวน์โหลดคืนไฟล์ตามที่ Atlas
+เก็บไว้เป๊ะ ๆ ไม่ได้ browse ระบบไฟล์ของ worker ดูโมเดลเต็มที่
+[Concepts & Reference (ไทย)](../concepts-th.md)
 
-ตัวอย่าง: workflow อนุมัติสัญญาหยุดที่จุดรอการตัดสินใจ (`human_gate`) ผู้ใช้เลือก run, ใส่ key
-`contract`, อัปโหลด `contract.pdf`; ผู้อนุมัติกดลิงก์ดาวน์โหลดจาก Artifacts เพื่ออ่าน
-แล้วจึงกด Approve หรือ Reject
+## 6. ตรวจสอบ (Audit)
 
-> Upload เป็นการเก็บไฟล์กับ Atlas และผูกไว้กับ run ไม่ได้วางไฟล์ใน workspace ของ worker
-> และ worker จะไม่อ่าน PDF/รูป/ไฟล์นั้นอัตโนมัติ Download คือการรับไฟล์ชิ้นเดิมที่ Atlas
-> เก็บไว้ ไม่ใช่การ browse ไฟล์ในเครื่อง worker
+**ตรวจสอบ** แสดง action ล่าสุดของ control plane เช่น `worker.poll`,
+`job.create`, `job.succeeded`, `session.bind` พร้อมเวลาและรายละเอียด JSON
+ใช้ไล่การเปลี่ยนสถานะและ error ของการ poll/run — UI แสดงบางส่วนจาก 30 รายการ
+ล่าสุดที่ดึงมา
 
-ใช้ file artifact เมื่อให้คนตรวจเอกสาร, เก็บหลักฐานสำหรับ audit หรือส่งมอบไฟล์ให้ระบบ
-ภายนอก ถ้าต้องการให้ worker วิเคราะห์ไฟล์ ต้องเพิ่ม integration ที่ดาวน์โหลดและอ่านไฟล์
-ให้ worker โดยเฉพาะ ดูรายละเอียดและตัวอย่างครบใน
-[Concepts: ชนิด artifact](../concepts-th.md#9-ชนิด-artifact)
+## 7. ความปลอดภัยและการเข้าถึงระยะไกล
 
-### 7.3 Approvals และ Manager decisions
+- โดยค่าเริ่มต้น Atlas ต้องใช้ API token ต่อผู้ใช้ที่ถูกต้อง หน้า login ของ
+  dashboard แลก username/password เป็น token เก็บใน local storage ของเบราว์เซอร์
+  ปุ่ม **ออกจากระบบ** เพิกถอน token นั้น
+- ให้สิทธิ์น้อยที่สุด: `viewer` อ่าน, `operator` สั่งงาน, `auditor` อ่าน
+  audit/usage, `admin` จัดการทุกอย่าง
+- ใช้ worker token จริงและแยกกันต่อเครื่อง
+- worker token เก็บใน SQLite และ API ของ dashboard ไม่ส่งคืนค่า token;
+  response แสดงเพียง `token_set`
+- `ATLAS_LOOPBACK_NO_AUTH=false` คือค่าเริ่มต้นที่ปลอดภัย ตั้ง `true` เฉพาะ
+  พัฒนาบนเครื่องเท่านั้น; การ bypass จำกัดที่ `127.0.0.1` และ `::1`
+- `ATLAS_API_TOKEN` (ถ้าตั้ง) เป็น bootstrap admin token แบบ legacy
+- ตั้ง `ATLAS_SECRET_KEY` ที่คาดเดายากเพื่อเข้ารหัส worker token ตอนเก็บ และ
+  เซ็นไฟล์ usage export แบบออฟไลน์
+- อย่าเปิด Atlas หรือ thClaws สู่สาธารณะโดยไม่มี authentication และ TLS
 
-เมื่อ run อยู่ `waiting_for_human`:
+## 8. การวัดการใช้งานและ export แบบออฟไลน์
 
-- จุดอนุมัติแบบปกติมี **Approve** และ **Reject**
-- จุดตัดสินใจแบบมีตัวเลือกมีปุ่มตาม choice และ **Reject**
-- ตัดสินใจได้ครั้งเดียว; downstream จะเริ่มหลังบันทึกการตัดสินใจ
+### หน้าจอ การใช้งาน (dashboard)
 
-**Manager decisions** แสดง proposal, state และเหตุผลที่ Atlas ยอมรับหรือปฏิเสธ
-ส่วน **Timeline** แสดง event ตามลำดับพร้อม payload
+admin และ auditor เห็นหน้าจอ **การใช้งาน** — ตั้งช่วง **From**/**To** แล้วกด
+**โหลด** เพื่อดูตัวเลข 5 ช่องของช่วงนั้น: workflow runs, jobs, budget units,
+Tokens (prompt · output) และ Est. cost (USD) พร้อมกราฟแท่ง run ราย 7 วัน และ
+ปุ่ม **JSON** / **CSV** — Tokens และ Est. cost เป็นตัวเลขประมาณการเพื่อการ
+มองเห็นเท่านั้น ไม่ใช่บิลเรียกเก็บ ใส่ **Expected runs** และ **Alert at %**
+เพื่อดูการแจ้งเตือนโควตาแบบอ่านอย่างเดียว (เช่น "7 / 10 expected runs used
+(70%)") ซึ่งเปลี่ยนเป็นสีแดงเมื่อเกินเกณฑ์ การแจ้งเตือนเป็นสัญญาณปริมาณ
+เท่านั้น — ไม่กระทบ `budget_units` ที่ยังเป็นตัวคุมต้นทุนต่อ run
 
-### 7.4 Triggers
-
-ต้องเลือก workflow definition ที่บันทึกแล้วก่อนสร้าง trigger
-
-Quick trigger ช่วยสร้าง Config JSON:
-
-| Quick trigger | Quick value | Config ที่ได้ |
-| --- | --- | --- |
-| `manual` | ไม่ใช้ | `{}` |
-| `webhook` | ไม่ใช้ | `{}` |
-| `schedule interval` | นาที เช่น `15` | `{"interval_minutes": 15}` |
-| `schedule daily` | เวลา local เช่น `09:30` | `{"daily_time": "09:30"}` |
-
-กด **Apply to JSON** แล้วตรวจ **Name**, **Type**, **Enabled**, **Config JSON** ก่อนกด
-**Create trigger**
-
-Type ที่รองรับ:
-
-- `manual`, `schedule`, `webhook`
-- `workflow_run_completed`, `artifact_created`, `worker_status_changed`
-
-Config ของ internal event ใช้ filter แบบ optional:
-
-- `workflow_run_completed`: `source_workflow_definition_id`, `state`
-- `artifact_created`: `source_workflow_definition_id`, `key`, `kind`
-- `worker_status_changed`: `worker_id`, `status`
-
-สำหรับ webhook ให้สร้าง type `webhook` แล้วส่ง payload ไปยัง endpoint ของ trigger ตาม
-ตัวอย่างใน [Workflow Examples](../workflow-examples.md) พร้อม `dedupe_key` ที่คงที่เมื่อ
-retry event เดิม Internal event ทั้งสามชนิดทำงานจาก event ของ Atlas และไม่มีปุ่ม Fire
-
-กด **Suggest triggers** เพื่อให้ workflow builder เสนอ config ที่ validate แล้ว โดยใช้
-ข้อความจาก Draft prompt ถ้ามี; ระบบใส่ข้อเสนอแรกลงฟอร์มแต่ยังไม่สร้าง
-
-การ์ด trigger มี:
-
-- **Enable/Disable** เปลี่ยนสถานะ
-- **Fire** เริ่มด้วย payload จาก Run input JSON; มีเฉพาะ manual/schedule/webhook
-- **Delete** ลบหลังยืนยัน
-- กดตัวการ์ดเพื่อดู event ล่าสุด เช่น `received`, `started`, `ignored`, `failed`
-
-### 7.5 Deliveries
-
-แผง **Deliveries** แสดงรายการส่ง webhook ขาออก (ผลลัพธ์ที่เซ็นแล้วซึ่ง Atlas POST ไปยัง
-`_meta.reply.callback_url` ของ run) พร้อมสถานะ — `delivered`, `pending`, `failed`
-หรือ `blocked` — จำนวนครั้งที่พยายาม และ error ล่าสุด มีปุ่ม **ส่งซ้ำ** ให้เมื่อสถานะเป็น
-`failed` หรือ `blocked`
-
-## 8. Audit
-
-หน้า **Audit** แสดง action ล่าสุดของ control plane เช่น `worker.poll`, `job.create`,
-`job.succeeded`, `session.bind` และ workflow action พร้อมเวลาและรายละเอียด JSON
-ใช้หน้านี้ตรวจว่าใคร/อะไรเปลี่ยน state และอ่านข้อความ error จากการ poll หรือ run
-
-หน้าเว็บแสดงรายการล่าสุดบางส่วนจากข้อมูล audit 30 รายการล่าสุด
-
-## 9. ความปลอดภัยและการใช้งานระยะไกล
-
-- Atlas ต้องใช้ per-user API token โดยปริยาย หน้า login แลก username/password
-  เป็น token ที่เก็บใน browser local storage และ **Sign out** จะ revoke token นั้น
-- กำหนดสิทธิ์เท่าที่จำเป็น: `viewer` อ่าน, `operator` รันงาน, `auditor` อ่าน audit/usage
-  และ `admin` จัดการ identity และ resource ทั้งหมด
-- ใช้ token จริงและแยก token ต่อ worker
-- worker token ถูกเก็บใน SQLite และ API หน้าเว็บไม่ส่งค่ากลับมา มีเพียง `token_set`
-- `ATLAS_LOOPBACK_NO_AUTH=false` เป็นค่าปริยายที่ปลอดภัย ตั้งเป็น `true` เฉพาะ dev local
-  โดย bypass มีผลกับ `127.0.0.1` และ `::1` เท่านั้น
-- `ATLAS_API_TOKEN` ถ้ากำหนด ยังใช้เป็น legacy bootstrap admin token
-- กำหน `ATLAS_SECRET_KEY` แบบ high-entropy เพื่อเข้ารหัส worker token at rest และลงลายเซ็น
-  offline usage export
-- อย่าเปิด Atlas หรือ thClaws สู่ public network โดยไม่มี authentication และ TLS
-
-## 10. Usage metering และ offline export
-
-### หน้า Usage (dashboard)
-
-`admin` และ `auditor` จะเห็นหน้า **Usage** ตั้งช่วง **From**/**To** (ไม่บังคับ) แล้วกด
-**Load** เพื่อดู metric tile 5 ค่าของช่วงนั้น — workflow runs, jobs, budget units,
-Tokens (prompt · output) และ Est. cost (USD) — พร้อมกราฟแท่ง workflow run ราย 7 วัน
-และปุ่ม **Download JSON** / **Download CSV** ค่า Tokens และ Est. cost เป็นตัวเลข
-ประมาณการเพื่อดูเฉยๆ นับจาก usage ของ worker ไม่ใช่บิลจริง กรอก **Expected runs**
-และ **Alert at %** เพื่อให้แสดงแจ้งเตือน quota แบบ
-อ่านอย่างเดียว (เช่น "7 / 10 expected runs used (70%)") ซึ่งจะเปลี่ยนเป็นสีแดงเมื่อปริมาณ run
-เกิน threshold การแจ้งเตือนนี้เป็นสัญญาณปริมาณเท่านั้น ไม่กระทบ `budget_units` ที่เป็นตัวคุม
-ต้นทุนต่อ run
-
-Atlas บันทึกหนึ่ง event ต่อ terminal job และหนึ่ง event ต่อ terminal workflow run
-`admin` และ `auditor` ส่งออกช่วงวันที่ได้:
+Atlas บันทึกหนึ่งเหตุการณ์ต่อ job ที่จบ และหนึ่งต่อ workflow run ที่จบ
+admin/auditor สามารถ export ตามช่วงวันที่:
 
 ```bash
 curl -H 'Authorization: Bearer <token>' \
   'http://127.0.0.1:8787/api/usage?from=2026-06-01&to=2026-06-30&format=csv'
 ```
 
-บนเครื่อง Atlas สร้างและตรวจ signed JSON สำหรับ air-gapped:
+บนเครื่อง Atlas สร้างและตรวจไฟล์ JSON แบบเซ็นสำหรับงาน air-gapped:
 
 ```bash
 ATLAS_SECRET_KEY='<secret>' python3 -m atlas.usage export usage.json \
@@ -558,55 +285,55 @@ ATLAS_SECRET_KEY='<secret>' python3 -m atlas.usage export usage.json \
 ATLAS_SECRET_KEY='<secret>' python3 -m atlas.usage verify usage.json
 ```
 
-ไฟล์นี้เป็น raw usage เท่านั้น Atlas ไม่คำนวณราคาหรือ invoice และ model/token
-ภายใต้ BYOK มีไว้เพื่อ visibility เท่านั้น ควรป้องไฟล์และ signing key
-เหมือนข้อมูล billing/audit
+ไฟล์มีเฉพาะข้อมูลการใช้งานดิบ Atlas ไม่คำนวณราคา/ใบแจ้งหนี้ และตัวเลข
+BYOK model/token มีไว้เพื่อการมองเห็นเท่านั้น เก็บไฟล์และ signing key อย่าง
+ระมัดระวังเช่นเดียวกับเอกสารบิล/audit
 
-## 11. บัญชี: ผู้ใช้และ API Token
+## 9. บัญชี: ผู้ใช้และ API token
 
-`admin` มีหน้า **Accounts** สำหรับสร้างและจัดการผู้ใช้และ API token โดยตรงจากหน้าเว็บ
-— เป็นทางเลือกแบบใช้เบราว์เซอร์แทนการเรียก endpoint `/api/users` และ `/api/tokens`
-ตรง ๆ
+admin เห็นหน้าจอ **บัญชี** สำหรับสร้างและจัดการผู้ใช้กับ API token จาก
+dashboard โดยตรง — ทางเลือกบนเบราว์เซอร์แทนการเรียก `/api/users` และ
+`/api/tokens` ตรง ๆ
 
 ### ผู้ใช้
 
-| ช่อง | วิธีใช้ |
+| ฟิลด์ | การใช้ |
 | --- | --- |
-| **Username** | ชื่อ login |
-| **Password** | ตั้งตอนสร้าง; หน้านี้ไม่มีปุ่มเปลี่ยนรหัสผ่านภายหลัง |
-| **Role** | `viewer`, `operator`, `auditor` หรือ `admin` |
+| **ชื่อผู้ใช้** | ชื่อสำหรับ login |
+| **รหัสผ่าน** | ตั้งตอนสร้าง; ไม่มีปุ่มเปลี่ยนรหัสผ่านในหน้านี้ |
+| **บทบาท** | `viewer`, `operator`, `auditor` หรือ `admin` |
 
-กด **เพิ่มผู้ใช้** เพื่อสร้างบัญชี การ์ดผู้ใช้แต่ละใบแสดงสถานะ จำนวน token และเวลาที่สร้าง
-พร้อมคำสั่ง:
+กด **เพิ่มผู้ใช้** เพื่อสร้าง การ์ดผู้ใช้แสดงสถานะ จำนวน token เวลาสร้าง และมี:
 
-- **ระงับ / เปิดใช้** สลับสถานะ `active`/`disabled`; ใช้กับบัญชีตัวเองไม่ได้
-- **ลบ** ลบผู้ใช้หลังยืนยัน; ใช้กับบัญชีตัวเองไม่ได้
+- **ระงับ / เปิดใช้** — สลับระหว่าง `active` และ `disabled`; ปิดสำหรับบัญชี
+  ของตัวเอง
+- **ลบ** — ลบผู้ใช้หลังยืนยัน; ปิดสำหรับบัญชีของตัวเอง
 
-### API Tokens
+### API token
 
-| ช่อง | วิธีใช้ |
+| ฟิลด์ | การใช้ |
 | --- | --- |
-| **Name** | ชื่อ token เช่น `ci-deploy` |
-| **User** | บัญชีที่ token นี้ใช้ยืนยันตัวตนแทน |
+| **ชื่อ** | ป้ายกำกับ token เช่น `ci-deploy` |
+| **ผู้ใช้** | บัญชีที่ token ใช้ยืนยันตัวตน |
 
-กด **สร้าง token** ระบบจะแสดงค่า token เต็มครั้งเดียวในกล่อง reveal — คัดลอกเก็บทันที
-เพราะจะไม่แสดงซ้ำอีก (ดู [§9](#9-ความปลอดภัยและการใช้งานระยะไกล)) การ์ด token
-แสดงเวลาที่สร้าง พร้อมปุ่ม **เพิกถอน** ที่ต้องยืนยันก่อน
+กด **สร้าง token** — Atlas แสดงค่า token เต็ม **ครั้งเดียว** ในแผงเปิดเผย
+คัดลอกเก็บทันทีเพราะจะไม่แสดงอีก (ดู [§7](#7-ความปลอดภัยและการเข้าถึงระยะไกล))
+การ์ด token แสดงเวลาสร้างและมีปุ่ม **เพิกถอน** (ยืนยันก่อน)
 
-## 12. แก้ปัญหาเบื้องต้น
+## 10. แก้ปัญหา
 
-| อาการ | ตรวจสอบ |
+| อาการ | สิ่งที่ต้องตรวจ |
 | --- | --- |
-| Worker เป็น `offline` | process/port, Base URL, firewall และ `THCLAWS_API_TOKEN` |
-| `No workers registered` | เพิ่ม worker ที่ Fleet และ Poll |
-| `role has no matching worker` | เพิ่ม role/tag ให้ตรง node หรือ Apply worker suggestion |
-| `unknown worker_id` | graph อ้าง worker ที่ถูกลบหรือ ID ผิด |
-| `missing prompt variable` | ตรวจ `{input.*}` และ `{artifact.*}` ว่ามีจริง |
-| `output_format=json` fail | worker ต้องคืน JSON ล้วนที่ parse ได้ |
-| manager invalid/rejected | ดู Manager decisions และตรวจ schema, edge, artifact, allowlist, guard |
-| Run ไม่เริ่ม | Save ก่อน, ตรวจ Run input JSON และ Validate |
-| ปุ่ม Resume ใช้ไม่ได้ | ใช้ได้เฉพาะ `paused`; `recovery_required` ต้อง Retry interrupted |
-| Upload ไม่ผ่าน | ต้องเลือก run, มี File key และไฟล์ไม่เกินขนาดที่กำหนด |
+| worker เป็น `offline` | โปรเซส/พอร์ต, Base URL, firewall และ token ของ worker |
+| `No workers registered` | เพิ่มและ poll worker ในหน้าฟลีต |
+| `role has no matching worker` | เพิ่ม role/tag ที่ตรง ผ่านตัวช่วย suggest-workers ของ API |
+| `unknown worker_id` | graph อ้าง worker ID ที่ถูกลบหรือผิด |
+| `missing prompt variable` | ตรวจ path ของ input และ artifact ที่อ้างถึง |
+| `output_format=json` ล้มเหลว | worker ต้องคืน JSON ที่ parse ได้เท่านั้น |
+| run ไม่เริ่ม | ตรวจ workflow และ run input ผ่าน API |
+| ปุ่มทำต่อกดไม่ได้ | ทำต่อใช้กับ `paused`; สถานะกู้คืนใช้ปุ่มกู้คืนงานที่ค้าง |
 
-รายละเอียด schema และตัวอย่าง API เพิ่มเติมอยู่ใน
-[Workflow Examples](../workflow-examples.md) และ [Architecture](../architecture.md)
+สำหรับการสร้าง workflow (definitions, templates, packs, triggers, การ draft,
+validate และ repair) ดู [Workflow Examples](../workflow-examples.md),
+[API Reference](../specs/api-reference-en.md) และ
+[Concepts & Reference (ไทย)](../concepts-th.md)

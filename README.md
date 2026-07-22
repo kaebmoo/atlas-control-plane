@@ -1,7 +1,9 @@
 # Atlas Control Plane
 
 Atlas is a standalone control plane for coordinating many `thclaws --serve`
-workers from one browser dashboard.
+workers. It ships a minimal browser ops console (fleet, live jobs, workflow-run
+monitoring, audit, usage, accounts); job submission and workflow authoring are
+done through the REST API or an external frontend built on it.
 
 It is intentionally separate from thClaws. Atlas does not patch, fork, or depend
 on private thClaws internals. Each machine runs thClaws as a worker runtime, and
@@ -32,7 +34,8 @@ Atlas currently supports:
   tags, role, and prompt hints.
 - Job creation, status tracking, streaming output, event replay, and audit log.
 - SQLite persistence with no external database requirement.
-- Dashboard UI for workers, workspaces, jobs, live streams, audit, and setup.
+- A minimal embedded ops console for workers, workspaces, live job streams,
+  workflow-run monitoring, audit, usage, and account setup.
 - Best-effort cancellation at the Atlas layer.
 - Single-step handoff: when job A succeeds, Atlas can automatically start job B
   on another worker and pass job A's result into job B's prompt.
@@ -46,11 +49,11 @@ Atlas currently supports:
   policy enforcement without creating worker jobs for gates.
 - Bounded manager nodes that propose next actions as strict JSON while Atlas
   validates edges, artifacts, routes, workspaces, and execution guards.
-- A validated workflow builder for draft, explain, repair, and trigger
-  suggestions, with simple node/condition/trigger forms and raw JSON editing.
-- Four built-in workflow templates that copy into the editor without saving.
-- Policy form/JSON synchronization, non-saving Explain/Repair previews, trigger
-  enable/disable controls, and validated worker suggestions.
+- Validated workflow-builder APIs for draft, explain, repair, and trigger
+  suggestions.
+- Four built-in workflow templates available from the API.
+- Non-saving Explain/Repair drafts, trigger enable/disable, and validated
+  worker suggestions via the API.
 - Integer budget-unit enforcement, configurable failure continuation, human
   branch choices, and quorum joins.
 - Bounded binary file artifacts with SHA-256 metadata and secure downloads.

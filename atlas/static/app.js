@@ -2,32 +2,22 @@ const state = {
   currentUser: null,
   workers: [],
   workspaces: [],
-  conversations: [],
   jobs: [],
   audit: [],
   workflows: [],
-  workflowTemplates: [],
   workflowRuns: [],
-  workflowTriggers: [],
   approvals: [],
   selectedJobId: null,
-  selectedWorkflowId: null,
-  selectedWorkflowNode: null,
   selectedWorkflowRunId: null,
-  selectedWorkflowTriggerId: null,
   workflowRunDetail: null,
   workflowArtifacts: [],
   jobArtifacts: [],
   workflowEvents: [],
-  workflowTriggerEvents: [],
-  workerSuggestions: [],
-  deliveries: [],
-  packs: [],
   users: [],
   apiTokens: [],
   eventSource: null,
   auditFilter: "all",
-  workflowEditorDirty: false,
+  jobRunFilter: "all",
   streamText: "",
   events: [],
 };
@@ -35,13 +25,6 @@ const state = {
 const API_BASE = (window.ATLAS_API_BASE || "").replace(/\/+$/, "");
 const $ = (selector) => document.querySelector(selector);
 const AUTO_POLL_MS = 60000;
-const DEFAULT_NEWS_HANDOFF_PROMPT = `คุณคือผู้ประกาศข่าว
-
-ให้นำข่าวที่นักข่าวรวบรวมมาเรียบเรียงเป็นสคริปต์รายงานข่าวที่พูดได้จริง กระชับ ชัดเจน และไม่แต่งเติมข้อเท็จจริงที่ไม่มีในต้นฉบับ
-
-ข่าวจากนักข่าว:
-{result}`;
-
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (!headers.has("Content-Type") && options.body) headers.set("Content-Type", "application/json");
@@ -128,21 +111,10 @@ function toast(message) {
   setTimeout(() => node.classList.remove("visible"), 2600);
 }
 
-function reflectEditorDirty() {
-  $("#view-workflows")?.classList.toggle("is-dirty", state.workflowEditorDirty);
-}
-
-function setDirty(value) {
-  state.workflowEditorDirty = value;
-  reflectEditorDirty();
-}
-
-const VIEWS = ["overview", "command", "workflows", "monitor", "jobs", "audit", "usage", "fleet", "accounts"];
+const VIEWS = ["overview", "monitor", "jobs", "audit", "usage", "fleet", "accounts"];
 const VIEW_META = {
   overview:  ["ภาพรวม", "Overview", "สรุปสถานะฟลีตและงานล่าสุด"],
-  command:   ["สั่งงาน", "Command", "ส่งงานไปยัง thClaws worker ที่เหมาะสมโดยอัตโนมัติ"],
-  workflows: ["เวิร์กโฟลว์", "Workflows", "ออกแบบและจัดการ workflow แบบกราฟโหนด"],
-  monitor:   ["ติดตาม", "Monitor", "คิวอนุมัติและสถานะ run ที่ทำงานพร้อมกัน"],
+  monitor:   ["ติดตาม", "Monitor", "สถานะและไทม์ไลน์ของ workflow run"],
   jobs:      ["งาน", "Jobs", "สตรีมผลงานแบบสดและประวัติงาน"],
   fleet:     ["ฟลีต", "Fleet", "จัดการ worker และ workspace"],
   audit:     ["ตรวจสอบ", "Audit", "30 การกระทำล่าสุดบน control plane"],
@@ -174,7 +146,6 @@ function showView(view) {
   $("#pageTitleTh").textContent = meta[0];
   $("#pageTitleEn").textContent = meta[1];
   $("#pageSub").textContent = meta[2];
-  if (view === "workflows") requestAnimationFrame(() => wfApplyScale());
   // Per-view data loaders live here — the single navigation entry point — not in each
   // nav/hash/link handler. Skipped pre-auth; the boot .then re-runs them once signed in.
   if (state.currentUser) {
@@ -217,214 +188,31 @@ function parseJsonField(selector, fallback = {}) {
   return JSON.parse(raw);
 }
 
-function defaultWorkflowGraph() {
-  return {
-    start: "reporter",
-    nodes: [
-      { id: "reporter", type: "worker", prompt: "Research {input.topic}", outputs: ["notes"] },
-      { id: "anchor", type: "worker", prompt: "Write from {artifact.notes}", outputs: ["script"] },
-    ],
-    edges: [{ from: "reporter", to: "anchor", condition: { type: "always" } }],
-  };
-}
-
-const POLICY_FORM_FIELDS = [
-  ["max_jobs", "#policyMaxJobsInput", "number"],
-  ["max_iterations", "#policyMaxIterationsInput", "number"],
-  ["max_attempts_per_node", "#policyMaxAttemptsInput", "number"],
-  ["max_minutes", "#policyMaxMinutesInput", "number"],
-  ["requires_human_after_iterations", "#policyHumanAfterInput", "number"],
-  ["max_budget_units", "#policyMaxBudgetInput", "number"],
-  ["allowed_worker_ids", "#policyAllowedWorkersInput", "list"],
-  ["allowed_workspace_ids", "#policyAllowedWorkspacesInput", "list"],
-  ["stop_on_first_failure", "#policyStopOnFailureInput", "boolean"],
-  // T6: default-OFF boolean (unlike stop_on_first_failure, which defaults ON) — a missing
-  // file_handoff must render UNCHECKED, so it uses the "boolean_off" handling below.
-  ["file_handoff", "#policyFileHandoffInput", "boolean_off"],
-];
-
-function syncPolicyFormFromJson() {
-  let policy;
-  try {
-    policy = parseJsonField("#workflowPolicyInput");
-  } catch {
-    return false;
-  }
-  if (!policy || Array.isArray(policy) || typeof policy !== "object") return false;
-  for (const [key, selector, type] of POLICY_FORM_FIELDS) {
-    const value = policy[key];
-    if (type === "boolean") {
-      $(selector).checked = value !== false;
-    } else if (type === "boolean_off") {
-      // default-off: only an explicit true checks the box (a missing key stays unchecked).
-      $(selector).checked = value === true;
-    } else {
-      $(selector).value = type === "list" ? (Array.isArray(value) ? value.join(", ") : "") : (value ?? "");
-    }
-  }
-  return true;
-}
-
-function syncPolicyJsonFromForm() {
-  let policy;
-  try {
-    policy = parseJsonField("#workflowPolicyInput");
-  } catch {
-    return false;
-  }
-  if (!policy || Array.isArray(policy) || typeof policy !== "object") return false;
-  for (const [key, selector, type] of POLICY_FORM_FIELDS) {
-    if (type === "boolean") {
-      policy[key] = $(selector).checked;
-      continue;
-    }
-    if (type === "boolean_off") {
-      // default-off: write true only when checked; drop the key entirely when unchecked so the
-      // saved policy stays clean (no noisy `file_handoff: false` on every workflow).
-      if ($(selector).checked) policy[key] = true;
-      else delete policy[key];
-      continue;
-    }
-    const raw = $(selector).value.trim();
-    if (!raw) {
-      delete policy[key];
-    } else if (type === "number") {
-      policy[key] = Number.parseInt(raw, 10);
-    } else {
-      policy[key] = raw.split(",").map((value) => value.trim()).filter(Boolean);
-    }
-  }
-  $("#workflowPolicyInput").value = prettyJson(policy);
-  setDirty(true);
-  return true;
-}
-
-function addBuilderNode() {
-  const graph = parseJsonField("#workflowGraphInput");
-  const id = $("#builderNodeIdInput").value.trim();
-  const type = $("#builderNodeTypeSelect").value;
-  if (!id) throw new Error("Node ID is required");
-  if ((graph.nodes || []).some((node) => node.id === id)) throw new Error(`Duplicate node ID: ${id}`);
-  const role = $("#builderNodeRoleInput").value.trim();
-  const prompt = $("#builderNodePromptInput").value.trim();
-  const budgetUnits = Number.parseInt($("#builderNodeBudgetInput").value, 10);
-  let node;
-  if (type === "manager") {
-    node = { id, type, schema: "manager_decision_v1", prompt: prompt || "Choose the next bounded workflow action." };
-    if (role) node.role = role;
-  } else if (type === "join") {
-    node = { id, type, mode: $("#builderJoinModeSelect").value };
-    if (node.mode === "quorum") node.quorum = Number.parseInt($("#builderJoinQuorumInput").value, 10);
-  } else if (type === "human_gate") {
-    node = { id, type, label: role || id, reason: prompt };
-    const choices = $("#builderHumanChoicesInput").value.split(",").map((item) => item.trim()).filter(Boolean).map((item) => {
-      const [choiceId, ...labelParts] = item.split(":");
-      return { id: choiceId.trim(), label: (labelParts.join(":").trim() || choiceId.trim()) };
-    });
-    if (choices.length) node.choices = choices;
-  } else {
-    node = { id, type, prompt };
-    if (role) node.role = role;
-    const outputs = $("#builderNodeOutputsInput").value.split(",").map((value) => value.trim()).filter(Boolean);
-    if (outputs.length) node.outputs = outputs;
-    // T9a: per-node file collection (thClaws owns glob matching).
-    const collectFiles = $("#builderNodeCollectFilesInput").value.split(",").map((value) => value.trim()).filter(Boolean);
-    if (collectFiles.length) node.collect_files = collectFiles;
-  }
-  if (["worker", "manager"].includes(type) && Number.isInteger(budgetUnits) && budgetUnits > 0) node.budget_units = budgetUnits;
-  graph.nodes = [...(graph.nodes || []), node];
-  graph.edges ||= [];
-  graph.start ||= id;
-  $("#workflowGraphInput").value = prettyJson(graph);
-  setDirty(true);
-  toast(`${type} node added to JSON preview`);
-}
-
-function addBuilderEdge() {
-  const graph = parseJsonField("#workflowGraphInput");
-  const from = $("#builderEdgeFromInput").value.trim();
-  const to = $("#builderEdgeToInput").value.trim();
-  const type = $("#builderConditionTypeSelect").value;
-  const subject = $("#builderConditionSubjectInput").value.trim();
-  const value = $("#builderConditionValueInput").value.trim();
-  if (!from || !to) throw new Error("Edge From and To are required");
-  let condition = { type };
-  if (type === "artifact_equals") {
-    condition = { type, artifact: subject, path: $("#builderConditionPathInput").value.trim(), value };
-  } else if (type === "artifact_in") {
-    condition = { type, artifact: subject, path: $("#builderConditionPathInput").value.trim(), values: value.split(",").map((item) => item.trim()).filter(Boolean) };
-  } else if (type === "manager_selected") {
-    condition = { type, target: to };
-  } else if (type === "human_selected") {
-    condition = { type, choice: value || subject };
-  } else if (type === "max_iterations_below") {
-    condition = { type, node: subject, max: Number.parseInt(value, 10) };
-  }
-  const edge = { from, to, condition };
-  // T6: optional artifact-key globs pushed to the target worker before its job (needs
-  // policy.file_handoff; the server validator rejects push_files without it at save time).
-  const pushFiles = $("#builderEdgePushFilesInput").value.split(",").map((pattern) => pattern.trim()).filter(Boolean);
-  if (pushFiles.length) edge.push_files = pushFiles;
-  graph.edges = [...(graph.edges || []), edge];
-  $("#workflowGraphInput").value = prettyJson(graph);
-  setDirty(true);
-  toast(`${type} edge added to JSON preview`);
-}
-
-function applyQuickTrigger() {
-  const quickType = $("#triggerQuickTypeSelect").value;
-  const value = $("#triggerQuickValueInput").value.trim();
-  if (quickType === "interval") {
-    const minutes = Number(value);
-    if (!Number.isFinite(minutes) || minutes <= 0) throw new Error("Interval minutes must be positive");
-    $("#triggerTypeSelect").value = "schedule";
-    $("#triggerConfigInput").value = prettyJson({ interval_minutes: minutes });
-  } else if (quickType === "daily") {
-    $("#triggerTypeSelect").value = "schedule";
-    $("#triggerConfigInput").value = prettyJson({ daily_time: value || "09:30" });
-  } else {
-    $("#triggerTypeSelect").value = quickType;
-    $("#triggerConfigInput").value = "{}";
-  }
-  toast("Trigger JSON preview updated");
-}
-
 async function loadAll() {
   const me = await api("/api/me");
   state.currentUser = me.user;
   hideLogin();
   const canReadAudit = ["admin", "auditor"].includes(state.currentUser?.role);
-  const canReadDeliveries = ["admin", "operator", "auditor"].includes(state.currentUser?.role);
-  const [workers, workspaces, conversations, jobs, workflows, workflowTemplates, workflowRuns, workflowTriggers, approvals, audit, deliveries] = await Promise.all([
+  const [workers, workspaces, jobs, workflows, workflowRuns, approvals, audit] = await Promise.all([
     api("/api/workers"),
     api("/api/workspaces"),
-    api("/api/conversations"),
     api("/api/jobs"),
     api("/api/workflows"),
-    api("/api/workflow-templates"),
     api("/api/workflow-runs"),
-    api("/api/workflow-triggers"),
     api("/api/approvals?state=pending"),
     canReadAudit ? api("/api/audit?limit=30") : Promise.resolve({ audit: [] }),
-    canReadDeliveries ? api("/api/deliveries?limit=20").catch(() => ({ deliveries: [] })) : Promise.resolve({ deliveries: [] }),
   ]);
   state.workers = workers.workers || [];
   state.workspaces = workspaces.workspaces || [];
-  state.conversations = conversations.conversations || [];
   state.jobs = jobs.jobs || [];
   state.workflows = workflows.workflows || [];
-  state.workflowTemplates = workflowTemplates.templates || [];
   state.workflowRuns = workflowRuns.runs || [];
-  state.workflowTriggers = workflowTriggers.triggers || [];
   state.approvals = approvals.approvals || [];
   state.audit = audit.audit || [];
-  state.deliveries = deliveries.deliveries || [];
   if (state.selectedWorkflowRunId && state.workflowRuns.some((run) => run.id === state.selectedWorkflowRunId)) {
     await loadWorkflowRunDetail(state.selectedWorkflowRunId);
   }
   render();
-  const lastRefresh = document.getElementById("lastRefresh");
-  if (lastRefresh) lastRefresh.textContent = `อัปเดต ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
 async function refreshAll({ poll = false, notice = false } = {}) {
@@ -443,11 +231,8 @@ function render() {
   renderWorkspaces();
   renderSelects();
   renderJobs();
-  renderWorkflows();
+  renderWorkflowRuns();
   renderAudit();
-  renderDeliveries();
-  updateComposerRoutePreview();
-  reflectEditorDirty();
   renderIdentity();
   applyRoleGate();
   // Last: keep the selected job's header/cancel/cursor in sync on every poll, after
@@ -486,10 +271,8 @@ function applyRoleGate() {
   const operator = ["admin", "operator"].includes(role);
   const admin = role === "admin";
   for (const selector of [
-    "#submitJobBtn", "#cancelJobBtn", "#newWorkflowBtn", "#saveWorkflowBtn", "#validateWorkflowBtn",
-    "#explainWorkflowBtn", "#repairWorkflowBtn", "#suggestWorkersBtn", "#draftWorkflowBtn",
-    "#runWorkflowBtn", "#uploadWorkflowFileBtn", "#pauseWorkflowRunBtn", "#resumeWorkflowRunBtn",
-    "#retryInterruptedRunBtn", "#cancelWorkflowRunBtn", "#saveTriggerBtn", "#suggestTriggersBtn", "#pollAllBtn",
+    "#cancelJobBtn", "#pauseWorkflowRunBtn", "#resumeWorkflowRunBtn",
+    "#retryInterruptedRunBtn", "#cancelWorkflowRunBtn", "#pollAllBtn",
   ]) {
     const node = $(selector);
     if (node) node.disabled = !operator;
@@ -504,13 +287,8 @@ function applyRoleGate() {
     navItem.hidden = !roles.includes(role);
     if (navItem.hidden && document.querySelector(`#view-${view}.is-active`)) showView("overview");
   }
-  const deliveriesPanel = document.getElementById("deliveriesPanel");
-  if (deliveriesPanel) deliveriesPanel.hidden = !["admin", "operator", "auditor"].includes(role);
-  const importPackBtn = document.getElementById("importPackBtn");
-  if (importPackBtn) importPackBtn.disabled = !operator;
-  for (const node of document.querySelectorAll(".retry-delivery")) node.disabled = !operator;
   for (const node of document.querySelectorAll(".edit-worker, .delete-worker, .edit-workspace, .delete-workspace, .sync-mode-select")) node.disabled = !admin;
-  for (const node of document.querySelectorAll(".poll-worker, .approve-approval, .reject-approval, .choose-approval, .fire-trigger, .toggle-trigger, .delete-trigger, .apply-worker-suggestion")) node.disabled = !operator;
+  for (const node of document.querySelectorAll(".poll-worker")) node.disabled = !operator;
 }
 
 async function login(event) {
@@ -523,7 +301,6 @@ async function login(event) {
   localStorage.setItem("atlasApiToken", data.token);
   form.elements.password.value = "";
   await loadAll();
-  loadPacks().catch(() => undefined);  // packs sit outside loadAll; boot's load ran pre-auth
 }
 
 async function signOut() {
@@ -599,7 +376,7 @@ function renderOverviewLists() {
     const recent = state.jobs.slice(0, 5);
     jobsBox.innerHTML = recent.length
       ? recent.map((job) => `
-        <div class="dash-job">
+        <button class="dash-job" type="button" data-job-id="${escapeHtml(job.id)}">
           <span class="status ${statusClass(job.state)} dot-only" aria-hidden="true"></span>
           <div class="grow">
             <div class="title">${escapeHtml(job.prompt || job.id)}</div>
@@ -607,7 +384,7 @@ function renderOverviewLists() {
           </div>
           <span class="status ${statusClass(job.state)}">${escapeHtml(job.state)}</span>
           <span class="ago">${escapeHtml(formatTime(job.created_at))}</span>
-        </div>`).join("")
+        </button>`).join("")
       : '<div class="empty">ยังไม่มีงาน</div>';
   }
   const apBox = document.getElementById("overviewApproval");
@@ -698,67 +475,51 @@ function renderWorkspaces() {
 }
 
 function renderSelects() {
-  const selected = {
-    conversation: $("#conversationSelect").value,
-    worker: $("#workerSelect").value,
-    workspace: $("#workspaceSelect").value,
-    handoffWorker: $("#handoffWorkerSelect").value,
-    handoffWorkspace: $("#handoffWorkspaceSelect").value,
-  };
-  const conversationSelect = $("#conversationSelect");
-  conversationSelect.innerHTML = '<option value="">New conversation</option>' + state.conversations.map((conversation) => (
-    `<option value="${escapeHtml(conversation.id)}">${escapeHtml(conversation.title || conversation.id)}</option>`
-  )).join("");
-  setSelectValue(conversationSelect, selected.conversation);
-
-  const workerOptions = '<option value="">Auto route</option>' + state.workers.map((worker) => (
-    `<option value="${escapeHtml(worker.id)}">${escapeHtml(worker.name)} (${escapeHtml(worker.status)})</option>`
-  )).join("");
-  $("#workerSelect").innerHTML = workerOptions;
-  setSelectValue($("#workerSelect"), selected.worker);
+  // Only the workspace modal picks a worker now — the job composer lives in flow-designer.
   document.querySelector('#workspaceForm select[name="worker_id"]').innerHTML = state.workers.map((worker) => (
     `<option value="${escapeHtml(worker.id)}">${escapeHtml(worker.name)}</option>`
   )).join("");
-
-  $("#workspaceSelect").innerHTML = '<option value="">Auto route</option>' + state.workspaces.map((workspace) => (
-    `<option value="${escapeHtml(workspace.id)}">${escapeHtml(workspace.workspace_key)} · ${escapeHtml(workspace.worker_name || "")}</option>`
-  )).join("");
-  setSelectValue($("#workspaceSelect"), selected.workspace);
-
-  $("#handoffWorkerSelect").innerHTML = '<option value="">Choose worker</option>' + state.workers.map((worker) => (
-    `<option value="${escapeHtml(worker.id)}">${escapeHtml(worker.name)} (${escapeHtml(worker.status)})</option>`
-  )).join("");
-  setSelectValue($("#handoffWorkerSelect"), selected.handoffWorker);
-
-  $("#handoffWorkspaceSelect").innerHTML = '<option value="">No workspace override</option>' + state.workspaces.map((workspace) => (
-    `<option value="${escapeHtml(workspace.id)}">${escapeHtml(workspace.workspace_key)} · ${escapeHtml(workspace.worker_name || "")}</option>`
-  )).join("");
-  setSelectValue($("#handoffWorkspaceSelect"), selected.handoffWorkspace);
-
-  if (!$("#handoffPromptInput").value.trim()) $("#handoffPromptInput").value = DEFAULT_NEWS_HANDOFF_PROMPT;
 }
 
-function setSelectValue(select, value) {
-  if (!value) {
-    select.value = "";
-    return;
+// Filter chips over the job list, one per workflow run that produced jobs (+ Manual for
+// non-workflow jobs). Runs are labelled from state.workflowRuns; run_id comes from the API.
+function renderJobFilters() {
+  const box = document.getElementById("jobFilters");
+  if (!box) return;
+  const filter = state.jobRunFilter || "all";
+  const runIds = [];
+  const seen = new Set();
+  for (const job of state.jobs) {
+    if (job.run_id && !seen.has(job.run_id)) { seen.add(job.run_id); runIds.push(job.run_id); }
   }
-  select.value = [...select.options].some((option) => option.value === value) ? value : "";
-}
-
-function workspaceCountForWorker(workerId) {
-  return state.workspaces.filter((workspace) => workspace.worker_id === workerId).length;
+  box.hidden = runIds.length === 0;  // no workflow jobs → no filter row at all
+  if (box.hidden) { box.innerHTML = ""; return; }
+  const runName = (id) => state.workflowRuns.find((run) => run.id === id)?.name || shortId(id);
+  const chip = (value, label) => `<button class="job-filter ${filter === value ? "is-active" : ""}" type="button" data-job-filter="${escapeHtml(value)}">${escapeHtml(label)}</button>`;
+  const chips = [chip("all", "All · ทั้งหมด")];
+  for (const id of runIds) chips.push(chip(id, `${shortId(id)} · ${runName(id)}`));
+  if (state.jobs.some((job) => !job.run_id)) chips.push(chip("manual", "Manual · สั่งตรง"));
+  box.innerHTML = chips.join("");
 }
 
 function renderJobs() {
   const list = $("#jobList");
   const count = document.getElementById("jobCount");
-  if (count) count.textContent = `${state.jobs.length} รายการ`;
-  if (!state.jobs.length) {
+  let filter = state.jobRunFilter || "all";
+  // A stale run filter (its run no longer has jobs) falls back to "all" so nothing is hidden.
+  if (filter !== "all" && filter !== "manual" && !state.jobs.some((job) => job.run_id === filter)) {
+    filter = state.jobRunFilter = "all";
+  }
+  renderJobFilters();
+  const jobs = filter === "all" ? state.jobs
+    : filter === "manual" ? state.jobs.filter((job) => !job.run_id)
+    : state.jobs.filter((job) => job.run_id === filter);
+  if (count) count.textContent = `${jobs.length} รายการ`;
+  if (!jobs.length) {
     list.innerHTML = '<div class="empty">ยังไม่มีงาน</div>';
     return;
   }
-  list.innerHTML = state.jobs.map((job) => {
+  list.innerHTML = jobs.map((job) => {
     const handoff = job.handoff_error
       ? { label: "handoff error", cls: "err" }
       : job.handoff_job_id
@@ -778,306 +539,6 @@ function renderJobs() {
       </div>
     </button>`;
   }).join("");
-}
-
-function renderWorkflows() {
-  if (state.selectedWorkflowId && !state.workflows.some((workflow) => workflow.id === state.selectedWorkflowId)) {
-    state.selectedWorkflowId = null;
-  }
-  renderWorkflowList();
-  renderWorkflowTemplatePicker();
-  renderWorkflowEditor();
-  renderWorkflowRuns();
-  renderApprovals();
-  renderWorkflowTriggers();
-}
-
-function renderWorkflowTemplatePicker() {
-  const select = $("#workflowTemplateSelect");
-  const selected = select.value;
-  select.innerHTML = '<option value="">Choose a template</option>' + state.workflowTemplates.map((template) => (
-    `<option value="${escapeHtml(template.id)}">${escapeHtml(template.name)}</option>`
-  )).join("");
-  setSelectValue(select, selected);
-}
-
-function renderWorkflowList() {
-  const list = $("#workflowList");
-  if (!state.workflows.length) {
-    list.innerHTML = '<div class="empty">No workflow definitions</div>';
-    return;
-  }
-  list.innerHTML = state.workflows.map((workflow) => `
-    <article class="workflow-item ${workflow.id === state.selectedWorkflowId ? "selected" : ""}" data-workflow-id="${escapeHtml(workflow.id)}">
-      <div class="item-title">
-        <span>${escapeHtml(workflow.name)}</span>
-        <span class="status ${statusClass(workflow.status)}">${escapeHtml(workflow.status)}</span>
-      </div>
-      <div class="item-sub">${escapeHtml(workflow.description || "no description")} · v${escapeHtml(workflow.version)} · ${shortId(workflow.id)}</div>
-    </article>
-  `).join("");
-}
-
-function renderWorkflowEditor(force = false) {
-  const workflow = state.workflows.find((item) => item.id === state.selectedWorkflowId);
-  if (!force && state.workflowEditorDirty) return;
-  const editorIds = new Set([
-    "workflowNameInput", "workflowDescriptionInput", "workflowGraphInput", "workflowPolicyInput", "workflowRunInput",
-    "builderNodeIdInput", "builderNodeTypeSelect", "builderNodeRoleInput", "builderNodePromptInput", "builderNodeOutputsInput",
-    "builderJoinModeSelect", "builderAddNodeBtn", "builderEdgeFromInput", "builderEdgeToInput", "builderConditionTypeSelect",
-    "builderConditionSubjectInput", "builderConditionPathInput", "builderConditionValueInput", "builderAddEdgeBtn",
-  ]);
-  if (!force && workflow && $("#workflowNameInput").dataset.workflowId === workflow.id && editorIds.has(document.activeElement?.id)) {
-    return;
-  }
-  $("#workflowMeta").textContent = workflow ? `${workflow.status} · ${shortId(workflow.id)} · updated ${formatTime(workflow.updated_at)}` : "New workflow";
-  $("#workflowNameInput").dataset.workflowId = workflow?.id || "";
-  $("#workflowNameInput").value = workflow?.name || "Untitled workflow";
-  $("#workflowDescriptionInput").value = workflow?.description || "";
-  $("#workflowGraphInput").value = prettyJson(workflow?.graph || defaultWorkflowGraph());
-  $("#workflowPolicyInput").value = prettyJson(workflow?.policy || { max_jobs: 5, max_iterations: 10 });
-  syncPolicyFormFromJson();
-  if (!$("#workflowRunInput").value.trim()) $("#workflowRunInput").value = "{}";
-  const nameDisplay = document.getElementById("workflowName");
-  if (nameDisplay) nameDisplay.textContent = workflow?.name || "เวิร์กโฟลว์ใหม่";
-  renderWorkflowGraph();
-  renderWorkerSuggestions();
-}
-
-// ----- Visual node graph (parses the editable Graph JSON above) -----
-const WF_NODE_W = 158, WF_NODE_H = 88, WF_COL_GAP = 60, WF_ROW_GAP = 30, WF_START_W = 92, WF_PAD = 36;
-let wfUserZoom = 1;
-let wfResizeObserver = null;
-
-function wfParseGraph() {
-  try {
-    const graph = parseJsonField("#workflowGraphInput", null);
-    if (!graph || !Array.isArray(graph.nodes)) return null;
-    return graph;
-  } catch {
-    return null;
-  }
-}
-
-function wfNodeSubline(node) {
-  if (node.type === "human_gate") return node.reason || "รออนุมัติ";
-  const role = node.role || node.worker_id || node.id;
-  const outputs = Array.isArray(node.outputs) ? node.outputs.join(",") : (node.outputs || "");
-  return outputs ? `${role}→${outputs}` : String(role);
-}
-
-function wfLayout(graph) {
-  const nodes = graph.nodes.filter((node) => node && node.id);
-  const ids = nodes.map((node) => node.id);
-  const idset = new Set(ids);
-  const edges = (graph.edges || []).filter((edge) => edge && idset.has(edge.from) && idset.has(edge.to));
-  // Cycles (manager/correction loops) blow up longest-path layering — each relaxation round
-  // pushes the loop one column deeper until the canvas is thousands of px wide and the fit
-  // scale bottoms out. Classify back-edges via DFS first, lay out only the forward DAG, and
-  // let the renderer draw back-edges as return curves under the graph.
-  const startId = (graph.start && idset.has(graph.start)) ? graph.start : ids[0];
-  const adjacency = {};
-  for (const edge of edges) (adjacency[edge.from] ||= []).push(edge);
-  const back = new Set();
-  const seen = new Set();
-  // Iterative DFS (explicit stack): a pasted multi-thousand-node chain must render slow,
-  // never blow the call stack and take the whole render loop down with it.
-  const visit = (root) => {
-    const stack = [{ id: root, index: 0 }];
-    const onstack = new Set([root]);
-    seen.add(root);
-    while (stack.length) {
-      const frame = stack[stack.length - 1];
-      const outgoing = adjacency[frame.id] || [];
-      if (frame.index >= outgoing.length) {
-        onstack.delete(frame.id);
-        stack.pop();
-        continue;
-      }
-      const edge = outgoing[frame.index++];
-      if (onstack.has(edge.to)) back.add(edge);
-      else if (!seen.has(edge.to)) {
-        seen.add(edge.to);
-        onstack.add(edge.to);
-        stack.push({ id: edge.to, index: 0 });
-      }
-    }
-  };
-  if (startId) visit(startId);
-  for (const id of ids) if (!seen.has(id)) visit(id);
-  // Longest-path layering over the forward edges only; cap iterations as a safety net.
-  const depth = Object.fromEntries(ids.map((id) => [id, 0]));
-  for (let k = 0; k < nodes.length; k++) {
-    let changed = false;
-    for (const edge of edges) {
-      if (back.has(edge)) continue;
-      if (depth[edge.to] < depth[edge.from] + 1) { depth[edge.to] = depth[edge.from] + 1; changed = true; }
-    }
-    if (!changed) break;
-  }
-  const columns = {};
-  for (const id of ids) (columns[depth[id]] ||= []).push(id);
-  const maxCol = Math.max(0, ...Object.keys(columns).map(Number));
-  let maxRows = 1;
-  for (let c = 0; c <= maxCol; c++) maxRows = Math.max(maxRows, (columns[c] || []).length);
-  const totalH = maxRows * WF_NODE_H + (maxRows - 1) * WF_ROW_GAP;
-  const colX = (c) => WF_PAD + WF_START_W + WF_COL_GAP + c * (WF_NODE_W + WF_COL_GAP);
-  const place = {};
-  for (let c = 0; c <= maxCol; c++) {
-    const colIds = columns[c] || [];
-    const colH = colIds.length * WF_NODE_H + (colIds.length - 1) * WF_ROW_GAP;
-    const y0 = WF_PAD + (totalH - colH) / 2;
-    colIds.forEach((id, row) => { place[id] = { x: colX(c), y: y0 + row * (WF_NODE_H + WF_ROW_GAP), w: WF_NODE_W, h: WF_NODE_H }; });
-  }
-  const width = colX(maxCol) + WF_NODE_W + WF_PAD;
-  const height = totalH + WF_PAD * 2 + (back.size ? 26 : 0);
-  const start = startId ? { x: WF_PAD, y: (height - 40) / 2, w: WF_START_W, h: 40, to: startId } : null;
-  return { nodes, edges, place, width, height, start, back };
-}
-
-function renderWorkflowGraph() {
-  const host = document.getElementById("workflowGraph");
-  if (!host) return;
-  const graph = wfParseGraph();
-  if (!graph || !graph.nodes.length) {
-    host.innerHTML = '<div class="wf-canvas-empty">Graph JSON ไม่ถูกต้อง หรือยังไม่มีโหนด</div>';
-    renderWorkflowNodeInspector();
-    return;
-  }
-  const layout = wfLayout(graph);
-  const byId = Object.fromEntries(graph.nodes.map((node) => [node.id, node]));
-  if (!byId[state.selectedWorkflowNode]) state.selectedWorkflowNode = (layout.start && layout.start.to) || graph.nodes[0]?.id || null;
-
-  const edgePath = (sx, sy, tx, ty) => {
-    const dx = Math.max(46, (tx - sx) / 2);
-    return `M ${sx} ${sy} C ${sx + dx} ${sy}, ${tx - dx} ${ty}, ${tx} ${ty}`;
-  };
-  const segments = [];
-  if (layout.start) {
-    const target = layout.place[layout.start.to];
-    if (target) {
-      const sx = layout.start.x + layout.start.w, sy = layout.start.y + layout.start.h / 2;
-      const tx = target.x, ty = target.y + target.h / 2;
-      segments.push({ d: edgePath(sx, sy, tx, ty), tx, ty, color: "var(--nt-grey-300)", dash: "none", width: 1.8 });
-    }
-  }
-  for (const edge of layout.edges) {
-    const source = layout.place[edge.from];
-    const target = layout.place[edge.to];
-    if (!source || !target) continue;
-    const cond = edge.condition?.type || "always";
-    const human = cond === "human_selected";
-    const isBack = layout.back.has(edge);
-    let d, tx, ty;
-    if (isBack) {
-      // Return edge (loop) — dip under the graph and come back into the target's bottom edge.
-      const sx = source.x + source.w / 2, sy = source.y + source.h;
-      tx = target.x + target.w / 2;
-      ty = target.y + target.h;
-      const dropY = layout.height - 10;
-      d = `M ${sx} ${sy} C ${sx} ${dropY}, ${tx} ${dropY}, ${tx} ${ty}`;
-    } else {
-      const sx = source.x + source.w, sy = source.y + source.h / 2;
-      tx = target.x;
-      ty = target.y + target.h / 2;
-      d = edgePath(sx, sy, tx, ty);
-    }
-    segments.push({
-      d, tx, ty,
-      color: human ? "var(--nt-yellow-500)" : "var(--nt-grey-300)",
-      dash: isBack ? "6 5" : (cond.startsWith("artifact") ? "5 4" : "none"),
-      width: human ? 2.5 : 1.8,
-    });
-  }
-  const svg = `<svg class="wf-edges" width="${layout.width}" height="${layout.height}" aria-hidden="true">${
-    segments.map((seg) => `<path d="${seg.d}" fill="none" stroke="${seg.color}" stroke-width="${seg.width}" stroke-dasharray="${seg.dash}"/><circle cx="${seg.tx}" cy="${seg.ty}" r="4" fill="${seg.color}"/>`).join("")
-  }</svg>`;
-
-  const tagFor = (type) => type === "human_gate" ? { cls: "gate", label: "human gate" }
-    : type === "manager" ? { cls: "manager", label: "manager" }
-    : type === "join" ? { cls: "join", label: "join" }
-    : { cls: "worker", label: "worker" };
-  const nodeEls = graph.nodes.map((node) => {
-    const place = layout.place[node.id];
-    if (!place) return "";
-    const tag = tagFor(node.type);
-    const cls = node.type === "manager" ? "manager" : node.type === "human_gate" ? "human_gate" : "worker";
-    const selected = node.id === state.selectedWorkflowNode ? " selected" : "";
-    return `<button class="wf-node ${cls}${selected}" type="button" data-wf-node="${escapeHtml(node.id)}" style="left:${place.x}px;top:${place.y}px;width:${place.w}px;height:${place.h}px">
-      <span class="wf-node-head"><span class="wf-node-name">${escapeHtml(node.id)}</span><span class="wf-node-tag ${tag.cls}">${tag.label}</span></span>
-      <span class="wf-node-sub">${escapeHtml(wfNodeSubline(node))}</span>
-    </button>`;
-  }).join("");
-  const startEl = layout.start
-    ? `<div class="wf-node start" style="left:${layout.start.x}px;top:${layout.start.y}px;width:${layout.start.w}px;height:${layout.start.h}px"><span class="wf-node-label">อินพุต</span></div>`
-    : "";
-
-  host.innerHTML = `<div class="wf-fit-wrap"><div class="wf-fit-inner" style="width:${layout.width}px;height:${layout.height}px">${svg}${startEl}${nodeEls}</div></div>`;
-  state.wfGraphSize = { w: layout.width, h: layout.height };
-  wfApplyScale();
-  if (!wfResizeObserver && window.ResizeObserver) {
-    wfResizeObserver = new ResizeObserver(() => wfApplyScale());
-    wfResizeObserver.observe(host);
-  }
-  renderWorkflowNodeInspector();
-}
-
-function wfApplyScale() {
-  const host = document.getElementById("workflowGraph");
-  const inner = host?.querySelector(".wf-fit-inner");
-  const wrap = host?.querySelector(".wf-fit-wrap");
-  if (!inner || !wrap || !state.wfGraphSize) return;
-  const available = host.clientWidth - WF_PAD;
-  if (available <= 0) return;
-  const fit = Math.max(0.4, Math.min(1, available / state.wfGraphSize.w));
-  const scale = Math.max(0.3, Math.min(1.6, fit * wfUserZoom));
-  inner.style.transform = `scale(${scale})`;
-  wrap.style.width = `${state.wfGraphSize.w * scale}px`;
-  wrap.style.height = `${state.wfGraphSize.h * scale}px`;
-}
-
-function renderWorkflowNodeInspector() {
-  const box = document.getElementById("workflowNodeInspector");
-  const labelEl = document.getElementById("wfNodeLabel");
-  const typeEl = document.getElementById("wfNodeType");
-  if (!box) return;
-  const graph = wfParseGraph();
-  const node = graph?.nodes?.find((item) => item.id === state.selectedWorkflowNode);
-  if (!node) {
-    box.innerHTML = '<div class="hint">คลิกโหนดในกราฟด้านบนเพื่อดูฟิลด์ของโหนด</div>';
-    if (labelEl) labelEl.textContent = "เลือกโหนด";
-    if (typeEl) typeEl.textContent = "คลิกโหนดในกราฟ";
-    return;
-  }
-  if (labelEl) labelEl.textContent = node.id;
-  const typeName = { worker: "Worker node", human_gate: "Human gate", manager: "Manager node", join: "Join node" }[node.type] || node.type;
-  if (typeEl) typeEl.textContent = typeName;
-  const fields = [];
-  if (node.type === "human_gate") {
-    fields.push(["เหตุผล", node.reason || "—", false]);
-    const decisions = (node.choices || []).map((choice) => choice.label || choice.id).join(" / ");
-    fields.push(["การตัดสินใจ", decisions || "อนุมัติ / ปฏิเสธ", false]);
-    fields.push(["สร้าง job", "ไม่ — โหนด control plane", false]);
-  } else {
-    fields.push([node.type === "manager" ? "Manager" : "Worker", node.worker_id || (node.role ? `role=${node.role}` : "auto"), false]);
-    if (node.prompt) fields.push(["Prompt", node.prompt, true]);
-    if (node.outputs) fields.push(["Outputs", Array.isArray(node.outputs) ? node.outputs.join(", ") : node.outputs, false]);
-    if (node.collect_files) fields.push(["Collect files", Array.isArray(node.collect_files) ? node.collect_files.join(", ") : String(node.collect_files), true]);
-    if (node.budget_units != null) fields.push(["Budget units", String(node.budget_units), false]);
-    if (node.mode) fields.push(["Join mode", `${node.mode}${node.quorum ? ` · quorum ${node.quorum}` : ""}`, false]);
-  }
-  box.innerHTML = `<div class="wf-fields">${fields.map(([label, value, mono]) => `<div><div class="wf-field-l">${escapeHtml(label)}</div><span class="wf-field-v ${mono ? "mono" : ""}">${escapeHtml(value)}</span></div>`).join("")}</div>`;
-}
-
-function renderWorkerSuggestions() {
-  $("#workerSuggestionList").innerHTML = state.workerSuggestions.length ? state.workerSuggestions.map((item) => `
-    <article class="workflow-run-item">
-      <div class="item-title"><span>${escapeHtml(item.node_id)} · ${escapeHtml(item.role || "no role")}</span><span>${escapeHtml(item.state)}</span></div>
-      <div class="item-sub">${escapeHtml(item.reason)}</div>
-      <div class="item-sub">${escapeHtml(item.worker_id || "no worker")} ${item.workspace_id ? `· ${escapeHtml(item.workspace_id)}` : ""}</div>
-      ${item.worker_id || item.workspace_id ? `<button class="preview-btn apply-worker-suggestion" type="button" data-node-id="${escapeHtml(item.node_id)}">Apply To JSON</button>` : ""}
-    </article>
-  `).join("") : "";
 }
 
 function wfRunNodeTotal(run) {
@@ -1105,8 +566,14 @@ function wfBarColor(runState) {
   if (cls === "succeeded") return "var(--nt-success)";
   return "var(--nt-yellow-500)";
 }
-function nodeChip(stateName, label) {
-  return `<span class="nchip ${stateName}"><span class="d"></span>${escapeHtml(label)}</span>`;
+// A node with a resolved job renders as a button (click → open that job in Jobs); a node
+// without one stays a plain span. jobId/runId are escaped and only fed to openJobStream by id.
+function nodeChip(stateName, label, jobId, runId) {
+  const key = String(label);
+  if (jobId) {
+    return `<button class="nchip ${stateName} is-nav" type="button" data-node-job="${escapeHtml(jobId)}" data-node-run="${escapeHtml(runId || "")}" title="เปิด job ของโหนดนี้"><span class="d"></span>${escapeHtml(key)}<span class="njob">${escapeHtml(shortId(jobId))}</span></button>`;
+  }
+  return `<span class="nchip ${stateName}"><span class="d"></span>${escapeHtml(key)}</span>`;
 }
 function renderNodeChips(run) {
   const definition = state.workflows.find((item) => item.id === run.workflow_definition_id);
@@ -1115,8 +582,16 @@ function renderNodeChips(run) {
   const done = new Set(counters.completed_nodes || []);
   const failed = new Set(counters.failed_nodes || []);
   const waiting = new Set(state.approvals.filter((approval) => approval.run_id === run.id).map((approval) => approval.node_key));
+  // node_key → job_id from the loaded run detail (nodes[] is the authoritative linkage).
+  const jobByNode = {};
+  if (state.workflowRunDetail?.run?.id === run.id) {
+    for (const runtimeNode of state.workflowRunDetail.nodes || []) {
+      if (runtimeNode.job_id) jobByNode[runtimeNode.node_key] = runtimeNode.job_id;
+    }
+  }
   if (!Array.isArray(nodes) || !nodes.length) {
-    const chips = [...done].map((id) => nodeChip("done", id)).concat([...failed].map((id) => nodeChip("err", id)));
+    const chips = [...done].map((id) => nodeChip("done", id, jobByNode[id], run.id))
+      .concat([...failed].map((id) => nodeChip("err", id, jobByNode[id], run.id)));
     return chips.length ? chips.join("") : '<span class="hint">ไม่มีข้อมูลโหนด</span>';
   }
   let markedRun = false;
@@ -1127,12 +602,12 @@ function renderNodeChips(run) {
     else if (waiting.has(node.id)) stateName = "wait";
     else if (run.state === "running" && !markedRun) { stateName = "run"; markedRun = true; }
     else stateName = "pend";
-    return nodeChip(stateName, node.id);
+    return nodeChip(stateName, node.id, jobByNode[node.id], run.id);
   }).join("");
 }
 
 function renderWorkflowRuns() {
-  const runs = state.selectedWorkflowId ? state.workflowRuns.filter((run) => run.workflow_definition_id === state.selectedWorkflowId) : state.workflowRuns;
+  const runs = state.workflowRuns;
   const list = $("#workflowRunList");
   const legend = document.getElementById("monRunsLegend");
   if (legend) {
@@ -1218,70 +693,7 @@ function renderWorkflowRuns() {
       <span>${escapeHtml(artifact.metadata?.filename || artifact.key)}</span>
       <span class="item-sub">${escapeHtml(artifact.metadata?.size ?? 0)} bytes · ${escapeHtml(artifact.metadata?.sha256 || "")}</span>
     </button>`).join("");
-  const managerDecisions = state.workflowEvents.filter((event) => event.event_type.startsWith("manager_proposal_"));
-  $("#managerDecisionList").innerHTML = managerDecisions.length ? managerDecisions.map((event) => `
-    <article class="event-item">
-      <div class="item-title"><span>${escapeHtml(event.node_key || "manager")}</span><span class="status ${statusClass(event.payload?.state)}">${escapeHtml(event.payload?.state || "unknown")}</span></div>
-      <div class="item-sub">${escapeHtml(event.payload?.reason || "")}</div>
-      <pre class="event-payload">${escapeHtml(JSON.stringify(event.payload?.proposal || event.payload?.response || {}, null, 2))}</pre>
-    </article>`).join("") : '<div class="empty">No manager decisions</div>';
   renderRunSummary();
-}
-
-function renderApprovals() {
-  let approvals = state.approvals;
-  if (state.selectedWorkflowRunId) {
-    approvals = approvals.filter((approval) => approval.run_id === state.selectedWorkflowRunId);
-  } else if (state.selectedWorkflowId) {
-    const runIds = new Set(state.workflowRuns.filter((run) => run.workflow_definition_id === state.selectedWorkflowId).map((run) => run.id));
-    approvals = approvals.filter((approval) => runIds.has(approval.run_id));
-  }
-  const count = document.getElementById("approvalCount");
-  if (count) count.textContent = `${approvals.length} รายการรออยู่`;
-  $("#approvalList").innerHTML = approvals.length ? approvals.map((approval) => {
-    const wfName = state.workflowRuns.find((run) => run.id === approval.run_id)?.name || approval.node_key;
-    const choices = (approval.choices || []).map((choice) => `<button class="primary-btn choose-approval" type="button" data-approval-id="${escapeHtml(approval.id)}" data-choice="${escapeHtml(choice.id)}">${escapeHtml(choice.label)}</button>`).join("");
-    return `
-    <div class="approval-card">
-      <div class="ac-top"><span class="ac-run">${escapeHtml(shortId(approval.run_id))}</span><span class="ac-wf">· ${escapeHtml(wfName)}</span><span class="ac-ago">${escapeHtml(formatTime(approval.created_at))}</span></div>
-      <div class="ac-title">${escapeHtml(approval.label)}</div>
-      <div class="ac-reason">${escapeHtml(approval.reason || "")}</div>
-      <div class="ac-actions">
-        ${choices || `<button class="primary-btn approve-approval" type="button" data-approval-id="${escapeHtml(approval.id)}">อนุมัติ</button>`}
-        <button class="secondary-btn reject-approval" type="button" data-approval-id="${escapeHtml(approval.id)}">ปฏิเสธ</button>
-      </div>
-    </div>`;
-  }).join("") : '<div class="empty">ไม่มีรายการรออนุมัติ</div>';
-}
-
-function renderWorkflowTriggers() {
-  const list = $("#triggerList");
-  const triggers = state.selectedWorkflowId ? state.workflowTriggers.filter((trigger) => trigger.workflow_definition_id === state.selectedWorkflowId) : state.workflowTriggers;
-  if (state.selectedWorkflowTriggerId && !triggers.some((trigger) => trigger.id === state.selectedWorkflowTriggerId)) {
-    state.selectedWorkflowTriggerId = null;
-    state.workflowTriggerEvents = [];
-  }
-  if (!triggers.length) {
-    list.innerHTML = '<div class="empty">No triggers</div>';
-    $("#triggerEventList").textContent = "";
-    return;
-  }
-  list.innerHTML = triggers.map((trigger) => `
-    <article class="trigger-item ${trigger.id === state.selectedWorkflowTriggerId ? "selected" : ""}" data-trigger-id="${escapeHtml(trigger.id)}">
-      <div class="item-title">
-        <span>${escapeHtml(trigger.name)}</span>
-        <span>${escapeHtml(trigger.type)}</span>
-      </div>
-      <div class="item-sub">${trigger.enabled ? "enabled" : "disabled"} · next ${escapeHtml(formatTime(trigger.next_fire_at) || "manual")} · ${shortId(trigger.id)}</div>
-      <div class="item-sub">last ${escapeHtml(trigger.last_event_state || "never")} ${escapeHtml(formatTime(trigger.last_event_at))}${trigger.last_event_error ? ` · ${escapeHtml(trigger.last_event_error)}` : ""}</div>
-      <div class="item-actions">
-        <button class="secondary-btn toggle-trigger" data-trigger-id="${escapeHtml(trigger.id)}" data-enabled="${trigger.enabled ? "false" : "true"}">${trigger.enabled ? "Disable" : "Enable"}</button>
-        ${["manual", "schedule", "webhook"].includes(trigger.type) ? `<button class="secondary-btn fire-trigger" data-trigger-id="${escapeHtml(trigger.id)}">Fire</button>` : ""}
-        <button class="danger-btn delete-trigger" data-trigger-id="${escapeHtml(trigger.id)}">Delete</button>
-      </div>
-    </article>
-  `).join("");
-  $("#triggerEventList").textContent = state.workflowTriggerEvents.length ? prettyJson(state.workflowTriggerEvents.slice(0, 10)) : "";
 }
 
 function renderAudit() {
@@ -1304,14 +716,25 @@ function renderAudit() {
     const details = entry.details && typeof entry.details === "object"
       ? Object.entries(entry.details).map(([key, value]) => `${key}=${value}`).join(" · ")
       : String(entry.details || "");
+    // Cross-nav: route a row to its target view by the resource id/type. job_* → Jobs (open its
+    // stream), wfr_* → Monitor (select that run), any worker resource → Fleet. Non-routable rows
+    // stay plain divs. The id is escaped and only fed to openJobStream/selectWorkflowRun (which
+    // fetch by id), so a bad/stale id degrades to a 404 handled below — never an injection.
+    const rid = entry.resource_id || "";
+    const rtype = entry.resource_type || "";
+    let nav = "";
+    if (/^job_/.test(rid)) nav = ` data-nav-view="jobs" data-nav-job="${escapeHtml(rid)}"`;
+    else if (/^wfr_/.test(rid)) nav = ` data-nav-view="monitor" data-nav-run="${escapeHtml(rid)}"`;
+    else if (rtype.includes("worker")) nav = ` data-nav-view="fleet"`;
+    const tag = nav ? `button type="button"` : "div";
     return `
-    <div class="audit-row">
+    <${tag} class="audit-row"${nav}>
       <span class="audit-time">${escapeHtml(formatTime(entry.created_at))}</span>
       <span class="audit-action ${tone}">${escapeHtml(action)}</span>
       <span class="audit-target">${escapeHtml(entry.resource_id || entry.resource_type || "")}</span>
       <span class="audit-detail">${escapeHtml(details)}</span>
       <span class="audit-actor"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>${escapeHtml(entry.actor || "system")}</span>
-    </div>`;
+    </${nav ? "button" : "div"}>`;
   }).join("");
 }
 
@@ -1483,44 +906,6 @@ function renderUsageEvents(events) {
       <span class="secs">${escapeHtml(event.seconds ?? 0)}</span>
       <span>${escapeHtml(formatTime(event.created_at))}</span>
     </div>`).join("");
-}
-
-async function submitJob() {
-  // Same field set the route preview resolves against (composerPayload) — keep them in sync.
-  const payload = composerPayload();
-  if (!payload.prompt) {
-    toast("Prompt is required");
-    return;
-  }
-  // T9a: optional Job Artifact glob patterns; T3: opt-in async callback.
-  const collectFiles = $("#collectFilesInput").value.split(",").map((path) => path.trim()).filter(Boolean);
-  const asyncCallback = $("#jobExecutionCallback").checked;
-  if (collectFiles.length) payload.collect_files = collectFiles;
-  if (asyncCallback) payload.execution = "callback";
-  if ($("#handoffEnabled").checked) {
-    const handoffWorkspaceId = $("#handoffWorkspaceSelect").value || undefined;
-    const handoffWorkerId = $("#handoffWorkerSelect").value || undefined;
-    if (!handoffWorkspaceId && !handoffWorkerId) {
-      toast("Choose a handoff worker or workspace");
-      return;
-    }
-    payload.handoff = {
-      enabled: true,
-      worker_id: handoffWorkspaceId ? undefined : handoffWorkerId,
-      workspace_id: handoffWorkspaceId,
-      prompt: $("#handoffPromptInput").value.trim() || DEFAULT_NEWS_HANDOFF_PROMPT,
-    };
-  }
-  const data = await api("/api/jobs", { method: "POST", body: JSON.stringify(payload) });
-  state.selectedJobId = data.job.id;
-  state.streamText = "";
-  state.events = [];
-  $("#promptInput").value = "";
-  $("#collectFilesInput").value = "";
-  $("#jobExecutionCallback").checked = false;  // don't silently carry async mode into the next job
-  await loadAll();
-  openJobStream(data.job.id);
-  showView("jobs");
 }
 
 function openJobStream(jobId) {
@@ -1724,75 +1109,20 @@ function updateStreamHeader() {
       ? `${job.route_reason || `${job.worker_name || shortId(job.worker_id)} · ${job.workspace_key || "auto"}`}${job.handoff_job_id ? ` · handoff ${shortId(job.handoff_job_id)}` : ""}`
       : "";
   });
+  // When the job belongs to a workflow run, surface a chip that jumps to that run in Monitor.
+  set("jobDetailRunChip", (n) => {
+    const runId = job?.run_id;
+    n.hidden = !runId;
+    if (runId) {
+      n.dataset.runId = runId;
+      const name = state.workflowRuns.find((run) => run.id === runId)?.name || shortId(runId);
+      n.textContent = `${shortId(runId)} · ${name} →`;
+    }
+  });
   const live = !!job && ["queued", "running", "cancel_requested"].includes(job.state);
   const operator = ["admin", "operator"].includes(state.currentUser?.role);
   set("cancelJobBtn", (n) => { n.disabled = !job || !operator || !["queued", "running", "cancel_requested"].includes(job.state); });
   set("streamOutput", (n) => { n.classList.toggle("stream-live", live); });
-}
-
-function composerRouteText() {
-  const workspaceId = $("#workspaceSelect").value;
-  const workerId = $("#workerSelect").value;
-  const conversationId = $("#conversationSelect").value;
-  if (workspaceId) {
-    const workspace = state.workspaces.find((item) => item.id === workspaceId);
-    return `Explicit workspace: ${workspace?.workspace_key || shortId(workspaceId)} · ${workspace?.worker_name || ""}`;
-  }
-  if (workerId) {
-    const worker = state.workers.find((item) => item.id === workerId);
-    return `Explicit worker: ${worker?.name || shortId(workerId)}`;
-  }
-  if (conversationId) return "Auto route: existing conversation binding first";
-  return "Auto route: online status, workspace key, company, tags, role";
-}
-
-function composerPayload() {
-  return {
-    prompt: $("#promptInput").value.trim(),
-    conversation_id: $("#conversationSelect").value || undefined,
-    worker_id: $("#workerSelect").value || undefined,
-    workspace_id: $("#workspaceSelect").value || undefined,
-    model: $("#modelInput").value.trim() || undefined,
-  };
-}
-
-let routePreviewTimer = null;
-let lastRouteKey = "";
-let lastRouteText = "";
-function updateComposerRoutePreview() {
-  const preview = $("#routePreview");
-  // Ask the real router (POST /api/routes/resolve, dry-run) so the preview shows the actual
-  // decision + reason, not a client-side guess. jobs.run roles only — viewers keep the guess.
-  if (!["admin", "operator"].includes(state.currentUser?.role) || !document.querySelector("#view-command.is-active")) {
-    preview.textContent = composerRouteText();
-    return;
-  }
-  const payload = composerPayload();
-  if (!payload.prompt) payload.prompt = "route preview";
-  // The key includes a fleet fingerprint: a worker changing status re-resolves, while the 5s
-  // poll with unchanged inputs+fleet neither re-POSTs nor flickers the resolved text away.
-  // Resolve failures are cached under the same key, so a down router is retried only when
-  // something actually changes — never once per poll.
-  const key = `${JSON.stringify(payload)}|${state.workers.map((worker) => worker.id + worker.status).join(",")}`;
-  if (key === lastRouteKey) {
-    preview.textContent = lastRouteText || composerRouteText();
-    return;
-  }
-  lastRouteKey = key;
-  preview.textContent = composerRouteText();  // instant fallback while the debounce resolves
-  clearTimeout(routePreviewTimer);
-  routePreviewTimer = setTimeout(async () => {
-    try {
-      const data = await api("/api/routes/resolve", { method: "POST", body: JSON.stringify(payload) });
-      if (key !== lastRouteKey) return;  // stale response
-      const workspaceKey = data.workspace?.workspace_key;
-      lastRouteText = `→ ${data.worker?.name || "?"}${workspaceKey ? ` · ${workspaceKey}` : ""} — ${data.reason || "router เลือกให้"}`;
-    } catch (error) {
-      if (key !== lastRouteKey) return;
-      lastRouteText = `${composerRouteText()} · router: ${error.message}`;
-    }
-    preview.textContent = lastRouteText;
-  }, 500);
 }
 
 async function saveWorker(event) {
@@ -1846,206 +1176,6 @@ async function cancelSelectedJob() {
   await loadAll();
 }
 
-function newWorkflow() {
-  state.selectedWorkflowId = null;
-  state.selectedWorkflowNode = null;
-  state.selectedWorkflowRunId = null;
-  state.selectedWorkflowTriggerId = null;
-  state.workflowRunDetail = null;
-  state.workflowArtifacts = [];
-  state.workflowEvents = [];
-  state.workflowTriggerEvents = [];
-  state.workerSuggestions = [];
-  setDirty(false);
-  $("#draftResult").textContent = "";
-  $("#workflowExplanation").textContent = "";
-  $("#workflowRunInput").value = "{}";
-  renderWorkflowEditor(true);
-  renderWorkflowList();
-  renderWorkflowRuns();
-}
-
-function selectWorkflow(workflowId) {
-  state.selectedWorkflowId = workflowId;
-  state.selectedWorkflowNode = null;
-  state.selectedWorkflowRunId = null;
-  state.selectedWorkflowTriggerId = null;
-  state.workflowRunDetail = null;
-  state.workflowArtifacts = [];
-  state.workflowEvents = [];
-  state.workflowTriggerEvents = [];
-  state.workerSuggestions = [];
-  setDirty(false);
-  $("#draftResult").textContent = "";
-  $("#workflowExplanation").textContent = "";
-  renderWorkflowEditor(true);
-  renderWorkflows();
-}
-
-async function saveWorkflow() {
-  const workflowId = $("#workflowNameInput").dataset.workflowId;
-  const payload = {
-    name: $("#workflowNameInput").value.trim() || "Untitled workflow",
-    description: $("#workflowDescriptionInput").value.trim(),
-    graph: parseJsonField("#workflowGraphInput"),
-    policy: parseJsonField("#workflowPolicyInput"),
-  };
-  const path = workflowId ? `/api/workflows/${workflowId}` : "/api/workflows";
-  const method = workflowId ? "PUT" : "POST";
-  const data = await api(path, { method, body: JSON.stringify(payload) });
-  state.selectedWorkflowId = data.workflow.id;
-  setDirty(false);
-  toast("Workflow saved");
-  await loadAll();
-}
-
-async function validateWorkflow() {
-  const workflowId = $("#workflowNameInput").dataset.workflowId;
-  if (!workflowId) {
-    toast("Save before validating");
-    return;
-  }
-  await api(`/api/workflows/${workflowId}/validate`, {
-    method: "POST",
-    body: JSON.stringify({ graph: parseJsonField("#workflowGraphInput"), policy: parseJsonField("#workflowPolicyInput") }),
-  });
-  toast("Workflow valid");
-}
-
-async function explainWorkflow() {
-  const workflowId = $("#workflowNameInput").dataset.workflowId;
-  if (!workflowId) throw new Error("Save before explaining");
-  const data = await api(`/api/workflows/${workflowId}/explain`, { method: "POST" });
-  $("#workflowExplanation").textContent = data.explanation || "";
-  toast("Explanation ready; workflow unchanged");
-}
-
-async function repairWorkflow() {
-  const workflowId = $("#workflowNameInput").dataset.workflowId;
-  if (!workflowId) throw new Error("Save before repairing");
-  const data = await api(`/api/workflows/${workflowId}/repair`, {
-    method: "POST",
-    body: JSON.stringify({
-      graph: parseJsonField("#workflowGraphInput"),
-      policy: parseJsonField("#workflowPolicyInput"),
-      triggers: [],
-    }),
-  });
-  const draft = data.draft || {};
-  $("#workflowGraphInput").value = prettyJson(draft.graph || {});
-  $("#workflowPolicyInput").value = prettyJson(draft.policy || {});
-  syncPolicyFormFromJson();
-  $("#workflowExplanation").textContent = draft.explanation || "";
-  $("#draftResult").textContent = prettyJson({ warnings: draft.warnings || [], triggers: draft.triggers || [] });
-  const firstTrigger = (draft.triggers || [])[0];
-  if (firstTrigger) {
-    $("#triggerNameInput").value = firstTrigger.name || "Repaired trigger";
-    $("#triggerTypeSelect").value = firstTrigger.type || "manual";
-    $("#triggerConfigInput").value = prettyJson(firstTrigger.config || {});
-    $("#triggerEnabledInput").checked = firstTrigger.enabled !== false;
-  }
-  setDirty(true);
-  toast("Validated repair copied to previews; not saved");
-}
-
-async function suggestWorkers() {
-  const data = await api("/api/workflows/suggest-workers", {
-    method: "POST",
-    body: JSON.stringify({
-      graph: parseJsonField("#workflowGraphInput"),
-      policy: parseJsonField("#workflowPolicyInput"),
-    }),
-  });
-  state.workerSuggestions = data.suggestions || [];
-  renderWorkerSuggestions();
-  toast(state.workerSuggestions.length ? "Worker suggestions ready" : "No unresolved worker nodes");
-}
-
-function applyWorkerSuggestion(nodeId) {
-  const suggestion = state.workerSuggestions.find((item) => item.node_id === nodeId);
-  if (!suggestion) throw new Error("Worker suggestion is no longer available");
-  const graph = parseJsonField("#workflowGraphInput");
-  const node = (graph.nodes || []).find((item) => item.id === nodeId);
-  if (!node) throw new Error(`Node no longer exists: ${nodeId}`);
-  if (suggestion.worker_id) node.worker_id = suggestion.worker_id;
-  if (suggestion.workspace_id) node.workspace_id = suggestion.workspace_id;
-  $("#workflowGraphInput").value = prettyJson(graph);
-  setDirty(true);
-  toast("Suggestion applied to Graph JSON; not saved");
-}
-
-async function draftWorkflow() {
-  const plain = $("#draftPromptInput").value.trim();
-  if (!plain) {
-    toast("Draft prompt is required");
-    return;
-  }
-  const data = await api("/api/workflows/draft", { method: "POST", body: JSON.stringify({ plain_language_prompt: plain }) });
-  const draft = data.draft || {};
-  state.selectedWorkflowId = null;
-  $("#workflowNameInput").dataset.workflowId = "";
-  $("#workflowNameInput").value = draft.name || "Draft workflow";
-  $("#workflowDescriptionInput").value = draft.description || "";
-  $("#workflowGraphInput").value = prettyJson(draft.graph || defaultWorkflowGraph());
-  $("#workflowPolicyInput").value = prettyJson(draft.policy || {});
-  setDirty(true);
-  $("#draftResult").textContent = prettyJson({
-    explanation: draft.explanation || "",
-    warnings: draft.warnings || [],
-    triggers: draft.triggers || [],
-  });
-  renderWorkflowList();
-  toast("Draft ready");
-}
-
-function applyWorkflowTemplate() {
-  const template = state.workflowTemplates.find((item) => item.id === $("#workflowTemplateSelect").value);
-  if (!template) throw new Error("Choose a template first");
-  state.selectedWorkflowId = null;
-  setDirty(true);
-  $("#workflowNameInput").dataset.workflowId = "";
-  $("#workflowNameInput").value = template.name;
-  $("#workflowDescriptionInput").value = template.description || "";
-  $("#workflowGraphInput").value = prettyJson(template.graph);
-  $("#workflowPolicyInput").value = prettyJson(template.policy);
-  $("#workflowMeta").textContent = "Template copied · not saved";
-  renderWorkflowList();
-  toast("Template copied to editor; save when ready");
-}
-
-async function runWorkflow() {
-  const workflowId = $("#workflowNameInput").dataset.workflowId;
-  if (!workflowId) {
-    toast("Save before running");
-    return;
-  }
-  const data = await api("/api/workflow-runs", {
-    method: "POST",
-    body: JSON.stringify({ workflow_definition_id: workflowId, input: parseJsonField("#workflowRunInput") }),
-  });
-  state.selectedWorkflowRunId = data.run.id;
-  await loadAll();
-  await selectWorkflowRun(data.run.id);
-  showView("monitor");
-  toast(`Workflow ${data.run.state}`);
-}
-
-async function uploadWorkflowFile() {
-  if (!state.selectedWorkflowRunId) throw new Error("Select a workflow run first");
-  const file = $("#workflowFileInput").files[0];
-  const key = $("#workflowFileKeyInput").value.trim();
-  if (!file || !key) throw new Error("File and file key are required");
-  await api(`/api/workflow-runs/${state.selectedWorkflowRunId}/files?key=${encodeURIComponent(key)}`, {
-    method: "POST",
-    headers: { "Content-Type": file.type || "application/octet-stream", "X-Filename": file.name },
-    body: file,
-  });
-  await loadWorkflowRunDetail(state.selectedWorkflowRunId);
-  renderWorkflowRuns();
-  $("#workflowFileInput").value = "";
-  toast("File artifact uploaded");
-}
-
 async function selectWorkflowRun(runId) {
   state.selectedWorkflowRunId = runId;
   await loadWorkflowRunDetail(runId);
@@ -2085,107 +1215,6 @@ async function retryInterruptedRun() {
   });
   await loadAll();
   toast("Interrupted-node retry authorized");
-}
-
-async function decideApproval(approvalId, action) {
-  const approval = state.approvals.find((item) => item.id === approvalId);
-  if (approval) state.selectedWorkflowRunId = approval.run_id;
-  const data = await api(`/api/approvals/${approvalId}/${action}`, { method: "POST" });
-  await loadAll();
-  toast(`Approval ${data.approval.state}`);
-}
-
-async function chooseApproval(approvalId, choice) {
-  const approval = state.approvals.find((item) => item.id === approvalId);
-  if (approval) state.selectedWorkflowRunId = approval.run_id;
-  const data = await api(`/api/approvals/${approvalId}/choose`, {
-    method: "POST",
-    body: JSON.stringify({ choice }),
-  });
-  await loadAll();
-  toast(`Selected ${data.approval.selected_choice}`);
-}
-
-async function saveTrigger() {
-  if (!state.selectedWorkflowId) {
-    toast("Select a workflow first");
-    return;
-  }
-  await api("/api/workflow-triggers", {
-    method: "POST",
-    body: JSON.stringify({
-      workflow_definition_id: state.selectedWorkflowId,
-      name: $("#triggerNameInput").value.trim() || "Manual",
-      type: $("#triggerTypeSelect").value,
-      config: parseJsonField("#triggerConfigInput"),
-      enabled: $("#triggerEnabledInput").checked,
-    }),
-  });
-  toast("Trigger created");
-  await loadAll();
-}
-
-async function suggestTriggers() {
-  if (!state.selectedWorkflowId) {
-    toast("Select a saved workflow first");
-    return;
-  }
-  const data = await api(`/api/workflows/${state.selectedWorkflowId}/suggest-triggers`, {
-    method: "POST",
-    body: JSON.stringify({ plain_language_prompt: $("#draftPromptInput").value.trim() || undefined }),
-  });
-  const triggers = data.triggers || [];
-  $("#draftResult").textContent = prettyJson({ triggers });
-  if (triggers[0]) {
-    $("#triggerNameInput").value = triggers[0].name || "Suggested trigger";
-    $("#triggerTypeSelect").value = triggers[0].type || "manual";
-    $("#triggerConfigInput").value = prettyJson(triggers[0].config || {});
-  }
-  toast("Validated trigger drafts ready");
-}
-
-async function fireTrigger(triggerId) {
-  const data = await api(`/api/workflow-triggers/${triggerId}/fire`, {
-    method: "POST",
-    body: JSON.stringify({ payload: parseJsonField("#workflowRunInput") }),
-  });
-  state.selectedWorkflowTriggerId = triggerId;
-  if (data.run?.id) state.selectedWorkflowRunId = data.run.id;
-  await loadAll();
-  await selectWorkflowTrigger(triggerId);
-  if (data.run?.id) {
-    await selectWorkflowRun(data.run.id);
-    showView("monitor");
-  }
-  toast(data.event?.state === "ignored" ? "Trigger ignored" : "Trigger fired");
-}
-
-async function toggleTrigger(triggerId, enabled) {
-  const data = await api(`/api/workflow-triggers/${triggerId}`, {
-    method: "PUT",
-    body: JSON.stringify({ enabled }),
-  });
-  state.workflowTriggers = state.workflowTriggers.map((trigger) => trigger.id === triggerId ? data.trigger : trigger);
-  renderWorkflowTriggers();
-  toast(`Trigger ${enabled ? "enabled" : "disabled"}`);
-}
-
-async function selectWorkflowTrigger(triggerId) {
-  state.selectedWorkflowTriggerId = triggerId;
-  const data = await api(`/api/workflow-triggers/${triggerId}/events`);
-  state.workflowTriggerEvents = data.events || [];
-  renderWorkflowTriggers();
-}
-
-async function deleteTrigger(triggerId) {
-  if (!confirm(`Delete trigger ${shortId(triggerId)}?`)) return;
-  await api(`/api/workflow-triggers/${triggerId}`, { method: "DELETE" });
-  if (state.selectedWorkflowTriggerId === triggerId) {
-    state.selectedWorkflowTriggerId = null;
-    state.workflowTriggerEvents = [];
-  }
-  toast("Trigger deleted");
-  await loadAll();
 }
 
 let lastModalTrigger = null;
@@ -2256,7 +1285,7 @@ async function deleteWorkspace(workspaceId) {
   await loadAll();
 }
 
-// ----- Health chip · Deliveries · Packs · Accounts (dashboard coverage of existing APIs) -----
+// ----- Health chip · Accounts -----
 
 function setHealth(ok) {
   const chip = document.getElementById("healthChip");
@@ -2264,76 +1293,6 @@ function setHealth(ok) {
   if (!chip || !text) return;
   chip.classList.toggle("err", !ok);
   text.textContent = ok ? "ระบบทำงานปกติ" : "เชื่อมต่อไม่ได้";
-}
-
-function renderDeliveries() {
-  const list = document.getElementById("deliveryList");
-  if (!list) return;
-  if (!state.deliveries.length) {
-    list.innerHTML = '<div class="empty">ยังไม่มี delivery</div>';
-    return;
-  }
-  list.innerHTML = state.deliveries.map((delivery) => {
-    const chip = delivery.status === "delivered" ? "succeeded" : delivery.status === "pending" ? "queued" : "failed";
-    return `
-    <article class="workflow-run-item">
-      <div class="item-title">
-        <span class="mono">${escapeHtml(shortId(delivery.run_id))}</span>
-        <span class="status ${statusClass(chip)}">${escapeHtml(delivery.status)}</span>
-      </div>
-      <div class="item-sub">${escapeHtml(delivery.url)}</div>
-      <div class="item-sub">พยายาม ${Number(delivery.attempts) || 0}/${Number(delivery.max_attempts) || 0} · ${escapeHtml(formatTime(delivery.delivered_at || delivery.updated_at || delivery.created_at))}${delivery.last_error ? ` · ${escapeHtml(String(delivery.last_error).slice(0, 120))}` : ""}</div>
-      ${["failed", "blocked"].includes(delivery.status) ? `<button class="preview-btn retry-delivery" type="button" data-delivery-id="${escapeHtml(delivery.id)}">ส่งซ้ำ</button>` : ""}
-    </article>`;
-  }).join("");
-}
-
-async function loadPacks() {
-  try {
-    state.packs = (await api("/api/packs")).packs || [];
-  } catch {
-    state.packs = [];
-  }
-  renderPacks();
-}
-
-function renderPacks() {
-  const box = document.getElementById("packList");
-  if (!box) return;
-  box.innerHTML = state.packs.length ? state.packs.map((pack) => `
-    <div class="pack-item" title="${escapeHtml(pack.description || pack.error || "")}">
-      <span class="pack-name">${escapeHtml(pack.name || pack.file)}</span>
-      <span class="pack-meta">${pack.error ? "ไฟล์ไม่ผ่านการตรวจ" : `v${escapeHtml(String(pack.version))} · ${Number(pack.workflows) || 0} wf${pack.signed ? " · ลงนาม" : ""}`}</span>
-    </div>
-  `).join("") : '<div class="empty">ไม่มีแพ็กบนเครื่อง server</div>';
-}
-
-async function importPackFile(file) {
-  let pack;
-  try {
-    pack = JSON.parse(await file.text());
-  } catch {
-    throw new Error("ไฟล์ไม่ใช่ JSON ที่ถูกต้อง");
-  }
-  await api("/api/packs/import", { method: "POST", body: JSON.stringify(pack) });
-  toast("นำเข้าแพ็กสำเร็จ");
-  await loadAll();
-  await loadPacks();  // loadAll doesn't cover packs — refresh the rail list too
-}
-
-async function exportSelectedWorkflowPack() {
-  if (!state.selectedWorkflowId) throw new Error("เลือกเวิร์กโฟลว์จากรายการก่อน");
-  const pack = (await api(`/api/packs/${encodeURIComponent(state.selectedWorkflowId)}/export`)).pack;
-  const blob = new Blob([prettyJson(pack)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = `${String(pack.name || "workflow").replace(/[^\w฀-๿-]+/g, "-")}.pack.json`;
-  document.body.appendChild(anchor);  // Firefox needs the anchor in the DOM for click() to fire
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
-  toast("ส่งออกแพ็กแล้ว");
 }
 
 async function loadAccounts() {
@@ -2465,67 +1424,9 @@ document.addEventListener("click", async (event) => {
     await downloadArtifact(downloadArtifactButton.dataset.artifactId, downloadArtifactButton.dataset.filename).catch((error) => toast(error.message));
     return;
   }
-  const workflowItem = event.target.closest(".workflow-item");
-  if (workflowItem) {
-    selectWorkflow(workflowItem.dataset.workflowId);
-    return;
-  }
-  const wfNode = event.target.closest("[data-wf-node]");
-  if (wfNode) {
-    state.selectedWorkflowNode = wfNode.dataset.wfNode;
-    renderWorkflowGraph();
-    return;
-  }
   const runRow = event.target.closest(".run-row, .workflow-run-item[data-run-id]");
   if (runRow && runRow.dataset.runId) {
     await selectWorkflowRun(runRow.dataset.runId).catch((error) => toast(error.message));
-    return;
-  }
-  const applyWorkerButton = event.target.closest(".apply-worker-suggestion");
-  if (applyWorkerButton) {
-    try { applyWorkerSuggestion(applyWorkerButton.dataset.nodeId); } catch (error) { toast(error.message); }
-    return;
-  }
-  const approveButton = event.target.closest(".approve-approval");
-  if (approveButton) {
-    await decideApproval(approveButton.dataset.approvalId, "approve").catch((error) => toast(error.message));
-    return;
-  }
-  const rejectButton = event.target.closest(".reject-approval");
-  if (rejectButton) {
-    await decideApproval(rejectButton.dataset.approvalId, "reject").catch((error) => toast(error.message));
-    return;
-  }
-  const chooseButton = event.target.closest(".choose-approval");
-  if (chooseButton) {
-    await chooseApproval(chooseButton.dataset.approvalId, chooseButton.dataset.choice).catch((error) => toast(error.message));
-    return;
-  }
-  const fireTriggerButton = event.target.closest(".fire-trigger");
-  if (fireTriggerButton) {
-    await fireTrigger(fireTriggerButton.dataset.triggerId).catch((error) => toast(error.message));
-    return;
-  }
-  const toggleTriggerButton = event.target.closest(".toggle-trigger");
-  if (toggleTriggerButton) {
-    await toggleTrigger(toggleTriggerButton.dataset.triggerId, toggleTriggerButton.dataset.enabled === "true").catch((error) => toast(error.message));
-    return;
-  }
-  const deleteTriggerButton = event.target.closest(".delete-trigger");
-  if (deleteTriggerButton) {
-    await deleteTrigger(deleteTriggerButton.dataset.triggerId).catch((error) => toast(error.message));
-    return;
-  }
-  const triggerItem = event.target.closest(".trigger-item");
-  if (triggerItem) {
-    await selectWorkflowTrigger(triggerItem.dataset.triggerId).catch((error) => toast(error.message));
-    return;
-  }
-  const retryDeliveryButton = event.target.closest(".retry-delivery");
-  if (retryDeliveryButton) {
-    await api(`/api/deliveries/${encodeURIComponent(retryDeliveryButton.dataset.deliveryId)}/retry`, { method: "POST" })
-      .then(() => { toast("ส่งซ้ำแล้ว — รอผล"); return loadAll(); })
-      .catch((error) => toast(error.message));
     return;
   }
   const toggleUserButton = event.target.closest(".toggle-user-status");
@@ -2553,23 +1454,18 @@ document.addEventListener("click", async (event) => {
       .catch((error) => toast(error.message));
     return;
   }
-  const jobItem = event.target.closest(".job-row");
+  const jobItem = event.target.closest(".job-row, .dash-job");
   if (jobItem) {
+    if (jobItem.classList.contains("dash-job")) {
+      // Recent jobs on Overview should open the same selected detail in Jobs, even when a
+      // previous visit left the list filtered to a specific workflow run.
+      state.jobRunFilter = "all";
+      showView("jobs");
+    }
     openJobStream(jobItem.dataset.jobId);
   }
 });
 
-$("#submitJobBtn").addEventListener("click", () => submitJob().catch((error) => toast(error.message)));
-// Command: handoff switch reveals its form; ⌘/Ctrl+Enter submits the prompt.
-$("#handoffEnabled").addEventListener("change", (event) => {
-  $("#handoffBox").classList.toggle("is-open", event.currentTarget.checked);
-});
-$("#promptInput").addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-    event.preventDefault();
-    submitJob().catch((error) => toast(error.message));
-  }
-});
 // Jobs: stream / events tab toggle.
 for (const tab of document.querySelectorAll(".tab[data-job-tab]")) {
   tab.addEventListener("click", () => {
@@ -2593,109 +1489,20 @@ $("#pollAllBtn").addEventListener("click", async () => {
   await refreshAll({ poll: true, notice: true }).catch((error) => toast(error.message));
 });
 $("#cancelJobBtn").addEventListener("click", () => cancelSelectedJob().catch((error) => toast(error.message)));
-$("#newWorkflowBtn").addEventListener("click", () => newWorkflow());
-$("#saveWorkflowBtn").addEventListener("click", () => saveWorkflow().catch((error) => toast(error.message)));
-$("#validateWorkflowBtn").addEventListener("click", () => validateWorkflow().catch((error) => toast(error.message)));
-$("#explainWorkflowBtn").addEventListener("click", () => explainWorkflow().then(() => showWfSection("assist")).catch((error) => toast(error.message)));
-$("#repairWorkflowBtn").addEventListener("click", () => repairWorkflow().then(() => {
-  renderWorkflowGraph();
-  showWfSection("assist");  // repair's warnings/explanation render there — never save blind
-}).catch((error) => toast(error.message)));
-$("#suggestWorkersBtn").addEventListener("click", () => suggestWorkers().catch((error) => toast(error.message)));
-$("#draftWorkflowBtn").addEventListener("click", () => draftWorkflow().catch((error) => toast(error.message)));
-$("#applyWorkflowTemplateBtn").addEventListener("click", () => {
-  try {
-    applyWorkflowTemplate();
-    syncPolicyFormFromJson();
-    const display = document.getElementById("workflowName");
-    if (display) display.textContent = $("#workflowNameInput").value || "เวิร์กโฟลว์ใหม่";
-    renderWorkflowGraph();
-  } catch (error) { toast(error.message); }
-});
-$("#builderAddNodeBtn").addEventListener("click", () => {
-  try { addBuilderNode(); renderWorkflowGraph(); } catch (error) { toast(error.message); }
-});
-$("#builderAddEdgeBtn").addEventListener("click", () => {
-  try { addBuilderEdge(); renderWorkflowGraph(); } catch (error) { toast(error.message); }
-});
-$("#runWorkflowBtn").addEventListener("click", () => runWorkflow().catch((error) => toast(error.message)));
-$("#uploadWorkflowFileBtn").addEventListener("click", () => uploadWorkflowFile().catch((error) => toast(error.message)));
 $("#pauseWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("pause").catch((error) => toast(error.message)));
 $("#resumeWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("resume").catch((error) => toast(error.message)));
 $("#retryInterruptedRunBtn").addEventListener("click", () => retryInterruptedRun().catch((error) => toast(error.message)));
 $("#cancelWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("cancel").catch((error) => toast(error.message)));
-$("#saveTriggerBtn").addEventListener("click", () => saveTrigger().catch((error) => toast(error.message)));
-$("#applyTriggerQuickBtn").addEventListener("click", () => {
-  try { applyQuickTrigger(); } catch (error) { toast(error.message); }
-});
-$("#suggestTriggersBtn").addEventListener("click", () => suggestTriggers().catch((error) => toast(error.message)));
 $("#addWorkerBtn").addEventListener("click", () => openWorkerModal());
 $("#addWorkspaceBtn").addEventListener("click", () => openWorkspaceModal());
 $("#createUserForm").addEventListener("submit", (event) => createUser(event).catch((error) => toast(error.message)));
 $("#createTokenForm").addEventListener("submit", (event) => createToken(event).catch((error) => toast(error.message)));
-$("#importPackBtn").addEventListener("click", () => $("#packFileInput").click());
-$("#packFileInput").addEventListener("change", (event) => {
-  const file = event.currentTarget.files?.[0];
-  event.currentTarget.value = "";
-  if (file) importPackFile(file).catch((error) => toast(error.message));
-});
-$("#exportPackBtn").addEventListener("click", () => exportSelectedWorkflowPack().catch((error) => toast(error.message)));
-// Route preview follows the prompt/model as they are typed (debounced inside).
-$("#promptInput").addEventListener("input", () => updateComposerRoutePreview());
-$("#modelInput").addEventListener("input", () => updateComposerRoutePreview());
-$("#conversationSelect").addEventListener("change", () => {
-  state.selectedJobId = null;
-  updateComposerRoutePreview();
-});
-$("#workerSelect").addEventListener("change", () => {
-  state.selectedJobId = null;
-  updateComposerRoutePreview();
-});
-$("#workspaceSelect").addEventListener("change", () => {
-  state.selectedJobId = null;
-  updateComposerRoutePreview();
-});
 $("#workerForm").addEventListener("submit", (event) => saveWorker(event).catch((error) => toast(error.message)));
 $("#workspaceForm").addEventListener("submit", (event) => saveWorkspace(event).catch((error) => toast(error.message)));
 $("#loginForm").addEventListener("submit", (event) => login(event).catch((error) => {
   $("#loginMessage").textContent = error.message === "unauthorized" ? "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" : error.message;
 }));
 $("#signOutBtn").addEventListener("click", () => signOut());
-for (const selector of ["#workflowNameInput", "#workflowDescriptionInput", "#workflowGraphInput", "#workflowPolicyInput"]) {
-  $(selector).addEventListener("input", () => { setDirty(true); });
-}
-$("#workflowPolicyInput").addEventListener("input", () => { syncPolicyFormFromJson(); });
-for (const [, selector] of POLICY_FORM_FIELDS) {
-  $(selector).addEventListener("input", () => { syncPolicyJsonFromForm(); });
-}
-// Workflows: editing the Graph JSON re-renders the node graph (debounced — the full
-// parse/layout/SVG rebuild per keystroke lags on big graphs); the name display tracks the input.
-let wfGraphInputTimer = null;
-$("#workflowGraphInput").addEventListener("input", () => {
-  clearTimeout(wfGraphInputTimer);
-  wfGraphInputTimer = setTimeout(() => renderWorkflowGraph(), 200);
-});
-$("#workflowNameInput").addEventListener("input", () => {
-  const display = document.getElementById("workflowName");
-  if (display) display.textContent = $("#workflowNameInput").value || "เวิร์กโฟลว์ใหม่";
-});
-for (const tab of document.querySelectorAll(".tab-pill[data-wf-tab]")) {
-  tab.addEventListener("click", () => {
-    for (const other of document.querySelectorAll(".tab-pill[data-wf-tab]")) other.classList.toggle("is-active", other === tab);
-    for (const pane of document.querySelectorAll("[data-wf-pane]")) pane.hidden = pane.dataset.wfPane !== tab.dataset.wfTab;
-  });
-}
-// Workflows: section tabs under the graph (design / policy / run / assist).
-function showWfSection(name) {
-  for (const tab of document.querySelectorAll(".wf-sec-tab")) tab.classList.toggle("is-active", tab.dataset.wfSection === name);
-  for (const pane of document.querySelectorAll("[data-wf-section-pane]")) pane.hidden = pane.dataset.wfSectionPane !== name;
-}
-for (const tab of document.querySelectorAll(".wf-sec-tab")) {
-  tab.addEventListener("click", () => showWfSection(tab.dataset.wfSection));
-}
-$("#wfZoomIn").addEventListener("click", () => { wfUserZoom = Math.min(2, wfUserZoom * 1.15); wfApplyScale(); });
-$("#wfZoomOut").addEventListener("click", () => { wfUserZoom = Math.max(0.5, wfUserZoom / 1.15); wfApplyScale(); });
-
 // Mobile nav: hamburger toggles the sidebar drawer; picking a view collapses it again.
 const sidebarEl = document.querySelector(".sidebar");
 const navToggleBtn = document.getElementById("navToggle");
@@ -2717,6 +1524,58 @@ for (const chip of document.querySelectorAll(".audit-chip[data-audit-filter]")) 
     renderAudit();
   });
 }
+// Audit cross-nav: a routable row jumps to its target view and selects the resource there.
+document.getElementById("auditList")?.addEventListener("click", (event) => {
+  const row = event.target.closest(".audit-row[data-nav-view]");
+  if (!row) return;
+  if (row.dataset.navJob) { state.jobRunFilter = "all"; openJobStream(row.dataset.navJob); }  // "all" so the job is visible in the list
+  else if (row.dataset.navRun) selectWorkflowRun(row.dataset.navRun).catch((error) => toast(error.message));
+  showView(row.dataset.navView);
+});
+
+// Jobs filter chips: filter the list by the workflow run that produced each job.
+document.getElementById("jobFilters")?.addEventListener("click", (event) => {
+  const chip = event.target.closest("[data-job-filter]");
+  if (!chip) return;
+  state.jobRunFilter = chip.dataset.jobFilter;
+  renderJobs();
+});
+
+// Monitor node chip → open that node's job in Jobs, filtered to the run it belongs to.
+document.getElementById("monNodeChips")?.addEventListener("click", (event) => {
+  const chip = event.target.closest(".nchip[data-node-job]");
+  if (!chip) return;
+  if (chip.dataset.nodeRun) state.jobRunFilter = chip.dataset.nodeRun;
+  openJobStream(chip.dataset.nodeJob);
+  showView("jobs");
+});
+
+// Job detail → open the job's workflow run in Monitor (reverse of the node chip).
+document.getElementById("jobDetailRunChip")?.addEventListener("click", (event) => {
+  const runId = event.currentTarget.dataset.runId;
+  if (!runId) return;
+  selectWorkflowRun(runId).catch((error) => toast(error.message));
+  showView("monitor");
+});
+
+// Theme: light/dark toggle persisted to localStorage. The <head> inline script sets the
+// initial data-theme before first paint (no flash); this reflects it on the toggle and flips it.
+function applyTheme(theme) {
+  const dark = theme === "dark";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  const label = document.getElementById("themeToggleLabel");
+  if (label) label.textContent = dark ? "Light" : "Dark";
+}
+(function initTheme() {
+  let saved = "light";
+  try { saved = localStorage.getItem("atlas-theme") || "light"; } catch { /* private mode */ }
+  applyTheme(saved === "dark" ? "dark" : "light");
+})();
+document.getElementById("themeToggle")?.addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  try { localStorage.setItem("atlas-theme", next); } catch { /* private mode */ }
+  applyTheme(next);
+});
 $("#loadUsageBtn").addEventListener("click", () => loadUsage().catch((error) => toast(error.message)));
 $("#usageJsonBtn").addEventListener("click", () => downloadUsage("").catch((error) => toast(error.message)));
 $("#usageCsvBtn").addEventListener("click", () => downloadUsage("csv").catch((error) => toast(error.message)));
@@ -2739,7 +1598,6 @@ document.addEventListener("keydown", (event) => {
 loadAll()
   .then(() => {
     document.body.classList.remove("is-loading");
-    loadPacks().catch(() => undefined);
     // If the Usage/Accounts view was restored from localStorage, load it now that auth/role are known.
     if (document.querySelector("#view-usage.is-active")) loadUsage().catch(() => undefined);
     if (document.querySelector("#view-accounts.is-active")) loadAccounts().catch((error) => toast(error.message));

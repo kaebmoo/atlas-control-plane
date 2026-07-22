@@ -465,6 +465,7 @@ CREATE TABLE IF NOT EXISTS workflow_trigger_events (
 CREATE INDEX IF NOT EXISTS idx_workflow_definitions_updated ON workflow_definitions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_created ON workflow_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_workflow_nodes_run ON workflow_nodes(run_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_nodes_job ON workflow_nodes(job_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_edges_run ON workflow_edges(run_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_events_run_seq ON workflow_events(run_id, seq);
 CREATE INDEX IF NOT EXISTS idx_approvals_state_created ON approvals(state, created_at DESC);
@@ -2826,10 +2827,20 @@ class Database:
         return row_to_dict(row)
 
     def list_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+        # run_id: the workflow run a job belongs to, if any. The link lives on workflow_nodes
+        # (a job carries no run column); a job can recur across attempts, so pick the most
+        # recent node row. Correlated subquery (indexed by idx_workflow_nodes_job) keeps this a
+        # per-job point lookup and never multiplies rows the way a LEFT JOIN would. NULL for
+        # non-workflow (manual/handoff) jobs — the UI treats those as "manual".
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT jobs.*, workers.name AS worker_name, workspaces.workspace_key AS workspace_key
+                SELECT jobs.*, workers.name AS worker_name, workspaces.workspace_key AS workspace_key,
+                       (
+                         SELECT wn.run_id FROM workflow_nodes wn
+                         WHERE wn.job_id = jobs.id
+                         ORDER BY wn.created_at DESC LIMIT 1
+                       ) AS run_id
                 FROM jobs
                 JOIN workers ON workers.id = jobs.worker_id
                 LEFT JOIN workspaces ON workspaces.id = jobs.workspace_id
