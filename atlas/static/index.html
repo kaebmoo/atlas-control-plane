@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="/static/styles.css?v=20260722-ops2">
     <script>
       // Restore theme before first paint so there is no light→dark flash.
-      (function () { try { if (localStorage.getItem("atlas-theme") === "dark") document.documentElement.setAttribute("data-theme", "dark"); } catch (e) {} })();
+      (function () { try { if (localStorage.getItem("atlas-theme") === "dark") document.documentElement.dataset.theme = "dark"; } catch (e) { /* pre-paint theme is best-effort */ } })();
     </script>
   </head>
   <body class="is-loading">
@@ -412,9 +412,9 @@
               <div class="card card-pad-0">
                 <div class="card-head"><div><h3>Users</h3><p class="card-sub">Roles: admin / operator / viewer / auditor</p></div></div>
                 <form id="createUserForm" class="acct-form" autocomplete="off">
-                  <input name="username" placeholder="username" required autocomplete="off">
-                  <input name="password" type="password" placeholder="password" required autocomplete="new-password">
-                  <select name="role">
+                  <input name="username" placeholder="username" aria-label="New user username" required autocomplete="off">
+                  <input name="password" type="password" placeholder="password" aria-label="New user password" required autocomplete="new-password">
+                  <select name="role" aria-label="New user role">
                     <option value="viewer">viewer</option>
                     <option value="operator">operator</option>
                     <option value="auditor">auditor</option>
@@ -428,8 +428,8 @@
               <div class="card card-pad-0">
                 <div class="card-head"><div><h3>API tokens</h3><p class="card-sub">Shown in full once at creation · เก็บให้ดี</p></div></div>
                 <form id="createTokenForm" class="acct-form" autocomplete="off">
-                  <input name="name" placeholder="token name, e.g. ci-deploy" required>
-                  <select name="user_id" id="tokenUserSelect"></select>
+                  <input name="name" placeholder="token name, e.g. ci-deploy" aria-label="New token name" required>
+                  <select name="user_id" id="tokenUserSelect" aria-label="Token owner"></select>
                   <button class="primary-btn" type="submit">Create</button>
                 </form>
                 <div id="newTokenReveal" class="token-reveal" hidden></div>

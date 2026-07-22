@@ -1476,7 +1476,7 @@ document.getElementById("auditList")?.addEventListener("click", (event) => {
 // initial data-theme before first paint (no flash); this reflects it on the toggle and flips it.
 function applyTheme(theme) {
   const dark = theme === "dark";
-  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
   const label = document.getElementById("themeToggleLabel");
   if (label) label.textContent = dark ? "Light" : "Dark";
 }
@@ -1486,7 +1486,7 @@ function applyTheme(theme) {
   applyTheme(saved === "dark" ? "dark" : "light");
 })();
 document.getElementById("themeToggle")?.addEventListener("click", () => {
-  const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
   try { localStorage.setItem("atlas-theme", next); } catch { /* private mode */ }
   applyTheme(next);
 });
