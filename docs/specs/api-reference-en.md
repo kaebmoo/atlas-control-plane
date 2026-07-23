@@ -215,7 +215,7 @@ after import via `PUT /api/workflows/{id}`.
 | POST | `/api/workflow-runs/{run_id}/deliver` | Manual (re)send the signed result to `_meta.reply.callback_url` (`202`) |
 | GET | `/api/workflow-runs/{run_id}/artifacts` | Run artifacts |
 | POST | `/api/workflow-runs/{run_id}/files?key=...` | Upload binary file artifact |
-| GET | `/api/artifacts` | Windowed newest-first **metadata-only** listing across all runs/jobs (`?limit&run_id&job_id&key&kind`; rows carry no `content`; response carries `total`) |
+| GET | `/api/artifacts` | Windowed newest-first listing across all runs/jobs (`?limit&run_id&job_id&key&kind`; default rows include `content`; add `include_content=false` or `view=metadata` for metadata-only rows; response carries `total`) |
 | POST | `/api/artifacts` | Create inline artifact |
 | GET | `/api/artifacts/{artifact_id}` | Artifact detail |
 | GET | `/api/artifacts/{artifact_id}/content` | Download `file_ref` |
@@ -656,14 +656,17 @@ explicit acceptance of duplicate-side-effect risk:
 
 ```bash
 curl -sS "$BASE_URL/api/artifacts?limit=50&kind=file_ref"
+curl -sS "$BASE_URL/api/artifacts?limit=50&kind=file_ref&include_content=false"
 ```
 
 A newest-first display window across all runs and jobs, with optional
-`run_id`, `job_id`, `key`, and `kind` filters. Rows are **metadata-only**:
-the `content` property is never present, and the server never reads or
-serializes inline content for a list request (content has no size cap, so a
-listing that included it could materialize arbitrarily large payloads). Use
-`GET /api/artifacts/{artifact_id}` for inline content and
+`run_id`, `job_id`, `key`, and `kind` filters. By default rows preserve the
+legacy `Artifact` shape and include `content`. For dashboard lists that only
+need metadata, add `include_content=false` (or `view=metadata`): rows then omit
+the top-level `content` property, and the server never reads or serializes
+inline content for that list request (content has no size cap, so a listing
+that included it could materialize arbitrarily large payloads). Use
+`GET /api/artifacts/{artifact_id}` for on-demand inline content and
 `GET /api/artifacts/{artifact_id}/content` for `file_ref` bytes. The response
 is `{"artifacts": [...], "total": N, "limit": M}` — `total` counts every
 artifact matching the filters, computed from the same database snapshot as

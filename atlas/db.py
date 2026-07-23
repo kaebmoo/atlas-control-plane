@@ -1966,6 +1966,32 @@ class Database:
             rows = conn.execute(sql, params).fetchall()
         return [row_to_dict(row) or {} for row in rows]
 
+    def list_artifacts_page(
+        self,
+        limit: int = 100,
+        run_id: str | None = None,
+        job_id: str | None = None,
+        key: str | None = None,
+        kind: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Full-content windowed listing plus the matching total for the legacy list shape."""
+        where = []
+        params: list[Any] = []
+        for column, value in (("run_id", run_id), ("job_id", job_id), ("key", key), ("kind", kind)):
+            if value:
+                where.append(f"{column} = ?")
+                params.append(value)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        with self.connect() as conn:
+            conn.execute("BEGIN")
+            rows = conn.execute(
+                f"SELECT * FROM artifacts{clause}"  # nosec B608
+                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                [*params, limit],
+            ).fetchall()
+            total_row = conn.execute(f"SELECT COUNT(*) FROM artifacts{clause}", params).fetchone()  # nosec B608
+        return [row_to_dict(row) or {} for row in rows], int(total_row[0])
+
     # Every artifact column EXCEPT content: the global display window must never read,
     # decode, or serialize inline payloads (content has no size cap, so a single SELECT *
     # row can be arbitrarily large).

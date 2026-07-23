@@ -405,22 +405,33 @@ def check_milestones_3_and_4(base_url: str, workflow_id: str) -> None:
     assert len(windowed["artifacts"]) == 1 and windowed["limit"] == 1 and windowed["total"] >= 1
     bad_list_kind = request_error(base_url, "GET", "/api/artifacts?kind=binary")
     assert "unsupported artifact kind" in bad_list_kind["error"]
-    # Metadata-only guarantee: the RAW list response must contain neither a `content`
-    # property nor the payload text — the server must never read/serialize inline content
-    # for a list request (mutation: route the listing back through SELECT * or
-    # _public_artifact -> these go red). Single-artifact fetch keeps returning content.
+    # Backward-compatible default: legacy list clients still receive content.
+    # Metadata-only guarantee is opt-in: the RAW metadata response must not contain
+    # the payload text, and parsed rows must not carry a top-level `content` property.
+    # The metadata object deliberately has its own "content" key to keep this check from
+    # relying on a brittle raw substring match.
     marker = "SECRET-LISTING-MARKER-9f1c"
     marked = request(
         base_url,
         "POST",
         "/api/artifacts",
-        {"run_id": source_run["id"], "key": "listing-marker", "kind": "text", "content": marker},
+        {
+            "run_id": source_run["id"],
+            "key": "listing-marker",
+            "kind": "text",
+            "content": marker,
+            "metadata": {"content": "metadata-key-is-not-the-payload"},
+        },
     )["artifact"]
-    raw_listing = request_binary(base_url, "GET", f"/api/artifacts?run_id={source_run['id']}")
+    default_listing = request(base_url, "GET", f"/api/artifacts?run_id={source_run['id']}")
+    default_row = next(artifact for artifact in default_listing["artifacts"] if artifact["id"] == marked["id"])
+    assert default_row["content"] == marker
+    raw_listing = request_binary(base_url, "GET", f"/api/artifacts?run_id={source_run['id']}&include_content=false")
     assert marked["id"] in {artifact["id"] for artifact in raw_listing["json"]["artifacts"]}
-    assert marker.encode() not in raw_listing["body"], "global listing must not serialize artifact content"
-    assert b'"content"' not in raw_listing["body"], "global listing rows must not carry a content property"
+    assert marker.encode() not in raw_listing["body"], "metadata listing must not serialize artifact content"
     assert all("content" not in artifact for artifact in raw_listing["json"]["artifacts"])
+    view_listing = request(base_url, "GET", f"/api/artifacts?run_id={source_run['id']}&view=metadata")
+    assert all("content" not in artifact for artifact in view_listing["artifacts"])
     assert request(base_url, "GET", f"/api/artifacts/{marked['id']}")["artifact"]["content"] == marker
     artifact_event = wait_for_trigger_event(base_url, artifact_trigger["id"], "started")
     assert artifact_event["payload"]["artifact_id"] == created["id"]
@@ -758,8 +769,10 @@ def check_milestone_14(runtime: AtlasRuntime, base_url: str) -> None:
     downloaded = request_binary(base_url, "GET", f"/api/artifacts/{uploaded['id']}/content")
     assert downloaded["body"] == content and "evidence.bin" in downloaded["headers"]["Content-Disposition"]
     # A file_ref's content column holds the opaque stored-file id; the metadata-only global
-    # listing must not leak it either (rows carry no content property at all).
-    file_rows = request(base_url, "GET", f"/api/artifacts?run_id={run['id']}&kind=file_ref")["artifacts"]
+    # listing opt-in must not leak it either (rows carry no content property at all).
+    file_rows = request(base_url, "GET", f"/api/artifacts?run_id={run['id']}&kind=file_ref&include_content=false")[
+        "artifacts"
+    ]
     assert uploaded["id"] in {row["id"] for row in file_rows}
     assert all("content" not in row for row in file_rows), "file_ref listing must not expose the stored-file id"
     wait_for_trigger_event(base_url, trigger["id"], "started")

@@ -1278,17 +1278,19 @@ paths:
     get:
       tags: [Artifacts]
       operationId: listArtifacts
-      summary: List artifact metadata across all runs and jobs (windowed, metadata-only)
+      summary: List artifacts across all runs and jobs (windowed)
       description: >-
         Newest-first display window over every artifact Atlas holds, with optional
-        filters. Rows are metadata-only — the `content` property is never present
-        (inline content has no size cap; the server never reads or serializes it for
-        a list request). Fetch a single artifact for inline content, or its
-        `/content` route for file_ref bytes. The response carries `total` (the count
-        matching the filters, from the same database snapshot as the rows) so a
-        client can render "latest N of TOTAL" instead of implying the window is
-        complete. Consumers that must never be truncated keep using the run-scoped
-        and job-scoped artifact routes, which return the full set.
+        filters. By default rows preserve the legacy `Artifact` shape and include
+        `content`. Clients that only need metadata can opt in with
+        `include_content=false` or `view=metadata`; then rows use `ArtifactMeta`,
+        the `content` property is absent, and the server never reads or serializes
+        inline content for the list request. Fetch a single artifact for inline
+        content, or its `/content` route for file_ref bytes. The response carries
+        `total` (the count matching the filters, from the same database snapshot as
+        the rows) so a client can render "latest N of TOTAL" instead of implying the
+        window is complete. Consumers that must never be truncated keep using the
+        run-scoped and job-scoped artifact routes, which return the full set.
       parameters:
         - {$ref: '#/components/parameters/Limit100'}
         - {name: run_id, in: query, schema: {type: string}}
@@ -1297,15 +1299,28 @@ paths:
         - name: kind
           in: query
           schema: {type: string, enum: [text, json, markdown, file_ref, summary, decision]}
+        - name: include_content
+          in: query
+          schema: {type: boolean, default: true}
+          description: Set to false for metadata-only rows.
+        - name: view
+          in: query
+          schema: {type: string, enum: [full, metadata], default: full}
+          description: Alternative opt-in for metadata-only rows.
       responses:
         '200':
-          description: Windowed metadata-only artifact listing
+          description: Windowed artifact listing
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  artifacts: {type: array, items: {$ref: '#/components/schemas/ArtifactMeta'}}
+                  artifacts:
+                    type: array
+                    items:
+                      oneOf:
+                        - {$ref: '#/components/schemas/Artifact'}
+                        - {$ref: '#/components/schemas/ArtifactMeta'}
                   total: {type: integer, description: Count of artifacts matching the filters}
                   limit: {type: integer, description: The effective (clamped) window size}
         default: {$ref: '#/components/responses/Error'}
@@ -2268,9 +2283,11 @@ components:
     ArtifactMeta:
       type: object
       description: >-
-        Artifact row without its content: what the global listing returns. `content`
-        is intentionally absent (not null) — the server never reads it for a list
-        request.
+        Artifact row without its content: what the metadata-only global listing
+        opt-in returns. `content` is intentionally absent (not null) — the server
+        never reads it for a metadata-only list request.
+      not:
+        required: [content]
       required: [id, key, kind, metadata]
       properties:
         id: {type: string}
