@@ -2,8 +2,10 @@
 
 Atlas is a standalone control plane for coordinating many `thclaws --serve`
 workers. It ships a minimal browser ops console (fleet, live jobs, workflow-run
-monitoring, audit, usage, accounts); job submission and workflow authoring are
-done through the REST API or an external frontend built on it.
+monitoring, audit, usage, accounts). Ad-hoc job submission with routing/handoff
+is API-only; workflow authoring, approvals, triggers, and deliveries are done
+through [flow-designer](https://github.com/kaebmoo/flow-designer), the full
+operator frontend built on Atlas's API, or directly through the REST API.
 
 It is intentionally separate from thClaws. Atlas does not patch, fork, or depend
 on private thClaws internals. Each machine runs thClaws as a worker runtime, and
@@ -278,8 +280,7 @@ curl -H "Authorization: Bearer dev-token-1" \
 
 Open Atlas and go to the **Fleet** view in the left navigation:
 
-1. Click the **+** button in the Workers card header (labeled `เพิ่ม worker`
-   in the current dashboard).
+1. Click **+ Add worker** in the Workers card header.
 2. Fill:
 
 ```text
@@ -309,8 +310,7 @@ When editing an existing worker, leave the token blank to keep the stored token.
 
 ## Add Workspaces
 
-In the **Fleet** view, click the **+** button in the Workspaces card header
-(labeled `เพิ่ม workspace` in the current dashboard).
+In the **Fleet** view, click **+ Add workspace** in the Workspaces card header.
 
 Example:
 
@@ -337,26 +337,26 @@ unique record as `(worker_id, workspace_key)`.
 
 ## Run A Simple Job
 
-In the **Command** view:
+There is no ad-hoc job composer in the dashboard or in flow-designer today —
+submitting a one-off prompt is done through the API (see **Submit A Handoff
+Job** under [API Examples](#api-examples) below; omit `handoff` for a plain,
+non-chained job). Watch it run in the dashboard's **Jobs** view or in
+flow-designer.
 
-1. Enter a prompt.
-2. Optionally select a Worker or Workspace.
-3. Click the run button at the bottom of the composer (play icon, labeled
-   `เรียกใช้งาน` in the current dashboard), or press **⌘ + Enter**.
+If both `worker_id` and `workspace_id` are omitted, Atlas resolves a route by:
 
-If both Worker and Workspace are left on Auto, Atlas resolves a route by:
-
-1. explicit workspace, if selected
-2. explicit worker, if selected
+1. explicit workspace, if given
+2. explicit worker, if given
 3. existing conversation/session binding
 4. scored candidates using worker status, workspace key, company, tags, role,
    and prompt hints
 
-For testing, select a concrete Workspace to avoid ambiguity.
+For testing, pass an explicit `workspace_id` to avoid ambiguity.
 
 ## Reporter To Anchor Handoff
 
-This is the first supported workflow pattern.
+This is the first supported workflow pattern. It is submitted through the API
+today — there is no handoff UI in the dashboard or in flow-designer.
 
 Example setup:
 
@@ -365,38 +365,24 @@ Local thClaws    role=reporter
 Local thClaws 2  role=anchor
 ```
 
-In the **Command** view:
+Submit the reporter job with a `handoff` block targeting the anchor worker
+(full example under **Submit A Handoff Job** in [API Examples](#api-examples)):
 
-1. Select `Local thClaws` as Worker.
-2. Prompt:
-
-```text
-Find one concise technology news item and summarize the facts.
+```json
+{
+  "prompt": "Find one concise technology news item and summarize the facts.",
+  "worker_id": "wrk_reporter",
+  "handoff": {
+    "enabled": true,
+    "worker_id": "wrk_anchor",
+    "prompt": "You are a news anchor.\nTurn the reporter's notes into a broadcast-ready script.\nDo not add facts that are not in the source.\n\n{result}"
+  }
+}
 ```
-
-3. Enable `Hand off after success`.
-4. Select `Local thClaws 2` under the handoff worker select (labeled
-   `ส่งไปยัง worker` in the current dashboard).
-5. Keep or edit the Handoff prompt:
-
-```text
-You are a news anchor.
-Turn the reporter's notes into a broadcast-ready script.
-Do not add facts that are not in the source.
-
-{result}
-```
-
-6. Click the run button (labeled `เรียกใช้งาน` in the current dashboard), or
-   press **⌘ + Enter**.
 
 When the reporter job succeeds, Atlas creates a child job on the anchor worker.
-The Jobs list shows:
-
-```text
-parent job: handoff -> job_xxx
-child job:  child of job_yyy
-```
+`GET /api/jobs/{id}` on the parent shows its handoff state (armed, started, or
+error); the child job's record links back via `parent_job_id`.
 
 ## API Examples
 
@@ -572,8 +558,9 @@ A `manager` node uses a normal worker job but must return only the
 Manager outgoing edges use `manager_selected`, with `target` equal to the edge
 destination. Atlas rejects the whole proposal before downstream scheduling if
 any target, edge, artifact, worker/workspace route, or execution guard is
-invalid. Accepted and rejected decisions are visible in run events, audit, and
-the **Monitor** view's Manager decisions card.
+invalid. Accepted and rejected decisions are visible in run events and audit
+(`GET /api/workflow-runs/{id}/events`, `GET /api/audit`); neither the embedded
+dashboard nor flow-designer currently has a dedicated manager-decision panel.
 
 ### Draft A Workflow
 
@@ -844,7 +831,7 @@ Check:
 - source job produced assistant text
 - handoff worker or workspace was selected
 - target worker is reachable
-- Jobs list does not show `handoff error`
+- `GET /api/jobs/{id}` on the source job does not report a handoff error
 
 ### Logs are long
 
