@@ -1278,10 +1278,14 @@ paths:
     get:
       tags: [Artifacts]
       operationId: listArtifacts
-      summary: List artifacts across all runs and jobs (windowed)
+      summary: List artifact metadata across all runs and jobs (windowed, metadata-only)
       description: >-
         Newest-first display window over every artifact Atlas holds, with optional
-        filters. The response carries `total` (the count matching the filters) so a
+        filters. Rows are metadata-only — the `content` property is never present
+        (inline content has no size cap; the server never reads or serializes it for
+        a list request). Fetch a single artifact for inline content, or its
+        `/content` route for file_ref bytes. The response carries `total` (the count
+        matching the filters, from the same database snapshot as the rows) so a
         client can render "latest N of TOTAL" instead of implying the window is
         complete. Consumers that must never be truncated keep using the run-scoped
         and job-scoped artifact routes, which return the full set.
@@ -1295,13 +1299,13 @@ paths:
           schema: {type: string, enum: [text, json, markdown, file_ref, summary, decision]}
       responses:
         '200':
-          description: Windowed artifact listing
+          description: Windowed metadata-only artifact listing
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  artifacts: {type: array, items: {$ref: '#/components/schemas/Artifact'}}
+                  artifacts: {type: array, items: {$ref: '#/components/schemas/ArtifactMeta'}}
                   total: {type: integer, description: Count of artifacts matching the filters}
                   limit: {type: integer, description: The effective (clamped) window size}
         default: {$ref: '#/components/responses/Error'}
@@ -2256,6 +2260,24 @@ components:
         key: {type: string}
         kind: {enum: [text, json, markdown, file_ref, summary, decision]}
         content: {}
+        metadata: {type: object, additionalProperties: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+      additionalProperties: true
+
+    ArtifactMeta:
+      type: object
+      description: >-
+        Artifact row without its content: what the global listing returns. `content`
+        is intentionally absent (not null) — the server never reads it for a list
+        request.
+      required: [id, key, kind, metadata]
+      properties:
+        id: {type: string}
+        run_id: {type: [string, 'null']}
+        job_id: {type: [string, 'null']}
+        key: {type: string}
+        kind: {enum: [text, json, markdown, file_ref, summary, decision]}
         metadata: {type: object, additionalProperties: true}
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}

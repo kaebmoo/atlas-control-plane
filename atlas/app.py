@@ -783,26 +783,23 @@ class AtlasHandler(BaseHTTPRequestHandler):
             return
 
         if parts == ["api", "artifacts"] and method == "GET":
-            # Global artifact listing for dashboard surfaces: a windowed newest-first read
-            # (list_artifacts) plus the matching total, so a client can render "latest N of
-            # TOTAL" truthfully. Complete-set consumers keep using the run/job-scoped
-            # iter_artifacts routes; this one is explicitly a display window.
+            # Global artifact listing for dashboard surfaces: metadata-only by construction —
+            # the SELECT never touches the content column (inline content has no size cap),
+            # so a list request can't be used to materialize arbitrary payloads. Rows and
+            # total come from one DB snapshot. Complete-set consumers keep using the
+            # run/job-scoped routes; Preview keeps using GET /api/artifacts/{id}.
             limit = _parse_limit(query)
-            run_id = _query_scalar(query, "run_id")
-            job_id = _query_scalar(query, "job_id")
-            key = _query_scalar(query, "key")
             kind = _query_scalar(query, "kind")
             if kind is not None and kind not in ARTIFACT_KINDS:
                 raise ValueError(f"unsupported artifact kind: {kind}")
-            artifacts = runtime.db.list_artifacts(limit=limit, run_id=run_id, job_id=job_id, key=key, kind=kind)
-            total = runtime.db.count_artifacts(run_id=run_id, job_id=job_id, key=key, kind=kind)
-            self._json(
-                {
-                    "artifacts": [_public_artifact(artifact) for artifact in artifacts],
-                    "total": total,
-                    "limit": limit,
-                }
+            artifacts, total = runtime.db.list_artifacts_meta(
+                limit=limit,
+                run_id=_query_scalar(query, "run_id"),
+                job_id=_query_scalar(query, "job_id"),
+                key=_query_scalar(query, "key"),
+                kind=kind,
             )
+            self._json({"artifacts": artifacts, "total": total, "limit": limit})
             return
 
         if parts == ["api", "artifacts"] and method == "POST":
