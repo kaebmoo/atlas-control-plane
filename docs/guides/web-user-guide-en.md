@@ -7,13 +7,19 @@ reviewing audit/usage, and managing accounts.
 > Atlas is the control plane; thClaws workers perform the work. A workspace path
 > must therefore exist on the worker machine, not necessarily on the Atlas host.
 
-> **Scope.** The embedded UI is deliberately minimal. Submitting jobs, building
-> and editing workflows, deciding approvals, and managing triggers, packs, and
-> deliveries are done through the REST API (see
+> **Scope.** The embedded UI is deliberately minimal. Building and editing
+> workflows, deciding approvals, and managing triggers and deliveries are done
+> through **[flow-designer](https://github.com/kaebmoo/flow-designer)** — the
+> full operator frontend for Atlas; see its
+> [Web User Guide](https://github.com/kaebmoo/flow-designer/blob/main/docs/guides/web-user-guide-en.md) —
+> or directly through the REST API (see
 > [API Reference](../specs/api-reference-en.md) and
-> [Workflow Examples](../workflow-examples.md)) or an external frontend built on
-> it. The console focuses on what an operator needs at a glance: fleet health,
-> live job output, run progress, audit, usage, and identities.
+> [Workflow Examples](../workflow-examples.md)). Submitting an ad-hoc job with
+> routing/handoff, uploading a file to a run, and importing or exporting a
+> solution pack have no UI in either frontend today; they remain API-only. This
+> console focuses on what an operator needs at a glance: fleet health, live job
+> output (including a per-job tool-call timeline), run progress, audit, usage,
+> and identities.
 
 ## 1. Start the system
 
@@ -49,7 +55,7 @@ the per-instance username/password, and stop the server with `Ctrl+C`. Atlas use
 
 | View | Purpose |
 | --- | --- |
-| **Overview** | Default landing dashboard: fleet, job, run, and approval stat tiles plus recent jobs |
+| **Overview** | Default landing dashboard: fleet, job, run, and approval stat tiles (each links to its detail view) plus recent jobs |
 | **Monitor** | Inspect workflow runs: progress, node status, timeline, artifacts, recovery controls |
 | **Jobs** | Inspect jobs, live output, tool timeline, events, files, and cancellation |
 | **Audit** | Review recent control-plane actions |
@@ -61,6 +67,10 @@ The sidebar counters show workers, active jobs, and pending approvals. The
 Monitor badge counts pending approvals (decide them via
 `POST /api/approvals/{id}/approve|reject|choose`); the Jobs badge counts
 `queued`, `running`, and `cancel_requested` jobs.
+
+The topbar's health chip shows whether the browser can currently reach Atlas.
+**Dark/Light** toggles the console's theme; the choice is saved in the browser
+and restored on reload.
 
 **Refresh & poll** reloads data and polls every worker immediately. The UI also
 reloads data every 5 seconds and polls workers every 60 seconds.
@@ -119,7 +129,9 @@ Jobs are created via `POST /api/jobs` (see
 and manage them.
 
 The Jobs list shows worker, state, timestamp, short ID, handoff relationships,
-and prompt. Select a card to open it.
+and prompt. Select a card to open it. When any listed job belongs to a
+workflow run, filter chips above the list narrow it to one run (or **Manual**
+for jobs not started by a workflow).
 
 **Live stream** replays and follows worker output. **Timeline** shows a per-job
 tool and skill call timeline — each call's name, status (started/ok/error/denied),
@@ -168,7 +180,8 @@ If the stream disconnects, select the job card again to replay events.
 
 **Runs** lists all workflow runs. Select a run to inspect state, jobs, budget,
 completed/failed nodes, join progress, per-node status chips, the recent event
-timeline, and full detail JSON.
+timeline, and full detail JSON. Click a node's status chip to open that node's
+job in **Jobs**, filtered to this run.
 
 - **Pause** pauses a running run.
 - **Resume** continues a paused run without repeating completed nodes.
@@ -228,8 +241,11 @@ model.
 
 **Audit** shows recent control-plane actions such as `worker.poll`, `job.create`,
 `job.succeeded`, and `session.bind`, with timestamps and JSON details. Use it to
-trace state changes and poll/run errors. The UI renders a subset of the latest
-30 fetched audit entries.
+trace state changes and poll/run errors. Filter chips (**All**, `job`,
+`workflow`, `worker`, `approval`) narrow the list; the UI renders up to 30
+matching entries from the latest fetched batch. A row for a job or workflow run
+is clickable and jumps straight to that job in **Jobs** (and opens its stream)
+or that run in **Monitor**; a worker-related row jumps to **Fleet**.
 
 ## 7. Security and remote access
 
@@ -329,7 +345,10 @@ Token cards show creation time and provide confirmed **Revoke**.
 | Run does not start | Validate the workflow and run input via the API |
 | Resume is disabled | Resume is for `paused`; use Retry interrupted for recovery |
 
-For workflow authoring (definitions, templates, packs, triggers, drafts,
-validation, and repair), see [Workflow Examples](../workflow-examples.md),
+For workflow authoring, approvals, triggers, and deliveries, see
+[flow-designer's Web User Guide](https://github.com/kaebmoo/flow-designer/blob/main/docs/guides/web-user-guide-en.md).
+For everything reachable only through the API today (ad-hoc jobs with handoff,
+run file uploads, solution packs, draft/explain/repair, and worker/trigger
+suggestions), see [Workflow Examples](../workflow-examples.md),
 [API Reference](../specs/api-reference-en.md), and
 [Concepts & Reference](../concepts-en.md).

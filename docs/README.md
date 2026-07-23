@@ -8,8 +8,12 @@
 ## คู่มือสำหรับผู้ใช้งาน
 
 - [คู่มือใช้งาน Atlas ผ่านเว็บ (ภาษาไทย)](guides/web-user-guide-th.md) — เริ่มระบบ,
-  Fleet, Command, Jobs, Workflows, Monitor, Audit และการแก้ปัญหา
+  Fleet, Jobs, Monitor, Audit, Usage, Accounts และการแก้ปัญหา (เฉพาะ ops console
+  ที่ฝังมากับ Atlas)
 - [คู่มือใช้งานผ่านเว็บ (English)](guides/web-user-guide-en.md) — คู่มือฉบับภาษาอังกฤษ
+- [คู่มือใช้งานผ่านเว็บของ flow-designer (ไทย/English)](https://github.com/kaebmoo/flow-designer/blob/main/docs/guides/web-user-guide-th.md) —
+  frontend เต็มรูปแบบ: สร้าง/แก้ไข workflow, approvals, triggers, deliveries และ
+  artifact ledger ทั้งระบบ (คนละ repository — [flow-designer](https://github.com/kaebmoo/flow-designer))
 - [ตัวอย่าง Workflow](workflow-examples.md) — graph, condition, join, gate, manager,
   trigger, artifact และตัวอย่าง API
 - [สคริปต์ Demo](demo-script.md) — ลำดับสำหรับสาธิตระบบ
@@ -18,8 +22,13 @@
 
 ## User guides
 
-- [Atlas Web User Guide — Thai](guides/web-user-guide-th.md)
+- [Atlas Web User Guide — Thai](guides/web-user-guide-th.md) — the embedded ops
+  console only
 - [Atlas Web User Guide — English](guides/web-user-guide-en.md)
+- [flow-designer Web User Guide (English/Thai)](https://github.com/kaebmoo/flow-designer/blob/main/docs/guides/web-user-guide-en.md) —
+  the full operator frontend: workflow authoring, approvals, triggers,
+  deliveries, and the cross-run artifact ledger (separate repository —
+  [flow-designer](https://github.com/kaebmoo/flow-designer))
 - [Workflow Examples](workflow-examples.md)
 - [Demo Script](demo-script.md)
 - [Booth AI Party 2026 Talk Script (English)](booth-ai-party-2026-en.md) — booth demo
