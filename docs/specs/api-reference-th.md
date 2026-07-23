@@ -209,6 +209,7 @@ bundle ที่ portable — ตั้งค่าใหม่ต่อ instanc
 | POST | `/api/workflow-runs/{run_id}/deliver` | ส่งผลลัพธ์ที่เซ็นแล้วไปยัง `_meta.reply.callback_url` ด้วยตนเอง (`202`) |
 | GET | `/api/workflow-runs/{run_id}/artifacts` | artifacts ของ run |
 | POST | `/api/workflow-runs/{run_id}/files?key=...` | upload binary file artifact |
+| GET | `/api/artifacts` | list ข้าม run/job ทั้งหมดแบบ window ใหม่สุดก่อน (`?limit&run_id&job_id&key&kind`; response มี `total`) |
 | POST | `/api/artifacts` | สร้าง inline artifact |
 | GET | `/api/artifacts/{artifact_id}` | artifact detail |
 | GET | `/api/artifacts/{artifact_id}/content` | download `file_ref` |
@@ -621,6 +622,19 @@ side effect ซ้ำอย่างชัดเจน:
 ```
 
 ## 9. Artifacts และ Files
+
+### Global listing
+
+```bash
+curl -sS "$BASE_URL/api/artifacts?limit=50&kind=file_ref"
+```
+
+window แสดงผลแบบใหม่สุดก่อนข้ามทุก run/job พร้อม filter `run_id`, `job_id`,
+`key`, `kind` (ใส่หรือไม่ใส่ก็ได้) response เป็น
+`{"artifacts": [...], "total": N, "limit": M}` — `total` นับ artifact ทั้งหมด
+ที่ตรง filter เพื่อให้ UI บอกได้ตรง ๆ ว่า "แสดงล่าสุด M จาก N"
+ผู้ใช้งานที่ต้องเห็นครบทุกตัวแบบไม่ถูกตัด ให้ใช้
+`/api/workflow-runs/{run_id}/artifacts` และ `/api/jobs/{job_id}/artifacts` เช่นเดิม
 
 ### Inline artifact
 

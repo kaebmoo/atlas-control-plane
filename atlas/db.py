@@ -1966,6 +1966,37 @@ class Database:
             rows = conn.execute(sql, params).fetchall()
         return [row_to_dict(row) or {} for row in rows]
 
+    def count_artifacts(
+        self,
+        run_id: str | None = None,
+        job_id: str | None = None,
+        key: str | None = None,
+        kind: str | None = None,
+    ) -> int:
+        """Total matching artifacts for the same filters as `list_artifacts`, so a windowed
+        listing can say "showing latest N of TOTAL" instead of implying the window is
+        everything."""
+        where = []
+        params: list[Any] = []
+        if run_id:
+            where.append("run_id = ?")
+            params.append(run_id)
+        if job_id:
+            where.append("job_id = ?")
+            params.append(job_id)
+        if key:
+            where.append("key = ?")
+            params.append(key)
+        if kind:
+            where.append("kind = ?")
+            params.append(kind)
+        sql = "SELECT COUNT(*) FROM artifacts"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self.connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return int(row[0]) if row else 0
+
     def iter_artifacts(
         self,
         run_id: str | None = None,

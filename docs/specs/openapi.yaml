@@ -1275,6 +1275,36 @@ paths:
         default: {$ref: '#/components/responses/Error'}
 
   /api/artifacts:
+    get:
+      tags: [Artifacts]
+      operationId: listArtifacts
+      summary: List artifacts across all runs and jobs (windowed)
+      description: >-
+        Newest-first display window over every artifact Atlas holds, with optional
+        filters. The response carries `total` (the count matching the filters) so a
+        client can render "latest N of TOTAL" instead of implying the window is
+        complete. Consumers that must never be truncated keep using the run-scoped
+        and job-scoped artifact routes, which return the full set.
+      parameters:
+        - {$ref: '#/components/parameters/Limit100'}
+        - {name: run_id, in: query, schema: {type: string}}
+        - {name: job_id, in: query, schema: {type: string}}
+        - {name: key, in: query, schema: {type: string}}
+        - name: kind
+          in: query
+          schema: {type: string, enum: [text, json, markdown, file_ref, summary, decision]}
+      responses:
+        '200':
+          description: Windowed artifact listing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifacts: {type: array, items: {$ref: '#/components/schemas/Artifact'}}
+                  total: {type: integer, description: Count of artifacts matching the filters}
+                  limit: {type: integer, description: The effective (clamped) window size}
+        default: {$ref: '#/components/responses/Error'}
     post:
       tags: [Artifacts]
       operationId: createArtifact
