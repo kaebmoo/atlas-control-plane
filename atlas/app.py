@@ -94,6 +94,12 @@ def _parse_limit(query: dict[str, list[str]], default: int = 100) -> int:
     return max(1, min(value, _LIMIT_CAP))
 
 
+def _query_scalar(query: dict[str, list[str]], name: str) -> str | None:
+    """First value of a query param, with an empty value normalized to None."""
+    values = query.get(name)
+    return values[0] if values and values[0] else None
+
+
 class AtlasRuntime:
     def __init__(self, config: Config):
         self.config = config
@@ -774,6 +780,29 @@ class AtlasHandler(BaseHTTPRequestHandler):
             artifact = self._upload_workflow_file(parts[2], query)
             runtime.triggers.artifact_created(artifact)
             self._json({"artifact": _public_artifact(artifact)}, HTTPStatus.CREATED)
+            return
+
+        if parts == ["api", "artifacts"] and method == "GET":
+            # Global artifact listing for dashboard surfaces: a windowed newest-first read
+            # (list_artifacts) plus the matching total, so a client can render "latest N of
+            # TOTAL" truthfully. Complete-set consumers keep using the run/job-scoped
+            # iter_artifacts routes; this one is explicitly a display window.
+            limit = _parse_limit(query)
+            run_id = _query_scalar(query, "run_id")
+            job_id = _query_scalar(query, "job_id")
+            key = _query_scalar(query, "key")
+            kind = _query_scalar(query, "kind")
+            if kind is not None and kind not in ARTIFACT_KINDS:
+                raise ValueError(f"unsupported artifact kind: {kind}")
+            artifacts = runtime.db.list_artifacts(limit=limit, run_id=run_id, job_id=job_id, key=key, kind=kind)
+            total = runtime.db.count_artifacts(run_id=run_id, job_id=job_id, key=key, kind=kind)
+            self._json(
+                {
+                    "artifacts": [_public_artifact(artifact) for artifact in artifacts],
+                    "total": total,
+                    "limit": limit,
+                }
+            )
             return
 
         if parts == ["api", "artifacts"] and method == "POST":

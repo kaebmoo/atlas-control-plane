@@ -388,6 +388,23 @@ def check_milestones_3_and_4(base_url: str, workflow_id: str) -> None:
     assert fetched["content"] == {"total": 3}
     artifacts = request(base_url, "GET", f"/api/workflow-runs/{source_run['id']}/artifacts")["artifacts"]
     assert artifacts[0]["content"] == {"total": 3}
+    # Global listing (GET /api/artifacts): windowed newest-first + a truthful total. Assertions
+    # stay per-response (membership, filter correctness, window size) — never "is the newest"
+    # — because triggered runs may be creating artifacts concurrently with these reads.
+    listing = request(base_url, "GET", "/api/artifacts")
+    assert listing["total"] >= 1 and listing["limit"] == 100
+    assert created["id"] in {artifact["id"] for artifact in listing["artifacts"]}
+    filtered = request(base_url, "GET", f"/api/artifacts?run_id={source_run['id']}&kind=json&key=invoice")
+    assert created["id"] in {artifact["id"] for artifact in filtered["artifacts"]}
+    assert all(
+        artifact["run_id"] == source_run["id"] and artifact["kind"] == "json" and artifact["key"] == "invoice"
+        for artifact in filtered["artifacts"]
+    )
+    assert filtered["total"] == len(filtered["artifacts"])  # filters narrow below the window
+    windowed = request(base_url, "GET", "/api/artifacts?limit=1")
+    assert len(windowed["artifacts"]) == 1 and windowed["limit"] == 1 and windowed["total"] >= 1
+    bad_list_kind = request_error(base_url, "GET", "/api/artifacts?kind=binary")
+    assert "unsupported artifact kind" in bad_list_kind["error"]
     artifact_event = wait_for_trigger_event(base_url, artifact_trigger["id"], "started")
     assert artifact_event["payload"]["artifact_id"] == created["id"]
     assert artifact_event["payload"]["key"] == "invoice"
