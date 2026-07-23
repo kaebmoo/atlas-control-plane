@@ -405,11 +405,8 @@ def check_milestones_3_and_4(base_url: str, workflow_id: str) -> None:
     assert len(windowed["artifacts"]) == 1 and windowed["limit"] == 1 and windowed["total"] >= 1
     bad_list_kind = request_error(base_url, "GET", "/api/artifacts?kind=binary")
     assert "unsupported artifact kind" in bad_list_kind["error"]
-    # Backward-compatible default: legacy list clients still receive content.
-    # Metadata-only guarantee is opt-in: the RAW metadata response must not contain
-    # the payload text, and parsed rows must not carry a top-level `content` property.
-    # The metadata object deliberately has its own "content" key to keep this check from
-    # relying on a brittle raw substring match.
+    # Backward-compatible default and the selector contract are table-driven so every
+    # supported spelling is exercised against a row carrying a unique payload marker.
     marker = "SECRET-LISTING-MARKER-9f1c"
     marked = request(
         base_url,
@@ -423,15 +420,43 @@ def check_milestones_3_and_4(base_url: str, workflow_id: str) -> None:
             "metadata": {"content": "metadata-key-is-not-the-payload"},
         },
     )["artifact"]
-    default_listing = request(base_url, "GET", f"/api/artifacts?run_id={source_run['id']}")
-    default_row = next(artifact for artifact in default_listing["artifacts"] if artifact["id"] == marked["id"])
-    assert default_row["content"] == marker
+    selector_cases = [
+        ("default", "", True),
+        ("include_content=true", "include_content=true", True),
+        ("include_content=false", "include_content=false", False),
+        ("view=full", "view=full", True),
+        ("view=metadata", "view=metadata", False),
+        ("matching full selectors", "include_content=true&view=full", True),
+        ("matching metadata selectors", "include_content=false&view=metadata", False),
+    ]
+    for label, selectors, has_content in selector_cases:
+        suffix = f"&{selectors}" if selectors else ""
+        listing = request(base_url, "GET", f"/api/artifacts?run_id={source_run['id']}{suffix}")
+        row = next((artifact for artifact in listing["artifacts"] if artifact["id"] == marked["id"]), None)
+        assert row is not None, f"{label} selector omitted the marked row"
+        if has_content:
+            assert row["content"] == marker, label
+        else:
+            assert "content" not in row, label
+
+    for label, selectors in [
+        ("metadata view with include_content=true", "include_content=true&view=metadata"),
+        ("full view with include_content=false", "include_content=false&view=full"),
+    ]:
+        conflict = request_error(base_url, "GET", f"/api/artifacts?{selectors}")
+        assert "conflicts" in conflict["error"], label
+
+    for label, selectors in [
+        ("invalid include_content", "include_content=maybe"),
+        ("invalid view", "view=compact"),
+    ]:
+        invalid_selector = request_error(base_url, "GET", f"/api/artifacts?{selectors}")
+        assert "must be" in invalid_selector["error"], label
+
     raw_listing = request_binary(base_url, "GET", f"/api/artifacts?run_id={source_run['id']}&include_content=false")
     assert marked["id"] in {artifact["id"] for artifact in raw_listing["json"]["artifacts"]}
     assert marker.encode() not in raw_listing["body"], "metadata listing must not serialize artifact content"
     assert all("content" not in artifact for artifact in raw_listing["json"]["artifacts"])
-    view_listing = request(base_url, "GET", f"/api/artifacts?run_id={source_run['id']}&view=metadata")
-    assert all("content" not in artifact for artifact in view_listing["artifacts"])
     assert request(base_url, "GET", f"/api/artifacts/{marked['id']}")["artifact"]["content"] == marker
     artifact_event = wait_for_trigger_event(base_url, artifact_trigger["id"], "started")
     assert artifact_event["payload"]["artifact_id"] == created["id"]

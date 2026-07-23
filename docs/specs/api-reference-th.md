@@ -642,6 +642,9 @@ response เป็น `{"artifacts": [...], "total": N, "limit": M}` — `total`
 ทั้งหมดที่ตรง filter โดยคำนวณจาก database snapshot เดียวกับแถวที่คืน เพื่อให้ UI
 บอกได้ตรง ๆ ว่า "แสดงล่าสุด M จาก N" ผู้ใช้งานที่ต้องเห็นครบทุกตัวแบบไม่ถูกตัด ให้ใช้
 `/api/workflow-runs/{run_id}/artifacts` และ `/api/jobs/{job_id}/artifacts` เช่นเดิม
+`include_content` รับเฉพาะค่า boolean เท่านั้น ส่วน `view` รับเฉพาะ `full` หรือ
+`metadata`; หากส่ง selector ทั้งสองตัวต้องสอดคล้องกัน (`true` + `full` หรือ
+`false` + `metadata`) ค่าไม่ถูกต้องหรือขัดแย้งกันจะตอบ `400`
 
 ### Inline artifact
 

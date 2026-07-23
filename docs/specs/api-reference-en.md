@@ -674,6 +674,9 @@ the rows, so a UI can say "showing latest M of N" instead of pretending the
 window is complete. Consumers that must see the full set (nothing truncated)
 keep using `/api/workflow-runs/{run_id}/artifacts` and
 `/api/jobs/{job_id}/artifacts`.
+`include_content` accepts only boolean values. `view` accepts only `full` or
+`metadata`; when both selectors are supplied they must agree (`true` + `full`,
+or `false` + `metadata`). Invalid or conflicting selector values return `400`.
 
 ### Inline artifact
 

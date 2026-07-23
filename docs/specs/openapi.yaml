@@ -1302,11 +1302,14 @@ paths:
         - name: include_content
           in: query
           schema: {type: boolean, default: true}
-          description: Set to false for metadata-only rows.
+          description: Set to false for metadata-only rows. If view is also supplied, it must be metadata.
         - name: view
           in: query
           schema: {type: string, enum: [full, metadata], default: full}
-          description: Alternative opt-in for metadata-only rows.
+          description: >-
+            Alternative selector: full includes content and metadata omits it. If
+            include_content is also supplied, the selectors must agree; conflicting
+            or invalid values return 400.
       responses:
         '200':
           description: Windowed artifact listing
