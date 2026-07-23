@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -117,6 +119,50 @@ def main() -> None:
 
         artifact = db.create_artifact({"run_id": run["id"], "key": "notes", "content": "ok"})
         assert db.list_artifacts(run_id=run["id"])[0]["id"] == artifact["id"]
+
+        # metadata-only listing: the query names its columns, so rows must not carry a
+        # content key at all (mutation: switch it back to SELECT * -> this goes red).
+        meta_rows, meta_total = db.list_artifacts_meta(run_id=run["id"])
+        assert [row["id"] for row in meta_rows] == [artifact["id"]] and meta_total == 1
+        assert all("content" not in row for row in meta_rows), "meta listing must not fetch the content column"
+        assert meta_rows[0]["key"] == "notes" and meta_rows[0]["metadata"] == {}
+
+        # rows and total must come from ONE snapshot: commit an out-of-band insert between
+        # the window SELECT and the COUNT (hooked at the COUNT statement) and the pair must
+        # still agree — the deferred read transaction pins the snapshot at the first SELECT.
+        real_connect = db.connect
+
+        class _CountHookConn:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, sql, *args):
+                if sql.lstrip().startswith("SELECT COUNT(*) FROM artifacts"):
+                    side = sqlite3.connect(db.path, timeout=30)
+                    side.execute(
+                        "INSERT INTO artifacts (id, run_id, job_id, key, kind, content, metadata, created_at, updated_at)"
+                        " VALUES ('art-snapshot-race', ?, NULL, 'race', 'text', 'x', '{}',"
+                        " '2099-01-01T00:00:00+00:00', '2099-01-01T00:00:00+00:00')",
+                        (run["id"],),
+                    )
+                    side.commit()
+                    side.close()
+                return self._conn.execute(sql, *args)
+
+        @contextmanager
+        def hooked_connect():
+            with real_connect() as conn:
+                yield _CountHookConn(conn)
+
+        db.connect = hooked_connect  # type: ignore[method-assign]
+        try:
+            raced_rows, raced_total = db.list_artifacts_meta(run_id=run["id"])
+        finally:
+            db.connect = real_connect  # type: ignore[method-assign]
+        assert len(raced_rows) == raced_total == 1, (
+            f"list/total must share one snapshot: rows={len(raced_rows)} total={raced_total}"
+        )
+        assert db.list_artifacts_meta(run_id=run["id"])[1] == 2, "the raced insert must be visible afterwards"
 
         # session bindings: a workspace-less binding (workspace_id=None) must upsert in
         # place. SQLite treats NULL as distinct in a UNIQUE index, so without the IS NULL

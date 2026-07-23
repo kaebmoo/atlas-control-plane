@@ -209,7 +209,7 @@ bundle ที่ portable — ตั้งค่าใหม่ต่อ instanc
 | POST | `/api/workflow-runs/{run_id}/deliver` | ส่งผลลัพธ์ที่เซ็นแล้วไปยัง `_meta.reply.callback_url` ด้วยตนเอง (`202`) |
 | GET | `/api/workflow-runs/{run_id}/artifacts` | artifacts ของ run |
 | POST | `/api/workflow-runs/{run_id}/files?key=...` | upload binary file artifact |
-| GET | `/api/artifacts` | list ข้าม run/job ทั้งหมดแบบ window ใหม่สุดก่อน (`?limit&run_id&job_id&key&kind`; response มี `total`) |
+| GET | `/api/artifacts` | list ข้าม run/job ทั้งหมดแบบ window ใหม่สุดก่อน (`?limit&run_id&job_id&key&kind`; โดยปริยายแถวมี `content`; เพิ่ม `include_content=false` หรือ `view=metadata` เพื่อเอาเฉพาะ metadata; response มี `total`) |
 | POST | `/api/artifacts` | สร้าง inline artifact |
 | GET | `/api/artifacts/{artifact_id}` | artifact detail |
 | GET | `/api/artifacts/{artifact_id}/content` | download `file_ref` |
@@ -627,14 +627,24 @@ side effect ซ้ำอย่างชัดเจน:
 
 ```bash
 curl -sS "$BASE_URL/api/artifacts?limit=50&kind=file_ref"
+curl -sS "$BASE_URL/api/artifacts?limit=50&kind=file_ref&include_content=false"
 ```
 
 window แสดงผลแบบใหม่สุดก่อนข้ามทุก run/job พร้อม filter `run_id`, `job_id`,
-`key`, `kind` (ใส่หรือไม่ใส่ก็ได้) response เป็น
-`{"artifacts": [...], "total": N, "limit": M}` — `total` นับ artifact ทั้งหมด
-ที่ตรง filter เพื่อให้ UI บอกได้ตรง ๆ ว่า "แสดงล่าสุด M จาก N"
-ผู้ใช้งานที่ต้องเห็นครบทุกตัวแบบไม่ถูกตัด ให้ใช้
+`key`, `kind` (ใส่หรือไม่ใส่ก็ได้) โดยปริยายแถวยังรักษา shape เดิมของ `Artifact`
+และมี `content` อยู่ สำหรับ dashboard list ที่ต้องการเฉพาะ metadata ให้เพิ่ม
+`include_content=false` (หรือ `view=metadata`): แถวจะไม่มี top-level property
+`content` และ server ไม่อ่าน/ไม่ serialize inline content สำหรับ list request นั้น
+(content ไม่มี size cap การรวมไว้จะเปิดช่องให้ materialize payload ขนาดใหญ่ได้)
+ต้องการ inline content แบบ on-demand ให้ใช้ `GET /api/artifacts/{artifact_id}`
+และต้องการ bytes ของ `file_ref` ให้ใช้ `GET /api/artifacts/{artifact_id}/content`
+response เป็น `{"artifacts": [...], "total": N, "limit": M}` — `total` นับ artifact
+ทั้งหมดที่ตรง filter โดยคำนวณจาก database snapshot เดียวกับแถวที่คืน เพื่อให้ UI
+บอกได้ตรง ๆ ว่า "แสดงล่าสุด M จาก N" ผู้ใช้งานที่ต้องเห็นครบทุกตัวแบบไม่ถูกตัด ให้ใช้
 `/api/workflow-runs/{run_id}/artifacts` และ `/api/jobs/{job_id}/artifacts` เช่นเดิม
+`include_content` รับเฉพาะค่า boolean เท่านั้น ส่วน `view` รับเฉพาะ `full` หรือ
+`metadata`; หากส่ง selector ทั้งสองตัวต้องสอดคล้องกัน (`true` + `full` หรือ
+`false` + `metadata`) ค่าไม่ถูกต้องหรือขัดแย้งกันจะตอบ `400`
 
 ### Inline artifact
 

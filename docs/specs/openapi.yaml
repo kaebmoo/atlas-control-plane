@@ -1281,10 +1281,16 @@ paths:
       summary: List artifacts across all runs and jobs (windowed)
       description: >-
         Newest-first display window over every artifact Atlas holds, with optional
-        filters. The response carries `total` (the count matching the filters) so a
-        client can render "latest N of TOTAL" instead of implying the window is
-        complete. Consumers that must never be truncated keep using the run-scoped
-        and job-scoped artifact routes, which return the full set.
+        filters. By default rows preserve the legacy `Artifact` shape and include
+        `content`. Clients that only need metadata can opt in with
+        `include_content=false` or `view=metadata`; then rows use `ArtifactMeta`,
+        the `content` property is absent, and the server never reads or serializes
+        inline content for the list request. Fetch a single artifact for inline
+        content, or its `/content` route for file_ref bytes. The response carries
+        `total` (the count matching the filters, from the same database snapshot as
+        the rows) so a client can render "latest N of TOTAL" instead of implying the
+        window is complete. Consumers that must never be truncated keep using the
+        run-scoped and job-scoped artifact routes, which return the full set.
       parameters:
         - {$ref: '#/components/parameters/Limit100'}
         - {name: run_id, in: query, schema: {type: string}}
@@ -1293,6 +1299,17 @@ paths:
         - name: kind
           in: query
           schema: {type: string, enum: [text, json, markdown, file_ref, summary, decision]}
+        - name: include_content
+          in: query
+          schema: {type: boolean, default: true}
+          description: Set to false for metadata-only rows. If view is also supplied, it must be metadata.
+        - name: view
+          in: query
+          schema: {type: string, enum: [full, metadata], default: full}
+          description: >-
+            Alternative selector: full includes content and metadata omits it. If
+            include_content is also supplied, the selectors must agree; conflicting
+            or invalid values return 400.
       responses:
         '200':
           description: Windowed artifact listing
@@ -1301,7 +1318,12 @@ paths:
               schema:
                 type: object
                 properties:
-                  artifacts: {type: array, items: {$ref: '#/components/schemas/Artifact'}}
+                  artifacts:
+                    type: array
+                    items:
+                      oneOf:
+                        - {$ref: '#/components/schemas/Artifact'}
+                        - {$ref: '#/components/schemas/ArtifactMeta'}
                   total: {type: integer, description: Count of artifacts matching the filters}
                   limit: {type: integer, description: The effective (clamped) window size}
         default: {$ref: '#/components/responses/Error'}
@@ -2256,6 +2278,26 @@ components:
         key: {type: string}
         kind: {enum: [text, json, markdown, file_ref, summary, decision]}
         content: {}
+        metadata: {type: object, additionalProperties: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+      additionalProperties: true
+
+    ArtifactMeta:
+      type: object
+      description: >-
+        Artifact row without its content: what the metadata-only global listing
+        opt-in returns. `content` is intentionally absent (not null) — the server
+        never reads it for a metadata-only list request.
+      not:
+        required: [content]
+      required: [id, key, kind, metadata]
+      properties:
+        id: {type: string}
+        run_id: {type: [string, 'null']}
+        job_id: {type: [string, 'null']}
+        key: {type: string}
+        kind: {enum: [text, json, markdown, file_ref, summary, decision]}
         metadata: {type: object, additionalProperties: true}
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}

@@ -100,6 +100,32 @@ def _query_scalar(query: dict[str, list[str]], name: str) -> str | None:
     return values[0] if values and values[0] else None
 
 
+def _query_bool(query: dict[str, list[str]], name: str) -> bool | None:
+    value = _query_scalar(query, name)
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
+def _artifact_listing_metadata_only(query: dict[str, list[str]]) -> bool:
+    view = _query_scalar(query, "view")
+    include_content = _query_bool(query, "include_content")
+    if view is not None:
+        if view not in {"full", "metadata"}:
+            raise ValueError("view must be one of: full, metadata")
+        if view == "metadata" and include_content is True:
+            raise ValueError("view=metadata conflicts with include_content=true")
+        if view == "full" and include_content is False:
+            raise ValueError("view=full conflicts with include_content=false")
+        return view == "metadata"
+    return include_content is False
+
+
 class AtlasRuntime:
     def __init__(self, config: Config):
         self.config = config
@@ -783,10 +809,10 @@ class AtlasHandler(BaseHTTPRequestHandler):
             return
 
         if parts == ["api", "artifacts"] and method == "GET":
-            # Global artifact listing for dashboard surfaces: a windowed newest-first read
-            # (list_artifacts) plus the matching total, so a client can render "latest N of
-            # TOTAL" truthfully. Complete-set consumers keep using the run/job-scoped
-            # iter_artifacts routes; this one is explicitly a display window.
+            # Backward-compatible default: global list rows still carry `content`.
+            # Dashboard surfaces that only need metadata can opt in with
+            # ?include_content=false (or ?view=metadata), which uses a SELECT that never
+            # touches the unbounded content column.
             limit = _parse_limit(query)
             run_id = _query_scalar(query, "run_id")
             job_id = _query_scalar(query, "job_id")
@@ -794,15 +820,24 @@ class AtlasHandler(BaseHTTPRequestHandler):
             kind = _query_scalar(query, "kind")
             if kind is not None and kind not in ARTIFACT_KINDS:
                 raise ValueError(f"unsupported artifact kind: {kind}")
-            artifacts = runtime.db.list_artifacts(limit=limit, run_id=run_id, job_id=job_id, key=key, kind=kind)
-            total = runtime.db.count_artifacts(run_id=run_id, job_id=job_id, key=key, kind=kind)
-            self._json(
-                {
-                    "artifacts": [_public_artifact(artifact) for artifact in artifacts],
-                    "total": total,
-                    "limit": limit,
-                }
-            )
+            if _artifact_listing_metadata_only(query):
+                artifacts, total = runtime.db.list_artifacts_meta(
+                    limit=limit,
+                    run_id=run_id,
+                    job_id=job_id,
+                    key=key,
+                    kind=kind,
+                )
+            else:
+                artifacts, total = runtime.db.list_artifacts_page(
+                    limit=limit,
+                    run_id=run_id,
+                    job_id=job_id,
+                    key=key,
+                    kind=kind,
+                )
+                artifacts = [_public_artifact(artifact) for artifact in artifacts]
+            self._json({"artifacts": artifacts, "total": total, "limit": limit})
             return
 
         if parts == ["api", "artifacts"] and method == "POST":

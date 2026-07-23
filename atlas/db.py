@@ -1966,36 +1966,66 @@ class Database:
             rows = conn.execute(sql, params).fetchall()
         return [row_to_dict(row) or {} for row in rows]
 
-    def count_artifacts(
+    def list_artifacts_page(
         self,
+        limit: int = 100,
         run_id: str | None = None,
         job_id: str | None = None,
         key: str | None = None,
         kind: str | None = None,
-    ) -> int:
-        """Total matching artifacts for the same filters as `list_artifacts`, so a windowed
-        listing can say "showing latest N of TOTAL" instead of implying the window is
-        everything."""
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Full-content windowed listing plus the matching total for the legacy list shape."""
         where = []
         params: list[Any] = []
-        if run_id:
-            where.append("run_id = ?")
-            params.append(run_id)
-        if job_id:
-            where.append("job_id = ?")
-            params.append(job_id)
-        if key:
-            where.append("key = ?")
-            params.append(key)
-        if kind:
-            where.append("kind = ?")
-            params.append(kind)
-        sql = "SELECT COUNT(*) FROM artifacts"
-        if where:
-            sql += " WHERE " + " AND ".join(where)
+        for column, value in (("run_id", run_id), ("job_id", job_id), ("key", key), ("kind", kind)):
+            if value:
+                where.append(f"{column} = ?")
+                params.append(value)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
         with self.connect() as conn:
-            row = conn.execute(sql, params).fetchone()
-        return int(row[0]) if row else 0
+            conn.execute("BEGIN")
+            rows = conn.execute(
+                f"SELECT * FROM artifacts{clause}"  # nosec B608
+                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                [*params, limit],
+            ).fetchall()
+            total_row = conn.execute(f"SELECT COUNT(*) FROM artifacts{clause}", params).fetchone()  # nosec B608
+        return [row_to_dict(row) or {} for row in rows], int(total_row[0])
+
+    # Every artifact column EXCEPT content: the global display window must never read,
+    # decode, or serialize inline payloads (content has no size cap, so a single SELECT *
+    # row can be arbitrarily large).
+    _ARTIFACT_META_COLUMNS = "id, run_id, job_id, key, kind, metadata, created_at, updated_at"
+
+    def list_artifacts_meta(
+        self,
+        limit: int = 100,
+        run_id: str | None = None,
+        job_id: str | None = None,
+        key: str | None = None,
+        kind: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Metadata-only windowed listing plus the matching total, so a client can render
+        "latest N of TOTAL" truthfully. Both reads run inside ONE deferred transaction:
+        under WAL the snapshot is fixed at the first SELECT, so a concurrent insert or
+        purge can never make the rows and the total disagree."""
+        where = []
+        params: list[Any] = []
+        for column, value in (("run_id", run_id), ("job_id", job_id), ("key", key), ("kind", kind)):
+            if value:
+                where.append(f"{column} = ?")
+                params.append(value)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        # WHERE pieces are fixed literals chosen above; every value binds via params.
+        with self.connect() as conn:
+            conn.execute("BEGIN")
+            rows = conn.execute(
+                f"SELECT {self._ARTIFACT_META_COLUMNS} FROM artifacts{clause}"  # nosec B608
+                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                [*params, limit],
+            ).fetchall()
+            total_row = conn.execute(f"SELECT COUNT(*) FROM artifacts{clause}", params).fetchone()  # nosec B608
+        return [row_to_dict(row) or {} for row in rows], int(total_row[0])
 
     def iter_artifacts(
         self,
