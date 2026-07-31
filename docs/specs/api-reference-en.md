@@ -534,6 +534,75 @@ For a visual editor, send the version the client loaded as `expected_version`
 version atomically; a stale concurrent save returns `409`, so the editor can
 refresh, present a merge choice, and avoid silently overwriting another user.
 
+### Input/output interface (v1)
+
+`interface` is optional and nullable — see
+[ADR 0002](adr/0002-workflow-interface-contract.md) for the full contract and
+[Workflow Definition Schema](workflow-definition.schema.json) (`$defs.workflowInterface`)
+for the exact shape:
+
+```json
+{
+  "interface": {
+    "schema_version": 1,
+    "input_schema": {
+      "type": "object",
+      "properties": {"topic": {"type": "string", "minLength": 1}},
+      "required": ["topic"],
+      "additionalProperties": false
+    },
+    "sample_input": {"topic": "AI"},
+    "outputs": [{"key": "notes", "kind": "text", "title": "Notes"}],
+    "primary_output": "notes"
+  }
+}
+```
+
+- `input_schema` is a **bounded profile**, not full JSON Schema: `type`,
+  `properties`, `required`, boolean `additionalProperties`, `items`, `enum`,
+  `const`, `minLength`/`maxLength`/`minimum`/`maximum`/`minItems`/`maxItems`,
+  and annotation-only `title`/`description`/`default`/`examples`. No `$ref`,
+  combinators (`oneOf`/`anyOf`/`allOf`/`not`/`if`-`then`-`else`), `pattern`, or
+  `format` — every unknown or unsupported keyword is rejected, nothing is
+  silently ignored. The root must declare exactly `"type": "object"`. Bounds:
+  depth ≤ 16, ≤ 256 total declared properties, ≤ 256 entries per
+  `required`/`enum` list, `title` ≤ 256 / `description` ≤ 2048 Unicode code
+  points. Serialized `interface` and `sample_input` are each capped at 64 KiB.
+- **Business input** is the run's complete input minus exactly the two
+  reserved top-level keys (`_meta`, `_trigger_chain`) — never every
+  underscore-prefixed key. A run's complete effective input (including
+  reserved keys, after any `default_reply` merge) is capped at 1 MiB.
+- `sample_input`, when present, must conform to `input_schema` and must be
+  **synthetic** — documentation/test data, never real secrets or personal
+  data, and never silently merged into a production run.
+- `outputs[].key` matches `^[A-Za-z_][A-Za-z0-9_]{0,127}$`, is produced by
+  exactly one worker node, and `kind` (`text`/`json`) matches that node's
+  `output_format`. All outputs are **possible, not guaranteed** — a graph can
+  branch, so an omitted output does not fail an otherwise successful run, and
+  every artifact (declared or not) still flows through the existing polling
+  and webhook shapes. `primary_output`, when present, names one `outputs[]`
+  key as a client hint — it creates no execution dependency.
+- Atlas cross-checks a saved interface against its graph: every `{input.*}`
+  path referenced anywhere must be representable under the schema (a closed
+  schema cannot make a referenced path impossible), and every path the graph's
+  **start** node's prompt references must be declared and required at every
+  object segment (each intermediate segment exactly `"type": "object"`, never
+  nullable or a mixed union) — this also applies to a manager start node, now
+  that manager prompts render `{input.*}`/`{artifact.*}`/`{run.*}`/`{node.*}`
+  the same way worker prompts do (previously a manager's authored prompt was
+  never substituted — see ADR 0002's prerequisite fix). Downstream/conditional
+  paths may stay optional.
+- `PUT` follows the `default_reply` pattern: omitting `interface` preserves
+  the stored value, an explicit `null` clears it, an object replaces it after
+  validation. If `graph` changes while `interface` is omitted, the **stored**
+  interface is re-validated against the merged graph before the write lands.
+  Changing only `interface` still goes through `expected_version` and
+  increments the definition's version exactly once.
+- `POST /api/workflows/{id}/validate` additively accepts `interface` in the
+  body (merged like `graph`/`policy`); when omitted, it validates the stored
+  interface against the candidate graph. `default_reply` remains excluded
+  from this endpoint, unchanged.
+
 ### File handoff between nodes (`push_files`, T9b)
 
 An edge can hand previously-collected files (see `collect_files`, T9a) to the
@@ -619,6 +688,23 @@ curl -sS -X POST "$BASE_URL/api/workflow-runs" \
 
 The API returns `202`. Run states are `running`, `paused`, `waiting_for_human`,
 `recovery_required`, `succeeded`, `failed`, and `cancelled`.
+
+When the target workflow has an [interface](#7-workflow-definitions-and-ai-builder),
+this same call validates `input` before creating any run: the reserved-key
+projection (`_meta`/`_trigger_chain` excluded) is checked against
+`interface.input_schema`, and the complete effective input (after any
+`default_reply` merge) must stay within 1 MiB. Invalid input returns `400`
+with no run, runtime node, event, job, or audit created. An optional
+`expected_workflow_version` (positive integer) is compared against the same
+definition row; a mismatch returns `409` with no run created. Both checks
+run before business-schema validation — an invalid `_meta` envelope is `400`
+regardless of `expected_workflow_version`, and once `_meta` is valid a stale
+version is `409` even if `input` would also have failed business validation.
+A workflow without an interface, or a request that omits
+`expected_workflow_version`, keeps exact legacy behavior. Every
+definition-backed run's response includes `interface_snapshot` and
+`workflow_version_snapshot` — the values the run actually started with,
+immune to a later edit or delete of the definition.
 
 Filter the list:
 
@@ -790,6 +876,19 @@ the three internal trigger types. Reusing the same `dedupe_key` returns an
 PUT is partial. When type/config changes, the server recalculates
 `next_fire_at`. Common trigger-event states are `received`, `started`, `ignored`,
 and `failed`.
+
+When the target workflow has an interface, `fire` passes `payload` through
+the same shared validator `POST /api/workflow-runs` uses. An **object**
+payload that fails `_meta`/business-schema validation still returns `202`:
+the trigger event is recorded `failed` with a path-aware error, `run` is
+`null`, and no run or runtime work is created — existing dedupe-claim and
+received/failed bookkeeping is unchanged. A **non-object** `payload` keeps the
+separate existing `400`, before any trigger bookkeeping (no event is
+recorded). v1 does not add a trigger-level `expected_workflow_version` pin —
+deferred (ADR 0002). A fixed-payload trigger (schedule, or an internal event
+trigger) that can never satisfy an interface records a `failed` event, starts
+no run, and still advances `next_fire_at`/`last_fired_at` normally rather than
+wedging the schedule slot.
 
 ## 12. Audit
 

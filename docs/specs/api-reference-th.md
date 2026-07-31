@@ -511,6 +511,69 @@ inherit มัน — ถ้า allowlist เปลี่ยนจน default �
 save ที่มีคนแก้แทรกจะได้ `409` เพื่อให้ editor refresh, เสนอทางเลือก merge และไม่เขียนทับ
 งานของผู้อื่นแบบเงียบ ๆ
 
+### Input/output interface (v1)
+
+`interface` เป็น optional และ nullable — ดู
+[ADR 0002](adr/0002-workflow-interface-contract.md) สำหรับ contract แบบเต็ม และ
+[Workflow Definition Schema](workflow-definition.schema.json) (`$defs.workflowInterface`)
+สำหรับรูปแบบที่แน่นอน:
+
+```json
+{
+  "interface": {
+    "schema_version": 1,
+    "input_schema": {
+      "type": "object",
+      "properties": {"topic": {"type": "string", "minLength": 1}},
+      "required": ["topic"],
+      "additionalProperties": false
+    },
+    "sample_input": {"topic": "AI"},
+    "outputs": [{"key": "notes", "kind": "text", "title": "Notes"}],
+    "primary_output": "notes"
+  }
+}
+```
+
+- `input_schema` เป็น **profile ที่มีขอบเขตจำกัด** ไม่ใช่ JSON Schema เต็มรูปแบบ: `type`,
+  `properties`, `required`, `additionalProperties` (boolean), `items`, `enum`,
+  `const`, `minLength`/`maxLength`/`minimum`/`maximum`/`minItems`/`maxItems`,
+  และ annotation-only `title`/`description`/`default`/`examples` ไม่รองรับ `$ref`,
+  combinator (`oneOf`/`anyOf`/`allOf`/`not`/`if`-`then`-`else`), `pattern`, หรือ
+  `format` — keyword ที่ไม่รู้จักหรือไม่รองรับจะถูก reject ทั้งหมด ไม่มีการเพิกเฉยแบบเงียบ ๆ
+  root ต้องประกาศ `"type": "object"` เท่านั้น ขอบเขต: ความลึก ≤ 16, property รวม ≤ 256,
+  แต่ละ list ของ `required`/`enum` ≤ 256 รายการ, `title` ≤ 256 / `description` ≤ 2048
+  Unicode code point ขนาด `interface` และ `sample_input` แบบ serialize แล้วจำกัดที่
+  64 KiB แต่ละอัน
+- **Business input** คือ input ทั้งหมดของ run ลบด้วย reserved key ระดับบนสองตัวเท่านั้น
+  (`_meta`, `_trigger_chain`) — ไม่ใช่ทุกคีย์ที่ขึ้นต้นด้วย underscore effective input
+  ทั้งหมดของ run (รวม reserved key หลัง merge `default_reply`) จำกัดที่ 1 MiB
+- `sample_input` เมื่อมี ต้อง conform กับ `input_schema` และต้องเป็นข้อมูล
+  **สังเคราะห์ (synthetic)** — เป็นเอกสาร/ข้อมูลทดสอบเท่านั้น ห้ามใส่ข้อมูลลับหรือข้อมูลส่วนบุคคล
+  จริง และไม่ถูก merge เข้า production run แบบเงียบ ๆ เด็ดขาด
+- `outputs[].key` ต้องตรงกับ `^[A-Za-z_][A-Za-z0-9_]{0,127}$` ผลิตโดย worker node
+  เพียงตัวเดียว และ `kind` (`text`/`json`) ต้องตรงกับ `output_format` ของ node นั้น
+  output ทุกตัวเป็น **แค่ความเป็นไปได้ ไม่ใช่การรับประกัน** — graph แตกสาขาได้ ดังนั้น
+  output ที่หายไปจะไม่ทำให้ run ที่สำเร็จอยู่แล้วล้มเหลว และทุก artifact (ไม่ว่าจะประกาศไว้
+  หรือไม่) ยังคงไหลผ่าน polling และ webhook รูปแบบเดิม `primary_output` เมื่อมี จะระบุ
+  คีย์ใน `outputs[]` หนึ่งตัวเป็น client hint — ไม่สร้าง execution dependency
+- Atlas cross-check interface ที่ save กับ graph: ทุก path `{input.*}` ที่ถูกอ้างอิงต้อง
+  เป็นไปได้ภายใต้ schema (schema แบบปิดห้ามทำให้ path ที่ถูกอ้างอิงเป็นไปไม่ได้) และทุก path
+  ที่ prompt ของ node **start** ของ graph อ้างอิงต้องถูกประกาศและ required ในทุก
+  object segment (แต่ละ segment ระดับกลางต้องเป็น `"type": "object"` เท่านั้น ห้าม nullable
+  หรือ union แบบผสม) — กฎนี้ใช้กับ manager start node ด้วย เพราะตอนนี้ manager prompt
+  render `{input.*}`/`{artifact.*}`/`{run.*}`/`{node.*}` เหมือน worker prompt แล้ว
+  (ก่อนหน้านี้ prompt ที่ manager เขียนไม่เคยถูกแทนค่าเลย — ดู prerequisite fix ใน ADR 0002)
+  path ที่ใช้เฉพาะ downstream/conditional ยังคงเป็น optional ได้
+- `PUT` ใช้แพทเทิร์นเดียวกับ `default_reply`: ไม่ส่ง `interface` มา = คงค่าที่ save ไว้,
+  ส่ง `null` ชัดเจน = ล้างค่า, ส่งเป็น object = แทนที่หลัง validate ถ้า `graph`
+  เปลี่ยนขณะที่ไม่ได้ส่ง `interface` มา interface **ที่ save ไว้** จะถูก revalidate กับ
+  graph ที่ merge แล้วก่อนเขียนจริง เปลี่ยนแค่ `interface` อย่างเดียวก็ยังผ่าน
+  `expected_version` และเพิ่ม version ของ definition ครั้งเดียวเหมือนเดิม
+- `POST /api/workflows/{id}/validate` รับ `interface` ใน body แบบ additive (merge
+  เหมือน `graph`/`policy`) เมื่อไม่ส่งมาจะ validate interface ที่ save ไว้กับ graph ที่ส่งมา
+  `default_reply` ยังคงไม่ถูกรวมใน endpoint นี้เหมือนเดิม
+
 ### การส่งไฟล์ระหว่าง node (`push_files`, T9b)
 
 edge สามารถส่งต่อไฟล์ที่เก็บไว้ก่อนหน้า (ดู `collect_files`, T9a) ให้ worker
@@ -590,6 +653,20 @@ curl -sS -X POST "$BASE_URL/api/workflow-runs" \
 
 ตอบ `202` Run states: `running`, `paused`, `waiting_for_human`,
 `recovery_required`, `succeeded`, `failed`, `cancelled`
+
+ถ้า workflow เป้าหมายมี [interface](#7-workflow-definitions-และ-ai-builder) การเรียกนี้จะ
+validate `input` ก่อนสร้าง run ใด ๆ: business projection (ตัด `_meta`/`_trigger_chain`
+ออก) จะถูกตรวจกับ `interface.input_schema` และ effective input ทั้งหมด (หลัง merge
+`default_reply`) ต้องไม่เกิน 1 MiB input ที่ไม่ผ่านจะได้ `400` โดยไม่สร้าง run, runtime
+node, event, job หรือ audit ใด ๆ `expected_workflow_version` (integer บวก, optional)
+จะถูกเทียบกับ definition แถวเดียวกัน ถ้าไม่ตรงจะได้ `409` โดยไม่สร้าง run ทั้งสองกฎนี้
+ทำงานก่อน business-schema validation — `_meta` envelope ที่ไม่ valid จะเป็น `400`
+เสมอไม่ว่า `expected_workflow_version` จะเป็นอย่างไร และเมื่อ `_meta` valid แล้ว version
+ที่ stale จะเป็น `409` แม้ว่า `input` เองจะไม่ผ่าน business validation ด้วยก็ตาม workflow
+ที่ไม่มี interface หรือ request ที่ไม่ส่ง `expected_workflow_version` มา จะมีพฤติกรรมเดิม
+ทุกประการ response ของทุก run ที่ผูกกับ definition จะมี `interface_snapshot` และ
+`workflow_version_snapshot` เสมอ — ค่าที่ run ใช้เริ่มต้นจริง ไม่ถูกกระทบแม้ definition
+จะถูกแก้หรือลบภายหลัง
 
 Filter list:
 
@@ -755,6 +832,17 @@ curl -sS -X POST "$BASE_URL/api/workflow-triggers/wtr_xxx/fire" \
 
 PUT เป็น partial update; เมื่อ type/config เปลี่ยน server คำนวณ `next_fire_at` ใหม่
 Trigger event states ที่พบบ่อยคือ `received`, `started`, `ignored`, `failed`
+
+ถ้า workflow เป้าหมายมี interface `fire` จะส่ง `payload` ผ่าน validator ตัวเดียวกับที่
+`POST /api/workflow-runs` ใช้ payload ที่เป็น **object** แต่ไม่ผ่าน `_meta`/business-schema
+validation ยังคงตอบ `202` เหมือนเดิม: trigger event จะถูกบันทึกเป็น `failed` พร้อม
+error ที่ระบุ path, `run` เป็น `null`, และไม่มีการสร้าง run หรือ runtime work ใด ๆ —
+dedupe-claim และการบันทึก received/failed แบบเดิมไม่เปลี่ยนแปลง payload ที่**ไม่ใช่
+object** ยังคงได้ `400` แยกต่างหากเหมือนเดิม ก่อนที่จะมีการบันทึก trigger ใด ๆ (ไม่มี event
+ถูกสร้าง) v1 ยังไม่เพิ่ม `expected_workflow_version` ระดับ trigger — เลื่อนไปทำภายหลัง
+(ADR 0002) trigger แบบ fixed-payload (schedule หรือ internal event trigger) ที่ไม่มีทาง
+satisfy interface ได้ จะบันทึก event เป็น `failed`, ไม่สร้าง run, และยังคงเดินหน้า
+`next_fire_at`/`last_fired_at` ตามปกติ ไม่ค้างที่ slot เดิม
 
 ## 12. Audit
 

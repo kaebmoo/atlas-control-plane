@@ -234,7 +234,54 @@ curl -sS -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/workflow-runs/$RUN_ID/
 สำหรับ timeline ของ lifecycle รูปแบบเดียวกันนี้ใช้ผ่าน `fetch`/`urllib.request` ได้เหมือน §4a —
 แค่เปลี่ยน path และ payload
 
-### 4c. อัปโหลดไฟล์เข้า run แล้วดาวน์โหลด artifact
+### 4c. ตรวจสอบ input กับ workflow interface
+
+ถ้า `wfd_xxx` มี `interface` (optional) ประกาศไว้ การเรียก `POST /api/workflow-runs`
+**ตัวเดียวกัน** จาก §4b จะ validate `input` ก่อนสร้างอะไรทั้งสิ้น:
+
+```bash
+curl -sS -X POST "$BASE_URL/api/workflow-runs" \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"workflow_definition_id":"wfd_xxx","input":{"topic":"AI"},"expected_workflow_version":3}'
+```
+
+- business projection ของ `input` (ทุกอย่างยกเว้น reserved key `_meta`/`_trigger_chain`)
+  จะถูกตรวจกับ `interface.input_schema` input ที่ไม่ผ่านจะได้ `400` และไม่สร้าง run,
+  runtime node, event, job หรือ audit ใด ๆ
+- `expected_workflow_version` (optional, ต้องเป็น positive integer) ใช้ pin การเรียกนี้
+  กับ definition revision ที่ต้องการ; ถ้าไม่ตรงจะได้ `409` โดยไม่สร้าง run — ใช้ mapping
+  version-conflict เดิมที่มีอยู่แล้ว workflow ที่ไม่มี interface หรือ request ที่ไม่ส่ง
+  `expected_workflow_version` มา จะมีพฤติกรรมเดิมทุกประการ
+- response ของทุก run ที่ผูกกับ definition — รวมถึง response จากการเรียกนี้ด้วย — จะมี
+  `interface_snapshot` (object `interface` หรือ `null`) และ `workflow_version_snapshot`
+  เสมอ: ค่าที่ run ใช้เริ่มต้นจริง ไม่ถูกกระทบแม้ definition จะถูกแก้ภายหลัง
+
+คู่มือนี้ครอบคลุมแค่รูปแบบ request/response ที่ต้องใช้เรียก endpoint ให้ถูกต้อง สำหรับ
+field profile เต็มของ `input_schema`, ขอบเขตของมัน และความหมายของ
+`outputs`/`primary_output` ดูที่
+[API Reference §7 "Input/output interface (v1)"](../specs/api-reference-th.md#input-output-interface-v1)
+และ [ADR 0002](../adr/0002-workflow-interface-contract.md)
+
+### 4d. Triggers
+
+ยิง manual trigger ได้แบบเดียวกับการเริ่ม run ตรง ๆ:
+
+```bash
+curl -sS -X POST "$BASE_URL/api/workflow-triggers/wtr_xxx/fire" \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"payload":{"topic":"AI"},"dedupe_key":"event-001"}'
+```
+
+ถ้า workflow เป้าหมายมี interface `fire` ยังคงตอบ `202` แม้ `payload` แบบ **object**
+จะไม่ผ่าน validation (trigger event จะถูกบันทึกเป็น `failed` พร้อม `run: null` และไม่มี
+การสร้าง run) ส่วน `payload` ที่**ไม่ใช่ object** ยังคงได้ `400` แยกต่างหากเหมือนเดิม และ
+v1 ยังไม่เพิ่ม `expected_workflow_version` ระดับ trigger ดูที่
+[API Reference §11 "Workflow Triggers"](../specs/api-reference-th.md#11-workflow-triggers)
+สำหรับ trigger type, create/update/delete และ dedupe
+
+### 4e. อัปโหลดไฟล์เข้า run แล้วดาวน์โหลด artifact
 
 การอัปโหลดเป็น binary body ตรง ๆ ไม่ใช่ multipart หรือ base64 ต้องมี `Content-Length` และขนาด
 ถูกจำกัดโดย `ATLAS_MAX_UPLOAD_BYTES` (ปริยาย 10 MiB)

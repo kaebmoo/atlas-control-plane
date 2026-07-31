@@ -19,6 +19,7 @@ literals the API accepts and the engine checks — all taken from the source cod
 6. [Join modes](#6-join-modes)
 7. [Edge conditions](#7-edge-conditions)
 8. [Prompt variables](#8-prompt-variables)
+8a. [Workflow input contract](#8a-workflow-input-contract)
 9. [Artifact kinds](#9-artifact-kinds)
 10. [Policy](#10-policy)
 11. [Manager decision](#11-manager-decision-manager_decision_v1)
@@ -243,6 +244,65 @@ several roots:
 A `manager` node additionally reasons over the run state (`graph`,
 `current_node`, `artifacts`, `counters`, `policy`) and must reply with
 `manager_decision_v1` JSON.
+
+---
+
+## 8a. Workflow input contract
+
+A workflow definition can optionally declare `interface`: a versioned,
+machine-checkable description of the business input a run expects and the
+artifacts it might produce. Without one, a caller — or Flow Designer's Test
+Run dialog — can only *infer* a contract by walking `{input.*}` placeholders
+in node prompts ([§8](#8-prompt-variables)); with one, Atlas validates a
+run's input up front, before any job, event, or audit record is created.
+`interface` is optional and nullable: a workflow with none (the default)
+keeps exact legacy behavior — no extra validation, no new size cap.
+
+`interface.input_schema` is a **bounded profile**, not full JSON Schema: a
+deliberately smaller keyword set (`type`, `properties`, `required`,
+`additionalProperties`, `items`, `enum`, `const`, length/range bounds, and
+annotation-only `title`/`description`) — enough to describe a
+flat-to-moderately-nested business object, without a general-purpose
+validator's attack surface (`$ref`, regex `pattern`, schema composition).
+Anything outside that profile is rejected at save time, never silently
+ignored.
+
+What gets checked against `input_schema` is the run's **business input** —
+the complete input minus exactly two reserved top-level keys, `_meta` and
+`_trigger_chain` (never every underscore-prefixed key). This is the same
+reserved-key convention Atlas already applies to run input elsewhere:
+workers normally read only the business fields, while `_meta`/
+`_trigger_chain` carry Atlas's own provenance/reply and loop-guard
+bookkeeping and are stored with the run untouched.
+
+`interface.outputs[]` names artifact keys the workflow might write, each
+with a `kind` of `text` or `json` — the same [artifact kind](#9-artifact-kinds)
+vocabulary used elsewhere. Like any artifact, a declared output is
+**possible, not guaranteed**: a graph can branch, so a successful run need
+not produce every declared output, and every artifact — declared or not —
+still flows through the existing polling and webhook shapes unchanged. An
+optional `primary_output` names one `outputs[]` key as a client hint, not an
+execution dependency.
+
+```json
+{
+  "interface": {
+    "schema_version": 1,
+    "input_schema": {
+      "type": "object",
+      "properties": {"topic": {"type": "string", "minLength": 1}},
+      "required": ["topic"],
+      "additionalProperties": false
+    },
+    "sample_input": {"topic": "AI"},
+    "outputs": [{"key": "notes", "kind": "text", "title": "Notes"}],
+    "primary_output": "notes"
+  }
+}
+```
+
+Full contract: [ADR 0002](adr/0002-workflow-interface-contract.md).
+Field-level detail: [API reference §7](specs/api-reference-en.md).
 
 ---
 

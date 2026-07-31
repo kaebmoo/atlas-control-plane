@@ -87,6 +87,13 @@ key, `_meta`. `_meta` is **optional**; every field inside it is optional.
 `_trigger_chain`): the engine treats it as ordinary input JSON, workers normally read only
 the business fields, and it is persisted with the run so OB-1 can consume `_meta.reply`.
 
+When the target workflow declares a `workflow.interface` (see
+[ADR 0002](../adr/0002-workflow-interface-contract.md) and
+[api-reference §Input/output interface (v1)](api-reference-en.md#input-output-interface-v1)),
+Atlas validates *business input* against `interface.input_schema` — the run's complete
+input minus **exactly** these two reserved top-level keys, `_meta` and `_trigger_chain`,
+never every underscore-prefixed key (that would be a validation bypass).
+
 ### 3.1 `_meta.source` (provenance — recorded for audit)
 
 | Field | Type | Meaning |

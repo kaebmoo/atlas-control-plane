@@ -61,6 +61,31 @@
         "max_attempts_per_node": 2,
         "max_minutes": 1440,
         "max_budget_units": 50
+      },
+      "interface": {
+        "schema_version": 1,
+        "input_schema": {
+          "$schema": "https://atlas.local/schemas/workflow-interface-input-v1.schema.json",
+          "type": "object",
+          "properties": {
+            "complaint": {"type": "string", "minLength": 1, "maxLength": 4000, "title": "Complaint text"},
+            "channel": {"type": "string", "enum": ["web", "line", "email", "phone"], "title": "Intake channel"},
+            "citizen_ref": {"type": "string", "title": "Citizen reference number"}
+          },
+          "required": ["complaint"],
+          "additionalProperties": false
+        },
+        "sample_input": {
+          "complaint": "The streetlight on Soi 5 has been broken for two weeks and the area is unsafe at night.",
+          "channel": "web",
+          "citizen_ref": "SYNTHETIC-C-0000"
+        },
+        "outputs": [
+          {"key": "triage", "kind": "text", "title": "Triage summary"},
+          {"key": "draft_response", "kind": "text", "title": "Drafted response"},
+          {"key": "published", "kind": "text", "title": "Published response"}
+        ],
+        "primary_output": "draft_response"
       }
     }
   ],

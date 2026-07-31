@@ -52,12 +52,51 @@ deployments SHALL set it `true`.** Running production with `false` is an **accep
 **Pornthep Nivatyakul** — rationale: packs are semi-trusted and unsigned import is an operator
 foot-gun; re-open trigger: any externally-sourced pack. Reflected in `ops/deployment.md` §4.
 
+## workflow.interface bounded profile (2026-07-31)
+
+[ADR 0002](../adr/0002-workflow-interface-contract.md) adds an optional, nullable
+`workflow.interface` v1 contract: a workflow may declare a bounded JSON-Schema-compatible
+`input_schema` for its business input and a set of possible output keys. Threat-model-relevant
+design points, none of which change an existing trust boundary:
+
+- **A bounded profile is a deliberately smaller attack surface than full JSON Schema.**
+  `atlas/workflow_interface.py` rejects `$ref` (no recursive-reference DoS or SSRF-via-schema-fetch
+  — `$schema` is checked as a literal string equality against one fixed URI and NEVER fetched),
+  `pattern`/`format` (no regex-DoS vector), and every combinator/conditional keyword (no schema-size
+  amplification via `oneOf`/`allOf` composition). Every unrecognized keyword is a hard reject, not a
+  silent ignore — an author cannot smuggle unsupported semantics past validation by hoping an
+  unknown keyword is skipped.
+- **Explicit DoS bounds on both the schema document and instance validation.** Schema depth ≤ 16,
+  ≤ 256 total declared properties, ≤ 256 entries per `required`/`enum` list; a separate ≤ 10,000-node
+  traversal budget bounds walking an attacker-supplied instance (business input or `sample_input`)
+  even when the schema itself places no `maxItems`/`maxLength` on a container — the budget, not the
+  schema author, is the backstop. Byte caps (64 KiB interface, 64 KiB sample, 1 MiB effective input)
+  are measured via one canonical `json.dumps(..., allow_nan=False)` that also rejects non-finite
+  numbers (Python's `json` module accepts `NaN`/`Infinity` by default; this profile does not).
+- **The 1 MiB effective-input bound is scoped, not a general transport control.** It applies AFTER
+  JSON decoding, only to a definition that has an `interface`, on the direct-run and trigger-fire
+  paths. Atlas's shared `_read_json` has no general pre-decode request-body size cap for `/api/*`
+  generally (a pre-existing condition, not introduced by this contract) — a future general transport
+  cap is deferred (ADR 0002 §11), tracked here so this new bound is not mistaken for filling that gap.
+- **No new RBAC surface.** `interface` is a field on the existing workflow-definition object: readable
+  by any role with `read` (the existing GET permission), writable only by `workflows.manage` (the
+  existing POST/PUT/validate permission) — the same roles that could already read/write `graph`/
+  `policy`. Audit rows for `workflow_definition.create`/`update` carry no `details` payload (unchanged
+  from before this contract), so they never copy the full `interface`/`sample_input` content.
+- **Outputs are possible, not guaranteed — a client-facing correctness note, not a control gap.** A
+  graph can branch, so "an output was declared" is not proof it was produced on a given run; every
+  artifact (declared or not) still flows through the existing polling/webhook shapes unchanged, so no
+  callback surface was narrowed or widened by this contract.
+
+Enforced by `scripts/check_workflow_interface.py` (folded into the gate); every invariant above is
+mutation-tested (evidence in `PROGRESS.md`'s Milestone B row).
+
 ## Accepted residual risks under this model
 
 Not fixed because the model makes them unreachable / out-of-threat. Each: rationale → trigger that
-turns it into real work. **Owner of all six accepted risks: Pornthep Nivatyakul** (named sign-off,
-2026-06-30; DNS risk #6 added 2026-07-06 under the same owner — real accountability, not an
-auto-assigned name).
+turns it into real work. **Owner of all seven accepted risks: Pornthep Nivatyakul** (named sign-off,
+2026-06-30; DNS risk #6 added 2026-07-06, `sample_input` risk #7 added 2026-07-31, both under the
+same owner — real accountability, not an auto-assigned name).
 
 1. **`claim_trigger_dedupe` is in-process atomic only** (RLock, no UNIQUE constraint). Fine
    under one-process-per-DB. → *Trigger:* multi-process/shared-volume deployment → add a
@@ -84,6 +123,13 @@ auto-assigned name).
    bounded by the watchdog. → *Trigger:* workers addressed by attacker-influenced hostnames, OR a
    hard per-call wall-clock SLA that must include name resolution → resolve in a bounded helper
    thread (or pre-resolve with a timeout) and connect to the resulting IP.
+7. **`interface.sample_input` has no automated secrets/PII detector.** Enforcement is author
+   discipline (Flow Designer warns authors to use synthetic values) plus manual review of any
+   committed sample — never an invented pattern-matching detector, which would give false
+   confidence on the cases it misses. Fine while workflows/packs come from trusted operators. →
+   *Trigger:* interfaces or packs sourced from untrusted third parties (e.g. a future pack
+   marketplace) → add heuristic sample scanning as a save-time WARNING, never a silent reject
+   (structured business data legitimately resembles some PII patterns).
 
 ## Targeted review log (DoD #6)
 

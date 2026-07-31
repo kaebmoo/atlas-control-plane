@@ -26,6 +26,8 @@ def main() -> None:
             assert {"choices", "selected_choice"} <= _columns(conn, "approvals")
             assert "default_reply" in _columns(conn, "workflow_definitions")
             assert {"expires_at", "purpose"} <= _columns(conn, "api_tokens")
+            assert "interface" in _columns(conn, "workflow_definitions")
+            assert {"interface_snapshot", "workflow_version_snapshot"} <= _columns(conn, "workflow_runs")
             rows = conn.execute("SELECT version FROM schema_version ORDER BY version").fetchall()
         assert [r[0] for r in rows] == list(range(1, SCHEMA_VERSION + 1)), rows
 
@@ -119,6 +121,40 @@ def main() -> None:
             assert rows["tok_login"]["purpose"] == "session" and rows["tok_login"]["revoked_at"]
             assert rows["tok_unknown"]["purpose"] == "api" and rows["tok_unknown"]["revoked_at"] is None
             assert conn.execute("SELECT COUNT(*) FROM audit_log WHERE action = 'auth.session_legacy_revoked'").fetchone()[0] == 1
+
+        # 5. A deployed v14 DB (Milestone B's predecessor) gets the interface columns as
+        # NULL on pre-existing rows -- "no authoritative contract", not "{}".
+        legacy_interface = Path(tmp) / "legacy-interface.sqlite"
+        raw = sqlite3.connect(legacy_interface)
+        raw.row_factory = sqlite3.Row
+        raw.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+        for version, step in enumerate(MIGRATIONS[:14], start=1):
+            if callable(step):
+                step(raw)
+            else:
+                raw.executescript(step)
+            raw.execute("INSERT INTO schema_version(version, applied_at) VALUES (?, ?)", (version, "2026-01-01T00:00:00Z"))
+        raw.execute(
+            "INSERT INTO workflow_definitions(id, name, description, version, status, graph, policy, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("wfd_legacy", "Legacy", "", 1, "active", '{"start":"a","nodes":[],"edges":[]}', "{}", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+        raw.execute(
+            "INSERT INTO workflow_runs(id, workflow_definition_id, name, state, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ("wfr_legacy", "wfd_legacy", "Legacy run", "succeeded", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+        raw.commit()
+        raw.close()
+        migrated_interface = Database(legacy_interface)
+        assert migrated_interface.schema_version() == SCHEMA_VERSION
+        with migrated_interface.connect() as conn:
+            assert "interface" in _columns(conn, "workflow_definitions")
+            assert {"interface_snapshot", "workflow_version_snapshot"} <= _columns(conn, "workflow_runs")
+        definition = migrated_interface.get_workflow_definition("wfd_legacy")
+        assert definition is not None and definition.get("interface") is None, definition
+        run = migrated_interface.get_workflow_run("wfr_legacy")
+        assert run is not None and run.get("interface_snapshot") is None and run.get("workflow_version_snapshot") is None, run
 
     print("migrations check ok")
 

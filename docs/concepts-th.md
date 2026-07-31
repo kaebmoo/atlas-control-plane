@@ -19,6 +19,7 @@
 6. [โหมด join](#6-โหมด-join)
 7. [เงื่อนไข edge](#7-เงื่อนไข-edge)
 8. [ตัวแปรใน prompt](#8-ตัวแปรใน-prompt)
+8a. [สัญญา input ของ workflow](#8a-สัญญา-input-ของ-workflow)
 9. [ชนิด artifact](#9-ชนิด-artifact)
 10. [นโยบายและ guard](#10-นโยบายและ-guard)
 11. [การตัดสินใจของ manager](#11-การตัดสินใจของ-manager-manager_decision_v1)
@@ -231,6 +232,64 @@ prompt ของ worker/manager แทนค่า `{...}` จากหลาย
 
 node แบบ `manager` ยังพิจารณาสถานะ run (`graph`, `current_node`, `artifacts`,
 `counters`, `policy`) และต้องตอบเป็น JSON `manager_decision_v1`
+
+---
+
+## 8a. สัญญา input ของ workflow
+
+workflow definition หนึ่งตัวประกาศ `interface` แบบไม่บังคับได้: คำอธิบายที่มี
+เวอร์ชันและตรวจสอบได้ด้วยเครื่องของ business input ที่ run ต้องการ และ artifact
+ที่ workflow อาจผลิตออกมา ถ้าไม่มี `interface` ผู้เรียก — หรือหน้าต่าง Test Run
+ของ Flow Designer — ทำได้แค่ **เดา** สัญญานี้จากการไล่ดู `{input.*}` ใน prompt
+ของ node ([§8](#8-ตัวแปรใน-prompt)) แต่ถ้ามี `interface` Atlas จะตรวจ input ของ
+run ก่อนสร้าง job, event หรือ audit ใด ๆ `interface` เป็น optional และ
+nullable: workflow ที่ไม่มี (ค่าเริ่มต้น) ยังทำงานเหมือนเดิมทุกประการ — ไม่มี
+validation เพิ่ม ไม่มี cap ขนาดใหม่
+
+`interface.input_schema` เป็น **profile ที่มีขอบเขตจำกัด** ไม่ใช่ JSON Schema
+เต็มรูปแบบ: มีชุด keyword ที่เล็กลงโดยตั้งใจ (`type`, `properties`, `required`,
+`additionalProperties`, `items`, `enum`, `const`, ขอบเขตความยาว/ค่า และ
+annotation-only `title`/`description`) — พอสำหรับอธิบาย business object แบบ
+แบนถึงซ้อนไม่ลึกมาก โดยไม่แบก attack surface ของ validator เต็มรูปแบบ (`$ref`,
+regex `pattern`, schema composition) สิ่งที่อยู่นอก profile นี้จะถูก reject
+ตอน save เสมอ ไม่มีการเพิกเฉยแบบเงียบ ๆ
+
+สิ่งที่ถูกตรวจกับ `input_schema` คือ **business input** ของ run — input
+ทั้งหมดลบด้วย reserved key ระดับบนสุดสองตัวเท่านั้นคือ `_meta` และ
+`_trigger_chain` (ไม่ใช่ทุกคีย์ที่ขึ้นต้นด้วย underscore) นี่คือ convention
+ของ reserved key แบบเดียวกับที่ Atlas ใช้กับ run input อยู่แล้วในที่อื่น:
+worker อ่านเฉพาะ business field ตามปกติ ส่วน `_meta`/`_trigger_chain` เก็บ
+ข้อมูล provenance/reply และ loop-guard ของ Atlas เอง และถูกบันทึกไว้กับ run
+โดยไม่ถูกแตะต้อง
+
+`interface.outputs[]` ระบุคีย์ artifact ที่ workflow อาจเขียน แต่ละตัวมี
+`kind` เป็น `text` หรือ `json` — ใช้ศัพท์ [ชนิด artifact](#9-ชนิด-artifact)
+ชุดเดียวกับที่อื่น เหมือน artifact ทั่วไป output ที่ประกาศไว้เป็น **แค่ความ
+เป็นไปได้ ไม่ใช่การรับประกัน**: graph แตกสาขาได้ ดังนั้น run ที่สำเร็จไม่
+จำเป็นต้องผลิตทุก output ที่ประกาศไว้ และทุก artifact — ไม่ว่าจะประกาศไว้
+หรือไม่ — ยังไหลผ่าน polling และ webhook รูปแบบเดิมเหมือนเดิม `primary_output`
+แบบไม่บังคับจะระบุคีย์ใน `outputs[]` หนึ่งตัวเป็น client hint เท่านั้น ไม่ใช่
+execution dependency
+
+```json
+{
+  "interface": {
+    "schema_version": 1,
+    "input_schema": {
+      "type": "object",
+      "properties": {"topic": {"type": "string", "minLength": 1}},
+      "required": ["topic"],
+      "additionalProperties": false
+    },
+    "sample_input": {"topic": "AI"},
+    "outputs": [{"key": "notes", "kind": "text", "title": "Notes"}],
+    "primary_output": "notes"
+  }
+}
+```
+
+สัญญาแบบเต็ม: [ADR 0002](adr/0002-workflow-interface-contract.md)
+รายละเอียดระดับฟิลด์: [API reference §7](specs/api-reference-th.md)
 
 ---
 

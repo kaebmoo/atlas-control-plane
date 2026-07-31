@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import ROLES, Database
+from .workflow_interface import validate_interface
 from .workflows import (
     next_fire_at_for_trigger,
     validate_workflow_graph,
@@ -82,6 +83,8 @@ def validate_pack(bundle: Any) -> dict[str, Any]:
         # imported pack cannot exceed limits the workflow API would reject.
         validate_workflow_graph(workflow.get("graph") or {}, workflow.get("policy"))
         validate_workflow_policy(workflow.get("policy"))
+        # Optional per-workflow interface (docs/adr/0002): a no-op when absent/null.
+        validate_interface(workflow.get("interface"), workflow.get("graph") or {})
 
     roles = bundle.get("roles", [])
     if not isinstance(roles, list):
@@ -150,6 +153,7 @@ def import_pack(
                         "status": workflow.get("status") or "active",
                         "graph": workflow.get("graph") or {},
                         "policy": workflow.get("policy") or {},
+                        "interface": workflow.get("interface"),
                     }
                 )
             )
@@ -205,6 +209,7 @@ def export_pack(db: Database, definition_id: str) -> dict[str, Any]:
                 "status": definition.get("status") or "active",
                 "graph": definition.get("graph") or {},
                 "policy": definition.get("policy") or {},
+                "interface": definition.get("interface"),
             }
         ],
         "triggers": [

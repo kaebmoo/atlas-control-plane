@@ -180,6 +180,124 @@ condition/mode/schema and trigger fields explicitly, and limits `outputs` to one
 key because the current runtime only uses the first key. The backend accepts
 some shorthand forms, but the importer must normalize them before schema validation.
 
+## 5a. Run input contract
+
+`interface` is a new optional, nullable root-level field, alongside `name`, `graph`,
+`policy`, and `default_reply` (§5). It declares the business input a workflow expects
+and the artifact outputs it may produce, so the visual editor, the raw JSON editor, and
+any external caller can validate a run's `input` before Save/Run instead of discovering
+a bad payload after a job has already started. See
+[ADR 0002](../adr/0002-workflow-interface-contract.md) for the full contract and
+[Workflow Definition Schema](workflow-definition.schema.json) (`$defs.workflowInterface`)
+for the exact machine-readable shape.
+
+```json
+{
+  "interface": {
+    "schema_version": 1,
+    "input_schema": {
+      "type": "object",
+      "properties": {"topic": {"type": "string", "minLength": 1, "title": "Topic"}},
+      "required": ["topic"],
+      "additionalProperties": false
+    },
+    "sample_input": {"topic": "renewable energy policy"},
+    "outputs": [
+      {"key": "research", "kind": "text", "title": "Research notes"}
+    ],
+    "primary_output": "research"
+  }
+}
+```
+
+This extends the `Research {input.topic}` scenario used throughout this spec (§18): the
+start node's prompt references `input.topic`, so `input_schema` must declare and require
+`topic` as a `string` at the root, and the `research` output that node declares in its
+own `outputs` gets a matching `interface.outputs[]` entry with `kind: "text"` (the node
+has no `output_format`, which defaults to text).
+
+**Bounded profile, not full JSON Schema.** `input_schema` supports only: `type` (one
+primitive, or a unique array of primitives — `object`/`array`/`string`/`number`/
+`integer`/`boolean`/`null`), `properties`, `required`, boolean `additionalProperties`,
+`items`, `enum`, `const`, `minLength`, `maxLength`, `minimum`, `maximum`, `minItems`,
+`maxItems`, and annotation-only `title`/`description`/`default`/`examples`. An optional
+`$schema` is accepted only when it is exactly
+`https://atlas.local/schemas/workflow-interface-input-v1.schema.json` — an identifier,
+never fetched. `$ref`, the combinators (`oneOf`/`anyOf`/`allOf`/`not`/`if`-`then`-`else`),
+`pattern`, `patternProperties`, `format`, and any dependent/dynamic/unevaluated or
+otherwise unrecognized keyword are rejected — fail closed, nothing is silently ignored.
+The root schema must declare exactly `"type": "object"`.
+
+**Bounds.** Depth ≤ 16; ≤ 256 total declared properties, counted cumulatively across the
+whole schema; ≤ 256 entries per `required`/`enum` list; ≤ 256 `outputs` entries; ≤ 10,000
+instance nodes walked per validation (a traversal budget, not a schema-size bound);
+`title` ≤ 256 Unicode code points; `description` ≤ 2,048. Byte caps use the same
+canonical serialization everywhere — `json.dumps(value, ensure_ascii=True,
+sort_keys=True, separators=(",", ":"), allow_nan=False)`, encoded UTF-8: a serialized
+`interface` ≤ 64 KiB, a serialized `sample_input` ≤ 64 KiB, and an interface-enabled
+run's complete effective input — including reserved fields, after any `default_reply`
+merge, before business-input projection — ≤ 1 MiB. Non-finite numbers (`NaN`,
+`Infinity`) are rejected outright. JSON type fidelity is preserved throughout: a `bool`
+is never treated as `int`/`number`, including in `enum`/`const` comparison (`true` does
+not match `1`).
+
+**Business input projection.** The business input Atlas validates against
+`input_schema` is the run's complete input minus exactly two reserved top-level keys,
+`_meta` and `_trigger_chain` — never every underscore-prefixed key, which would be a
+validation bypass. The complete input (reserved keys included) is still what gets
+persisted and byte-capped; projection only narrows what gets schema-validated.
+
+**Sample input.** `sample_input`, when present, must conform to `input_schema` and must
+be synthetic — documentation/test data only, never a real secret or personal data, and
+never silently merged into a production run. No PII detector enforces this
+mechanically; committed samples (this spec's own examples, the bundled pack example) are
+reviewed manually.
+
+**Outputs contract.** Each `outputs[]` entry declares a `key` matching
+`^[A-Za-z_][A-Za-z0-9_]{0,127}$`, unique within the list, produced by exactly one worker
+node in the graph, and a `kind` (`text`/`json`) that must match that node's
+`output_format` (omitted/absent `output_format` = `text`, `"json"` = `json`). All
+declared outputs are **possible, not guaranteed** on every successful run — a graph can
+branch, so an omitted output never fails an otherwise-successful run, and every
+artifact, declared or not, still flows through the existing polling/webhook shapes
+unchanged. Optional `primary_output` names one `outputs[]` key as a client hint for
+which artifact to prefer; it creates no execution dependency or guarantee.
+
+**Save-time graph cross-check.** When a definition is saved with a non-null
+`interface`, Atlas cross-checks it against the candidate `graph`:
+
+- Every `{input.*}` path referenced anywhere in the graph's worker/manager node prompts
+  must be representable under `input_schema` — a closed schema
+  (`additionalProperties: false` without the key declared) must not make a referenced
+  path impossible.
+- Every `{input.*}` path the graph's **start** node's prompt references must be declared
+  and required at every object segment, with every intermediate segment declaring
+  exactly `"type": "object"` (never nullable, never a mixed scalar/object union). This
+  applies to a manager start node too, now that manager prompts render
+  `{input.*}`/`{artifact.*}`/`{run.*}`/`{node.*}` the same way worker prompts do — see
+  ADR 0002's prerequisite fix; previously a manager's authored prompt text was never
+  substituted at all.
+- A downstream or conditional (non-start) node's `{input.*}` paths may remain optional.
+
+**Editing and validation endpoints.** `PUT /api/workflows/{id}` follows the same
+three-state pattern `default_reply` already uses: omitting `interface` preserves the
+stored value, an explicit `null` clears it, an object replaces it after validation. If
+`graph` changes while `interface` is omitted, the **stored** interface is revalidated
+against the merged graph before the write lands. Changing only `interface` still goes
+through the existing `expected_version` optimistic-save path and increments
+`workflow.version` exactly once — no new concurrency mechanism.
+`POST /api/workflows/{id}/validate` additively accepts a supplied `interface` (merged
+like `graph`/`policy`); when omitted, it validates the **stored** interface against the
+candidate graph. `default_reply` remains excluded from this endpoint, unchanged.
+
+**Deferred (out of scope for v1).** A full JSON Schema implementation or `$ref`
+resolution; a visual end-user input form/page builder or UI-layout schema language;
+pre-start atomic binary file staging for the start node (the existing
+`/workflow-runs/{id}/files` endpoint is post-run, not atomic start-time file intake, and
+a JSON attachments field does not solve binary staging). See
+[ADR 0002](../adr/0002-workflow-interface-contract.md) §11 for the complete deferred
+list, including required-on-success output proof and webhook output filtering.
+
 ## 6. Common node rules
 
 Every node must contain:
@@ -595,6 +713,12 @@ The final three internal trigger types are emitted by Atlas and should not show
 a Fire button. Manual, schedule, and webhook triggers may expose Fire for
 testing. A retry of the same event should reuse the same `dedupe_key`.
 
+When the target workflow has an [interface](#5a-run-input-contract), `Fire`
+validates `payload` the same way a run is validated: an invalid **object**
+payload still returns `202` with a `failed` trigger event and `run: null`, an
+invalid **non-object** payload keeps the existing `400` before any trigger
+bookkeeping, and v1 adds no trigger-level `expected_workflow_version` pin.
+
 [workflow-trigger.schema.json](workflow-trigger.schema.json) validates trigger
 drafts before API submission. `workflow_definition_id` is added when the trigger
 is persisted.
@@ -790,6 +914,12 @@ must not replace deterministic validation.
 | Suggest triggers | `POST /api/workflows/{id}/suggest-triggers` |
 | Create trigger | `POST /api/workflow-triggers` |
 | Run | `POST /api/workflow-runs` |
+
+`Run` (`POST /api/workflow-runs`) now optionally accepts
+`expected_workflow_version`, compared against the same definition row loaded
+for graph/policy/interface — a mismatch reuses the existing
+`WorkflowVersionConflict` → `409` mapping and creates no run (see
+[§5a](#5a-run-input-contract)).
 
 Current API limitation: Validate requires a saved workflow ID. For an unsaved
 draft, run schema/semantic validation on the client; Save causes the backend to

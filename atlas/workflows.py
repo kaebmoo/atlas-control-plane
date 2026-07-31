@@ -12,7 +12,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .db import Database, now_iso, resolve_in_store
+from .db import Database, WorkflowVersionConflict, now_iso, resolve_in_store
 from .jobs import (
     CALLBACK_RETRY_ENVELOPE_SECONDS,
     JOB_EXECUTION_MODES,
@@ -26,6 +26,7 @@ from .router import Router
 from .sync_files import SyncFileError, _reject_unsafe_path
 from .thclaws_client import ThClawsClient
 from .usage import elapsed_seconds
+from .workflow_interface import validate_run_input
 
 
 _FIELD_RE = re.compile(r"{([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)}")
@@ -411,21 +412,43 @@ class WorkflowRunner:
         definition = self.db.get_workflow_definition(workflow_definition_id)
         if not definition:
             raise ValueError(f"Unknown workflow_definition_id: {workflow_definition_id}")
+        if input is None:
+            input = {}
+        if not isinstance(input, dict):
+            raise ValueError("workflow input must be an object")
         input = self._with_default_reply(definition, input)
+        # Definition-backed runs MUST validate interface input and carry the
+        # interface/version snapshots no matter which entry point starts them —
+        # otherwise this synchronous path would silently bypass the contract
+        # start_workflow enforces (docs/adr/0002).
+        interface = definition.get("interface")
+        validate_run_input(interface, input)
         return self.run_graph(
             definition["graph"],
             definition.get("policy") or {},
             input=input,
             workflow_definition_id=workflow_definition_id,
             name=definition.get("name") or "Workflow run",
+            interface=interface,
+            workflow_version=definition.get("version"),
         )
 
-    def start_workflow(self, workflow_definition_id: str, input: dict[str, Any] | None = None) -> dict[str, Any]:
+    def start_workflow(
+        self,
+        workflow_definition_id: str,
+        input: dict[str, Any] | None = None,
+        expected_workflow_version: int | None = None,
+    ) -> dict[str, Any]:
+        # expected_workflow_version is a DIRECT-START-ONLY guard (never passed by trigger
+        # fire — v1 does not add a trigger-side version pin, docs/adr/0002). Loaded and
+        # compared against the SAME definition object used for graph/policy/interface/
+        # snapshots below, so there is no second read and no time-of-check/time-of-use gap.
         definition = self.db.get_workflow_definition(workflow_definition_id)
         if not definition:
             raise ValueError(f"Unknown workflow_definition_id: {workflow_definition_id}")
         graph = definition["graph"]
         policy = definition.get("policy") or {}
+        interface = definition.get("interface")
         if input is None:
             input = {}
         if not isinstance(input, dict):
@@ -434,9 +457,25 @@ class WorkflowRunner:
             raise ValueError("workflow input must be an object")
         input = self._with_default_reply(definition, input)
         validate_run_input_envelope(input, self.outbound_allowlist)
+        if expected_workflow_version is not None:
+            if isinstance(expected_workflow_version, bool) or not isinstance(expected_workflow_version, int) or expected_workflow_version < 1:
+                raise ValueError("expected_workflow_version must be a positive integer")
+            if definition.get("version") != expected_workflow_version:
+                raise WorkflowVersionConflict("workflow version conflict; refresh and merge before starting")
+        # Effective-input size cap, business projection, and business-schema validation —
+        # a no-op when the definition has no interface (exact legacy behavior).
+        validate_run_input(interface, input)
         validate_workflow_graph(graph, policy)
         self._validate_callback_nodes_supported(graph)
-        run = self._create_run(graph, policy, input, workflow_definition_id, definition.get("name") or "Workflow run")
+        run = self._create_run(
+            graph,
+            policy,
+            input,
+            workflow_definition_id,
+            definition.get("name") or "Workflow run",
+            interface=interface,
+            workflow_version=definition.get("version"),
+        )
         _audit_input_provenance(self.db, run["id"], input)
         self._start_background(run["id"], graph, policy, input)
         return self.db.get_workflow_run(run["id"]) or run
@@ -779,6 +818,8 @@ class WorkflowRunner:
         input: dict[str, Any] | None = None,
         workflow_definition_id: str | None = None,
         name: str = "Workflow run",
+        interface: dict[str, Any] | None = None,
+        workflow_version: int | None = None,
     ) -> dict[str, Any]:
         policy = policy or {}
         if input is None:
@@ -786,7 +827,10 @@ class WorkflowRunner:
         if not isinstance(input, dict):
             raise ValueError("workflow input must be an object")
         validate_workflow_graph(graph, policy)
-        run = self._create_run(graph, policy, input, workflow_definition_id, name)
+        run = self._create_run(
+            graph, policy, input, workflow_definition_id, name,
+            interface=interface, workflow_version=workflow_version,
+        )
         return self._execute_run(run["id"], graph, policy, input)
 
     def _create_run(
@@ -796,6 +840,8 @@ class WorkflowRunner:
         input: dict[str, Any],
         workflow_definition_id: str | None,
         name: str,
+        interface: dict[str, Any] | None = None,
+        workflow_version: int | None = None,
     ) -> dict[str, Any]:
         return self.db.create_workflow_run(
             {
@@ -804,10 +850,14 @@ class WorkflowRunner:
                 "state": "running",
                 "input": input,
                 "current_nodes": [graph["start"]],
-                # Snapshot the graph+policy this run starts on, so resume/recovery executes
-                # the same definition even if the live one is edited or deleted mid-run.
+                # Snapshot the graph+policy+interface+version this run starts on, so
+                # resume/recovery/historical inspection always replay the SAME definition
+                # even if the live one is edited or deleted mid-run — never a later
+                # interface/version reinterpreting old input.
                 "graph_snapshot": graph,
                 "policy_snapshot": policy or {},
+                "interface_snapshot": interface,
+                "workflow_version_snapshot": workflow_version,
                 "counters": {
                     "jobs_started": 0,
                     "budget_units_spent": 0,
@@ -1613,7 +1663,7 @@ class WorkflowRunner:
         if node.get("type") not in {"worker", "manager"}:
             raise ValueError(f"unsupported workflow node type: {node.get('type')}")
         if node.get("type") == "manager":
-            prompt = _manager_prompt(graph, node, artifacts, counters, policy)
+            prompt = _manager_prompt(graph, node, artifacts, counters, policy, input=input, run=run)
         else:
             prompt = render_prompt(node.get("prompt") or "", input=input, artifacts=artifacts, run=run, node=node, job={})
             if consume_manager_action:
@@ -2202,7 +2252,18 @@ def _manager_prompt(
     artifacts: dict[str, Any],
     counters: dict[str, Any],
     policy: dict[str, Any],
+    input: dict[str, Any] | None = None,
+    run: dict[str, Any] | None = None,
 ) -> str:
+    # B-PR01 parity fix: a manager's authored prompt renders through the SAME
+    # render_prompt() worker prompts use ({input.*}/{artifact.*}/{run.*}/{node.*}/
+    # {job.*}, fail-closed on an unresolved placeholder) before the manager_decision_v1
+    # instruction suffix + context JSON is appended. Previously this text was dropped
+    # in verbatim via an f-string, so an authored {input.topic} never resolved.
+    text = render_prompt(
+        node.get("prompt") or "Choose the next workflow action.",
+        input=input, artifacts=artifacts, run=run, node=node, job={},
+    )
     context = {
         "graph": graph,
         "current_node": node,
@@ -2211,7 +2272,7 @@ def _manager_prompt(
         "policy": policy,
     }
     return (
-        f"{str(node.get('prompt') or 'Choose the next workflow action.').strip()}\n\n"
+        f"{text.strip()}\n\n"
         "Return JSON only using manager_decision_v1: "
         '{"stop":false,"reason":"...","next":[{"node":"target","input_artifacts":[],"instructions":"..."}]}.\n'
         f"Manager context JSON:\n{json.dumps(context, ensure_ascii=True, separators=(',', ':'))}"

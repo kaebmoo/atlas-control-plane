@@ -941,6 +941,8 @@ paths:
                   description: null clears the policy; a cleared policy is treated as {}.
                 default_reply:
                   $ref: '#/components/schemas/WorkflowDefaultReply'
+                interface:
+                  $ref: '#/components/schemas/WorkflowInterface'
       responses:
         '200':
           description: Updated workflow
@@ -1095,6 +1097,14 @@ paths:
               properties:
                 workflow_definition_id: {type: string, minLength: 1}
                 input: {type: object, additionalProperties: true}
+                expected_workflow_version:
+                  type: integer
+                  minimum: 1
+                  description: >-
+                    Optional optimistic-concurrency precondition, compared against the
+                    same definition row loaded for this run (docs/adr/0002). A boolean is
+                    rejected (not an integer). A mismatch returns 409 and creates no run.
+                    Direct-start only — trigger fire does not accept this field in v1.
       responses:
         '202':
           description: Run accepted
@@ -1104,6 +1114,19 @@ paths:
                 type: object
                 properties:
                   run: {$ref: '#/components/schemas/WorkflowRun'}
+        '400':
+          description: >-
+            Invalid payload, or — when the target workflow has an interface — invalid
+            _meta envelope, an effective input over 1 MiB, or business input that fails
+            interface.input_schema. Creates no run.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '409':
+          description: expected_workflow_version did not match the current workflow version. Creates no run.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
         default: {$ref: '#/components/responses/Error'}
 
   /api/workflow-runs/{run_id}:
@@ -1536,6 +1559,16 @@ paths:
       tags: [Triggers]
       operationId: fireWorkflowTrigger
       summary: Fire manual, schedule, or webhook trigger
+      description: >-
+        When the target workflow has an interface (docs/adr/0002), an object payload
+        that fails _meta/business-schema validation still returns 202: the trigger
+        event is recorded with state=failed and a path-aware error, run is null, and no
+        run/runtime work is created — existing dedupe-claim and received/failed
+        bookkeeping is unchanged. A non-object payload keeps the separate existing 400
+        below, before any trigger bookkeeping. v1 does not add a trigger-level
+        expected_workflow_version pin; a fixed-payload trigger (schedule/internal) that
+        cannot satisfy an interface records a failed event, starts no run, and still
+        advances scheduling normally.
       requestBody:
         content:
           application/json:
@@ -1550,6 +1583,11 @@ paths:
           content:
             application/json:
               schema: {type: object, additionalProperties: true}
+        '400':
+          description: payload is present but not an object. No trigger event is created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
         default: {$ref: '#/components/responses/Error'}
 
   /api/workflow-triggers/{trigger_id}/events:
@@ -2137,6 +2175,8 @@ components:
           description: null after an explicit PUT clear; treated as {}.
         default_reply:
           $ref: '#/components/schemas/WorkflowDefaultReply'
+        interface:
+          $ref: '#/components/schemas/WorkflowInterface'
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
       additionalProperties: true
@@ -2156,6 +2196,8 @@ components:
           $ref: './workflow-definition.schema.json#/$defs/policy'
         default_reply:
           $ref: '#/components/schemas/WorkflowDefaultReply'
+        interface:
+          $ref: '#/components/schemas/WorkflowInterface'
       additionalProperties: true
 
     WorkflowTemplate:
@@ -2180,6 +2222,17 @@ components:
         correlation_id: {type: string}
       additionalProperties: true
 
+    WorkflowInterface:
+      oneOf:
+        - $ref: './workflow-definition.schema.json#/$defs/workflowInterface'
+        - type: 'null'
+      description: >-
+        Optional v1 input/output contract (docs/adr/0002-workflow-interface-contract.md).
+        On PUT, omitting this field preserves the stored value, an explicit null clears
+        it, an object replaces it after validation (schema profile + graph cross-check).
+        A bounded JSON-Schema-compatible profile, not full JSON Schema — see the ADR and
+        atlas/workflow_interface.py for the exact keyword allowlist and bounds.
+
     WorkflowPreview:
       type: object
       properties:
@@ -2187,6 +2240,12 @@ components:
           $ref: './workflow-definition.schema.json#/$defs/graph'
         policy:
           $ref: './workflow-definition.schema.json#/$defs/policy'
+        interface:
+          $ref: '#/components/schemas/WorkflowInterface'
+          description: >-
+            When supplied, additively validated (and merged) instead of falling back to
+            the saved workflow's stored interface. default_reply is not accepted by this
+            endpoint (unchanged from before this contract).
 
     WorkerSuggestion:
       type: object

@@ -24,7 +24,7 @@ Packs ship under `atlas/packs/*.json`. The reference pack is
   "description": "…",             // optional
   "docs": "markdown…",            // optional human docs
   "roles": ["operator", "auditor"], // optional; each MUST be a known RBAC role
-  "sample_input": { … },          // optional example run input
+  "sample_input": { … },          // optional example run input (bundle-level; distinct from a workflow's own interface.sample_input, see below)
   "workflows": [                  // required, non-empty
     {
       "name": "…",                // required
@@ -32,7 +32,8 @@ Packs ship under `atlas/packs/*.json`. The reference pack is
       "version": 1,               // optional int, default 1; must be integer-convertible
       "status": "active",         // optional (default active)
       "graph": { … },             // required; validated by the workflow graph validator
-      "policy": { … }             // optional; same shape as a workflow definition policy
+      "policy": { … },            // optional; same shape as a workflow definition policy
+      "interface": { … }          // optional; same shape as a workflow definition interface (see ADR 0002)
     }
   ],
   "triggers": [                   // optional
@@ -63,14 +64,25 @@ A bundle is rejected (`400`, clear error message) unless **all** hold:
 - every entry in `roles` is one of `admin`, `operator`, `viewer`, `auditor`.
 - every trigger's `workflow` index points at an existing workflow and its `type` passes
   `validate_workflow_trigger_payload`.
+- each workflow's optional `interface` (see [ADR 0002](../adr/0002-workflow-interface-contract.md))
+  is checked with the same shared validator and graph cross-check used by
+  `POST /api/workflows` — a pack cannot import an interface the workflow API would reject.
 
 On **import**, any concrete `worker_id` / `workspace_id` (or `policy.allowed_*` ids) in a
 workflow must exist on the importing instance — otherwise the pack is rejected rather
 than persisting a definition that would dangle at routing time. **Role-only** nodes carry
 no instance-specific ids and stay portable across instances (the recommended way to
-author packs). Export preserves each workflow's graph/policy/version/status, so a
-workflow definition round-trips faithfully; bundle-level metadata (`roles`, `sample_input`,
-`docs`) is pack-authoring-only and is not persisted, so it is emptied on export.
+author packs). Export preserves each workflow's graph/policy/interface/version/status, so
+a workflow definition round-trips faithfully; bundle-level metadata (`roles`, `sample_input`,
+`docs`) is pack-authoring-only and is not persisted, so it is emptied on export. A
+workflow's `interface` is a persisted part of that workflow definition — unlike the
+bundle-level `sample_input` above, it survives import and export like `graph`/`policy` do,
+and it is covered by the existing whole-bundle HMAC signature (see Signing below); packs
+add no second signing scheme. **These two `sample_input` fields are unrelated**: the
+top-level, bundle-level `sample_input` is never copied into, merged with, or otherwise
+promoted to any workflow's `interface.sample_input` — a pack author who wants a workflow's
+interface to carry example data must set `interface.sample_input` on that workflow
+explicitly.
 
 Validation never bypasses the real engine validators (graph **and** policy caps), so a
 pack can only create workflows that the workflow API would otherwise accept.
@@ -108,6 +120,12 @@ The `Citizen complaint intake` trigger fires a run with the complaint as input;
 `triage` classifies it; `draft` writes an official response; the `review` human gate
 offers **approve** / **reject**; on **approve** the `publish` worker releases the
 response; **reject** ends the run without publishing (the draft remains for revision).
+
+The bundled `gov_complaint` workflow also carries a synthetic per-workflow `interface`
+(`input_schema` for `complaint`/`channel`/`citizen_ref`, an `interface.sample_input`, and
+`outputs` for `triage`/`draft_response`/`published`) — see
+[`atlas/packs/gov_complaint.json`](../../atlas/packs/gov_complaint.json) — demonstrating
+the field documented above.
 
 ## Signing & verification
 

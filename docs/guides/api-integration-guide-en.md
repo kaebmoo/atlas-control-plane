@@ -245,7 +245,59 @@ curl -sS -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/workflow-runs/$RUN_ID/
 pattern applies via `fetch`/`urllib.request` as in §4a — swap the path and
 payload.
 
-### 4c. Upload a file to a run, then download an artifact
+### 4c. Validating input against the workflow interface
+
+When `wfd_xxx` has an optional `interface` declared, the *same*
+`POST /api/workflow-runs` call from §4b also validates `input` before
+creating anything:
+
+```bash
+curl -sS -X POST "$BASE_URL/api/workflow-runs" \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"workflow_definition_id":"wfd_xxx","input":{"topic":"AI"},"expected_workflow_version":3}'
+```
+
+- The business projection of `input` (everything except the reserved
+  `_meta`/`_trigger_chain` keys) is checked against `interface.input_schema`.
+  Invalid input returns `400` and creates no run, runtime node, event, job,
+  or audit entry.
+- The optional `expected_workflow_version` (a positive integer) pins the call
+  to a specific definition revision; a mismatch returns `409` with no run
+  created, reusing the existing version-conflict mapping. A workflow with no
+  interface, or a request that omits `expected_workflow_version`, keeps exact
+  legacy behavior.
+- Every definition-backed run's response — including the one from this
+  call — carries `interface_snapshot` (the `interface` object or `null`) and
+  `workflow_version_snapshot`: the exact values the run actually started
+  with, unaffected by a later edit to the definition.
+
+This guide only covers the request/response shape you need to call the
+endpoint correctly; for the full `input_schema` field profile, its bounds,
+and `outputs`/`primary_output` semantics, see
+[API Reference §7 "Input/output interface (v1)"](../specs/api-reference-en.md#input-output-interface-v1)
+and [ADR 0002](../adr/0002-workflow-interface-contract.md).
+
+### 4d. Triggers
+
+Fire a manual trigger the same way you'd start a run directly:
+
+```bash
+curl -sS -X POST "$BASE_URL/api/workflow-triggers/wtr_xxx/fire" \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"payload":{"topic":"AI"},"dedupe_key":"event-001"}'
+```
+
+When the target workflow has an interface, `fire` still returns `202` for an
+invalid **object** `payload` (the trigger event is recorded `failed` with
+`run: null` and no run is created), a **non-object** `payload` keeps the
+separate existing `400`, and v1 does not add a trigger-level
+`expected_workflow_version` pin. See
+[API Reference §11 "Workflow Triggers"](../specs/api-reference-en.md#11-workflow-triggers)
+for trigger types, create/update/delete, and dedupe.
+
+### 4e. Upload a file to a run, then download an artifact
 
 Uploads are raw binary bodies, not multipart or base64. `Content-Length` is
 required and the size is capped by `ATLAS_MAX_UPLOAD_BYTES` (default 10 MiB).
