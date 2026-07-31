@@ -9,6 +9,7 @@ the run-start path, pack import, and the hermetic checks — never duplicate thi
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -76,7 +77,7 @@ def _is_nonneg_int(value: Any) -> bool:
 
 
 def _is_finite_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value and abs(value) != float("inf")
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _schema_types(schema: dict[str, Any]) -> tuple[str, ...]:
