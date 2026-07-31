@@ -175,8 +175,11 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     for key in list_fields | json_fields:
         if key in data:
             data[key] = decode_json(data[key], [] if key in list_fields else {})
-    if "default_reply" in data:
-        data["default_reply"] = decode_json(data["default_reply"])
+    for key in ("default_reply", "interface", "interface_snapshot"):
+        # Nullable, decode-to-None columns: unlike graph/policy (NOT NULL, fall back to
+        # {}), SQL NULL here means "no authoritative contract" and must stay None, not {}.
+        if key in data:
+            data[key] = decode_json(data[key])
     return data
 
 
@@ -705,6 +708,20 @@ def _migration_014_token_lifecycle(conn: sqlite3.Connection) -> None:
             )
 
 
+def _migration_015_workflow_interface(conn: sqlite3.Connection) -> None:
+    # Milestone B (docs/adr/0002-workflow-interface-contract.md): the optional, nullable
+    # workflow.interface contract. Nullable everywhere -> every definition/run created
+    # before this feature stays on exact legacy (no-contract) behavior; interface=NULL
+    # must decode to Python None, never {}, since null means "no authoritative contract"
+    # (see row_to_dict below).
+    _add_missing_columns(conn, "workflow_definitions", {"interface": "TEXT"})
+    _add_missing_columns(
+        conn,
+        "workflow_runs",
+        {"interface_snapshot": "TEXT", "workflow_version_snapshot": "INTEGER"},
+    )
+
+
 # Ordered, append-only migration steps. A step is either a SQL string (run via
 # executescript) or a callable(conn). The 1-based index is the schema version.
 # Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
@@ -727,6 +744,7 @@ MIGRATIONS: list[str | Any] = [
     _migration_012_collection_inflight,
     _migration_013_workflow_default_reply,
     _migration_014_token_lifecycle,
+    _migration_015_workflow_interface,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -1251,9 +1269,9 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO workflow_definitions(
-                  id, name, description, version, status, graph, policy, default_reply, created_at, updated_at
+                  id, name, description, version, status, graph, policy, default_reply, interface, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     definition_id,
@@ -1264,6 +1282,7 @@ class Database:
                     encode_json(payload.get("graph") or {}),
                     encode_json(payload.get("policy") or {}),
                     encode_json(payload["default_reply"]) if payload.get("default_reply") is not None else None,
+                    encode_json(payload["interface"]) if payload.get("interface") is not None else None,
                     now,
                     now,
                 ),
@@ -1299,6 +1318,7 @@ class Database:
             "graph": "graph",
             "policy": "policy",
             "default_reply": "default_reply",
+            "interface": "interface",
         }
         fields: dict[str, Any] = {}
         for key, column in allowed.items():
@@ -1307,8 +1327,8 @@ class Database:
                     # Always encoded: the columns are NOT NULL, so an explicit None must
                     # become the JSON string "null" (reads back as None -> treated as {}).
                     fields[column] = encode_json(payload[key])
-                elif key == "default_reply":
-                    # Nullable column: None means "clear the default", stored as SQL NULL.
+                elif key in {"default_reply", "interface"}:
+                    # Nullable column: explicit None clears it, stored as SQL NULL.
                     fields[column] = encode_json(payload[key]) if payload[key] is not None else None
                 else:
                     fields[column] = payload[key]
@@ -1353,9 +1373,9 @@ class Database:
                 INSERT INTO workflow_runs(
                   id, workflow_definition_id, name, state, input, current_nodes,
                   counters, error, created_at, started_at, finished_at, updated_at,
-                  graph_snapshot, policy_snapshot
+                  graph_snapshot, policy_snapshot, interface_snapshot, workflow_version_snapshot
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -1372,6 +1392,8 @@ class Database:
                     now,
                     encode_json(payload["graph_snapshot"]) if payload.get("graph_snapshot") is not None else None,
                     encode_json(payload["policy_snapshot"]) if payload.get("policy_snapshot") is not None else None,
+                    encode_json(payload["interface_snapshot"]) if payload.get("interface_snapshot") is not None else None,
+                    payload.get("workflow_version_snapshot"),
                 ),
             )
         self.audit("workflow_run.create", "workflow_run", run_id, {"workflow_definition_id": payload.get("workflow_definition_id")})

@@ -57,6 +57,10 @@
   — decision (silo / instance-per-tenant), the exact pooled change-list + migration path
   if ever approved, and the revisit trigger. Atlas core stays `tenant_id`-free (guarded
   by `scripts/check_silo.py`).
+- [ADR 0002 — workflow.interface v1 contract](adr/0002-workflow-interface-contract.md)
+  — the optional, nullable input/output contract: bounded JSON-Schema-compatible
+  profile, business-input projection, possible-not-guaranteed outputs, direct-run
+  version pin, run snapshots, pack behavior, and every deferred item.
 
 ## ปฏิบัติการ / Operations
 

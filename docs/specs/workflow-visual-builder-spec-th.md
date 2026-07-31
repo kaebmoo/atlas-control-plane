@@ -173,6 +173,116 @@ name/graph/policy, เขียน condition/mode/schema และ trigger field
 ไว้หนึ่ง key เพราะ runtime ปัจจุบันใช้เฉพาะ key แรก Backend อาจรับรูปย่อบางแบบ แต่ importer
 ต้อง normalize ก่อนตรวจด้วย schema นี้
 
+## 5a. Run input contract
+
+`interface` เป็น root-level field ใหม่ที่เป็น optional และ nullable อยู่ระดับเดียวกับ
+`name`, `graph`, `policy`, และ `default_reply` (§5) ใช้ประกาศ business input ที่ workflow
+ต้องการ และ artifact output ที่อาจผลิตออกมา เพื่อให้ visual editor, raw JSON editor และ
+external caller ใด ๆ validate `input` ของ run ได้ก่อน Save/Run แทนที่จะไปพบ payload ที่ผิด
+หลัง job เริ่มไปแล้ว ดู [ADR 0002](../adr/0002-workflow-interface-contract.md) สำหรับ
+contract แบบเต็ม และ [Workflow Definition Schema](workflow-definition.schema.json)
+(`$defs.workflowInterface`) สำหรับรูปแบบที่แน่นอนในเชิง machine-readable
+
+```json
+{
+  "interface": {
+    "schema_version": 1,
+    "input_schema": {
+      "type": "object",
+      "properties": {"topic": {"type": "string", "minLength": 1, "title": "Topic"}},
+      "required": ["topic"],
+      "additionalProperties": false
+    },
+    "sample_input": {"topic": "renewable energy policy"},
+    "outputs": [
+      {"key": "research", "kind": "text", "title": "Research notes"}
+    ],
+    "primary_output": "research"
+  }
+}
+```
+
+ตัวอย่างนี้ต่อยอดจากสถานการณ์ `Research {input.topic}` ที่ใช้ตลอดทั้งสเปกนี้ (§18): prompt
+ของ start node อ้างอิง `input.topic` ดังนั้น `input_schema` ต้องประกาศและ require `topic`
+เป็น `string` ที่ root และ output `research` ที่ node นั้นประกาศไว้ใน `outputs` ของตัวเองก็ต้อง
+มี `interface.outputs[]` entry คู่กันที่ `kind: "text"` (node ไม่มี `output_format` ซึ่งหมายถึง
+text โดย default)
+
+**Profile ที่มีขอบเขตจำกัด ไม่ใช่ JSON Schema เต็มรูปแบบ.** `input_schema` รองรับเฉพาะ:
+`type` (primitive เดียว หรือ array ของ primitive ที่ไม่ซ้ำกัน — `object`/`array`/
+`string`/`number`/`integer`/`boolean`/`null`), `properties`, `required`,
+`additionalProperties` (boolean เท่านั้น), `items`, `enum`, `const`, `minLength`,
+`maxLength`, `minimum`, `maximum`, `minItems`, `maxItems`, และ annotation-only
+`title`/`description`/`default`/`examples` `$schema` เป็น optional และรับเฉพาะเมื่อค่าตรงกับ
+`https://atlas.local/schemas/workflow-interface-input-v1.schema.json` เป๊ะ ๆ — เป็นแค่
+identifier ไม่เคยถูก fetch `$ref`, combinator (`oneOf`/`anyOf`/`allOf`/`not`/
+`if`-`then`-`else`), `pattern`, `patternProperties`, `format` และ keyword แบบ
+dependent/dynamic/unevaluated หรือ keyword ที่ไม่รู้จักอื่น ๆ ถูก reject ทั้งหมด — fail
+closed ไม่มีการเพิกเฉยแบบเงียบ ๆ root schema ต้องประกาศ `"type": "object"` เท่านั้น
+
+**ขอบเขต (Bounds).** ความลึก ≤ 16; property ที่ประกาศรวม ≤ 256 นับสะสมทั้ง schema;
+แต่ละ list ของ `required`/`enum` ≤ 256 รายการ; `outputs` ≤ 256 รายการ; instance node ที่
+เดินตรวจต่อการ validate หนึ่งครั้ง ≤ 10,000 (เป็น traversal budget ไม่ใช่ขอบเขตขนาด schema);
+`title` ≤ 256 Unicode code point; `description` ≤ 2,048 เพดานขนาดไบต์ใช้ canonical
+serialization เดียวกันทุกที่ — `json.dumps(value, ensure_ascii=True, sort_keys=True,
+separators=(",", ":"), allow_nan=False)` แล้ว encode UTF-8: `interface` ที่ serialize
+แล้ว ≤ 64 KiB, `sample_input` ที่ serialize แล้ว ≤ 64 KiB, และ effective input ทั้งหมดของ
+run ที่มี interface — รวม reserved field, หลัง merge `default_reply`, ก่อน project เป็น
+business input — ≤ 1 MiB ตัวเลขที่ไม่ finite (`NaN`, `Infinity`) ถูก reject ทันที รักษา JSON
+type fidelity ตลอด: `bool` ไม่ถูกถือเป็น `int`/`number` เด็ดขาด รวมถึงตอนเทียบ `enum`/`const`
+(`true` ไม่ตรงกับ `1`)
+
+**การ project business input.** business input ที่ Atlas ใช้ validate กับ `input_schema`
+คือ input ทั้งหมดของ run ลบด้วย reserved key ระดับบนสองตัวเท่านั้นคือ `_meta` และ
+`_trigger_chain` — ไม่ใช่ทุกคีย์ที่ขึ้นต้นด้วย underscore ซึ่งจะกลายเป็นช่องโหว่ให้ validation
+ข้าม input ฉบับเต็ม (รวม reserved key) ยังคงเป็นสิ่งที่ persist และถูกจำกัดขนาดไบต์; การ
+project แค่ทำให้ขอบเขตของสิ่งที่ถูก schema-validate แคบลง
+
+**Sample input.** `sample_input` เมื่อมี ต้อง conform กับ `input_schema` และต้องเป็นข้อมูล
+สังเคราะห์ (synthetic) — เป็นเอกสาร/ข้อมูลทดสอบเท่านั้น ห้ามใส่ข้อมูลลับหรือข้อมูลส่วนบุคคลจริง
+และไม่ถูก merge เข้า production run แบบเงียบ ๆ เด็ดขาด ไม่มี PII detector ตรวจแบบอัตโนมัติ
+ตัวอย่างที่ commit ไว้ (ตัวอย่างในสเปกนี้เอง, ตัวอย่าง pack ที่แนบมา) ต้อง review ด้วยคนเท่านั้น
+
+**สัญญาของ outputs.** แต่ละ `outputs[]` entry ประกาศ `key` ที่ตรงกับ
+`^[A-Za-z_][A-Za-z0-9_]{0,127}$`, ไม่ซ้ำกันภายใน list, ผลิตโดย worker node เพียงตัวเดียวใน
+graph, และ `kind` (`text`/`json`) ต้องตรงกับ `output_format` ของ node นั้น (ไม่มี/ไม่ระบุ
+`output_format` = `text`, `"json"` = `json`) output ที่ประกาศไว้ทุกตัวเป็น **แค่ความเป็นไปได้
+ไม่ใช่การรับประกัน** บน run ที่สำเร็จทุกครั้ง — graph แตกสาขาได้ ดังนั้น output ที่หายไปจะไม่ทำให้
+run ที่สำเร็จอยู่แล้วล้มเหลว และทุก artifact ไม่ว่าจะประกาศไว้หรือไม่ ยังคงไหลผ่าน polling และ
+webhook รูปแบบเดิม `primary_output` แบบ optional จะระบุคีย์ใน `outputs[]` หนึ่งตัวเป็น client
+hint ว่าควรใช้ artifact ไหนก่อน — ไม่สร้าง execution dependency หรือการรับประกันใด ๆ
+
+**การ cross-check กับ graph ตอน save.** เมื่อ save definition ที่มี `interface` ไม่เป็น null
+Atlas จะ cross-check กับ `graph` ที่กำลังจะบันทึก:
+
+- ทุก path `{input.*}` ที่ถูกอ้างอิงในที่ใดก็ตามภายใน prompt ของ worker/manager node ต้อง
+  เป็นไปได้ภายใต้ `input_schema` — schema แบบปิด (`additionalProperties: false` โดยไม่ได้
+  ประกาศคีย์นั้น) ห้ามทำให้ path ที่ถูกอ้างอิงเป็นไปไม่ได้
+- ทุก path ที่ prompt ของ node **start** ของ graph อ้างอิงต้องถูกประกาศและ required ในทุก
+  object segment โดยแต่ละ segment ระดับกลางต้องประกาศ `"type": "object"` เท่านั้น
+  (ห้าม nullable, ห้าม union แบบผสม scalar/object) กฎนี้ใช้กับ manager start node ด้วย
+  เพราะตอนนี้ manager prompt render `{input.*}`/`{artifact.*}`/`{run.*}`/`{node.*}` แบบ
+  เดียวกับ worker prompt แล้ว — ดู prerequisite fix ใน ADR 0002; ก่อนหน้านี้ prompt ที่
+  manager เขียนไม่เคยถูกแทนค่าเลย
+- path `{input.*}` ของ node ที่เป็น downstream หรือ conditional (ไม่ใช่ start) ยังคงเป็น
+  optional ได้
+
+**Endpoint สำหรับแก้ไขและ validate.** `PUT /api/workflows/{id}` ใช้แพทเทิร์นสามสถานะเดียวกับ
+`default_reply`: ไม่ส่ง `interface` มา = คงค่าที่ save ไว้, ส่ง `null` ชัดเจน = ล้างค่า, ส่งเป็น
+object = แทนที่หลัง validate ถ้า `graph` เปลี่ยนขณะที่ไม่ได้ส่ง `interface` มา interface
+**ที่ save ไว้** จะถูก revalidate กับ graph ที่ merge แล้วก่อนเขียนจริง เปลี่ยนแค่ `interface`
+อย่างเดียวก็ยังผ่าน `expected_version` และเพิ่ม `workflow.version` ครั้งเดียวเหมือนเดิม —
+ไม่มีกลไก concurrency ใหม่ `POST /api/workflows/{id}/validate` รับ `interface` ใน body แบบ
+additive (merge เหมือน `graph`/`policy`) เมื่อไม่ส่งมาจะ validate interface **ที่ save ไว้**
+กับ graph ที่ส่งมา `default_reply` ยังคงไม่ถูกรวมใน endpoint นี้เหมือนเดิม
+
+**เลื่อนออกไป (นอกขอบเขต v1).** การทำ JSON Schema เต็มรูปแบบหรือ resolve `$ref`; form/page
+builder แบบ visual สำหรับ end user หรือ UI-layout schema language; การ stage ไฟล์ binary
+แบบ atomic ก่อน start ให้ start node (endpoint `/workflow-runs/{id}/files` ที่มีอยู่ทำงาน
+หลัง run เริ่มแล้วเท่านั้น ไม่ใช่การรับไฟล์แบบ atomic ตอน start) ดู
+[ADR 0002](../adr/0002-workflow-interface-contract.md) §11 สำหรับรายการที่เลื่อนออกไปแบบเต็ม
+รวมถึง required-on-success output proof และการกรอง output ใน webhook
+
 ## 6. กฎร่วมของ node
 
 node ทุกตัวต้องมี:
@@ -573,6 +683,12 @@ Canonical trigger draft:
 Internal trigger สามชนิดท้ายถูกยิงโดย Atlas และไม่ควรแสดงปุ่ม Fire ส่วน
 manual/schedule/webhook แสดง Fire เพื่อทดสอบได้ Event เดิมควรส่ง `dedupe_key` เดิมเมื่อ retry
 
+เมื่อ workflow ปลายทางมี [interface](#5a-run-input-contract) `Fire` จะ validate
+`payload` แบบเดียวกับ run: payload ที่เป็น **object** แต่ไม่ผ่าน validate ยังคืน `202`
+พร้อม trigger event แบบ `failed` และ `run: null`, payload ที่ **ไม่ใช่ object** ยังคง
+`400` เดิมก่อนมี trigger bookkeeping ใด ๆ และ v1 ไม่เพิ่ม `expected_workflow_version`
+pin ระดับ trigger
+
 ไฟล์ [workflow-trigger.schema.json](workflow-trigger.schema.json) ตรวจ trigger drafts
 ก่อนส่ง API โดย `workflow_definition_id` จะถูกเติมตอน persist
 
@@ -764,6 +880,10 @@ policy สูงเกินความจำเป็น แต่ห้าม
 | Suggest triggers | `POST /api/workflows/{id}/suggest-triggers` |
 | สร้าง trigger | `POST /api/workflow-triggers` |
 | Run | `POST /api/workflow-runs` |
+
+`Run` (`POST /api/workflow-runs`) ตอนนี้รับ `expected_workflow_version` แบบ optional
+เทียบกับ definition row เดียวกับที่โหลดสำหรับ graph/policy/interface — ถ้าไม่ตรงจะใช้
+mapping เดิม `WorkflowVersionConflict` → `409` และไม่สร้าง run (ดู [§5a](#5a-run-input-contract))
 
 ข้อจำกัด API ปัจจุบัน: endpoint Validate ต้องมี saved workflow ID ก่อน สำหรับ unsaved draft
 ให้ client validate ด้วย schema/semantic validator; ตอน Save backend จะ validate ซ้ำ ส่วน AI

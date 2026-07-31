@@ -27,6 +27,7 @@ from .packs import export_pack, import_pack, list_available_packs
 from .router import Router
 from .thclaws_client import ThClawsClient, ThClawsError, redact_tool_payload_for_read
 from .usage import audit_csv, normalize_usage_range, summarize_usage, usage_csv
+from .workflow_interface import cross_check_against_graph, validate_interface
 from .workflow_templates import workflow_templates
 from .workflows import (
     WORKFLOW_POLICY_LIMITS,
@@ -714,8 +715,17 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 validation_payload = {"graph": graph, "policy": policy}
                 if "default_reply" in payload:
                     validation_payload["default_reply"] = payload["default_reply"]
+                if "interface" in payload:
+                    validation_payload["interface"] = payload["interface"]
                 _validate_workflow_payload(runtime, validation_payload)
                 _validate_workflow_metadata(payload)
+                if "interface" not in payload:
+                    # interface omitted: preserves the stored value, but if graph is
+                    # changing that stored interface must still be compatible with it
+                    # (start-path requiredness etc.) before the write lands.
+                    stored_interface = workflow.get("interface")
+                    if stored_interface is not None:
+                        cross_check_against_graph(stored_interface, graph)
                 updated = runtime.db.update_workflow_definition(workflow_id, payload)
                 self._json({"workflow": updated})
                 return
@@ -732,7 +742,16 @@ class AtlasHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             graph = payload.get("graph", workflow["graph"])
             policy = payload.get("policy", workflow.get("policy") or {})
+            # default_reply is deliberately excluded here (matches existing behavior);
+            # interface is additive: validate a supplied one, else cross-check the
+            # stored one against the candidate graph.
             _validate_workflow_payload(runtime, {"graph": graph, "policy": policy})
+            if "interface" in payload:
+                validate_interface(payload["interface"], graph)
+            else:
+                stored_interface = workflow.get("interface")
+                if stored_interface is not None:
+                    cross_check_against_graph(stored_interface, graph)
             self._json({"ok": True})
             return
 
@@ -776,7 +795,11 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     # creating a run that fails asynchronously once the engine touches it.
                     # Normalize only missing/None — a falsy non-object ([], "", 0) is rejected.
                     raise ValueError("input must be an object")
-                run = runtime.workflows.start_workflow(workflow_definition_id, run_input)
+                run = runtime.workflows.start_workflow(
+                    workflow_definition_id,
+                    run_input,
+                    expected_workflow_version=payload.get("expected_workflow_version"),
+                )
                 self._json({"run": run}, HTTPStatus.ACCEPTED)
                 return
 
@@ -1501,6 +1524,8 @@ def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any], r
     _validate_workflow_draft_triggers(payload.get("triggers") or [])
     if "default_reply" in payload:
         validate_workflow_default_reply(payload["default_reply"], runtime.config.outbound_allowlist)
+    if "interface" in payload:
+        validate_interface(payload["interface"], graph)
 
 
 _WORKFLOW_DRAFT_FIELDS = {"name", "description", "graph", "policy", "triggers", "explanation", "warnings"}
