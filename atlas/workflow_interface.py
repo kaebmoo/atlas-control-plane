@@ -124,7 +124,12 @@ def _validate_schema_node(node: Any, path: str, depth: int, budget: _PropertyBud
         raw_type = node["type"]
         if isinstance(raw_type, str):
             types = (raw_type,)
-        elif isinstance(raw_type, list) and raw_type and len(raw_type) == len(set(raw_type)):
+        elif (
+            isinstance(raw_type, list)
+            and raw_type
+            and all(isinstance(entry, str) for entry in raw_type)  # before set(): a dict/list entry is unhashable
+            and len(raw_type) == len(set(raw_type))
+        ):
             types = tuple(raw_type)
         else:
             raise ValueError(f"{path}.type: must be a primitive type string or a unique list of them")

@@ -412,13 +412,25 @@ class WorkflowRunner:
         definition = self.db.get_workflow_definition(workflow_definition_id)
         if not definition:
             raise ValueError(f"Unknown workflow_definition_id: {workflow_definition_id}")
+        if input is None:
+            input = {}
+        if not isinstance(input, dict):
+            raise ValueError("workflow input must be an object")
         input = self._with_default_reply(definition, input)
+        # Definition-backed runs MUST validate interface input and carry the
+        # interface/version snapshots no matter which entry point starts them —
+        # otherwise this synchronous path would silently bypass the contract
+        # start_workflow enforces (docs/adr/0002).
+        interface = definition.get("interface")
+        validate_run_input(interface, input)
         return self.run_graph(
             definition["graph"],
             definition.get("policy") or {},
             input=input,
             workflow_definition_id=workflow_definition_id,
             name=definition.get("name") or "Workflow run",
+            interface=interface,
+            workflow_version=definition.get("version"),
         )
 
     def start_workflow(
@@ -806,6 +818,8 @@ class WorkflowRunner:
         input: dict[str, Any] | None = None,
         workflow_definition_id: str | None = None,
         name: str = "Workflow run",
+        interface: dict[str, Any] | None = None,
+        workflow_version: int | None = None,
     ) -> dict[str, Any]:
         policy = policy or {}
         if input is None:
@@ -813,7 +827,10 @@ class WorkflowRunner:
         if not isinstance(input, dict):
             raise ValueError("workflow input must be an object")
         validate_workflow_graph(graph, policy)
-        run = self._create_run(graph, policy, input, workflow_definition_id, name)
+        run = self._create_run(
+            graph, policy, input, workflow_definition_id, name,
+            interface=interface, workflow_version=workflow_version,
+        )
         return self._execute_run(run["id"], graph, policy, input)
 
     def _create_run(

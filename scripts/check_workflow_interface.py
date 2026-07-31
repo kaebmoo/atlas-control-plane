@@ -85,10 +85,18 @@ def check_validator_unit() -> None:
         {"type": "object", "properties": {"a": {"$schema": wi.INPUT_SCHEMA_URI, "type": "string"}}},
     )
 
-    # Root must declare exactly type "object".
+    # Root must declare exactly type "object". The single-element list form is
+    # DOCUMENTED as equivalent (ADR 0002 §3) — lock that acceptance here.
     assert "root input_schema" in _expect_raises(wi.validate_input_schema, {"type": "string"})
     assert "root input_schema" in _expect_raises(wi.validate_input_schema, {"type": ["object", "null"]})
     assert "root input_schema" in _expect_raises(wi.validate_input_schema, {})
+    wi.validate_input_schema({"type": ["object"]})
+    # A non-string (unhashable) entry inside a type list must be a ValueError, never a
+    # TypeError from set() — found by check_fuzz, locked here.
+    assert "primitive type" in _expect_raises(wi.validate_input_schema, {"type": ["object", {}]})
+    assert "primitive type" in _expect_raises(
+        wi.validate_input_schema, {"type": "object", "properties": {"a": {"type": [["x"]]}}}
+    )
 
     # Depth bound: exactly 16 accepted, 17 rejected.
     def _nest(levels: int) -> dict:
@@ -164,7 +172,20 @@ def check_validator_unit() -> None:
     projected = wi.business_projection({"_meta": {"x": 1}, "_trigger_chain": ["a"], "_custom": "keep", "topic": "AI"})
     assert projected == {"_custom": "keep", "topic": "AI"}, projected
 
-    # Byte caps.
+    # Byte caps. First the AT-LIMIT side: an interface serializing to exactly
+    # INTERFACE_MAX_BYTES must be accepted (pad an ASCII sample value, 1 char = 1 byte).
+    padded_interface = {
+        "schema_version": 1,
+        "input_schema": {"type": "object", "properties": {"p": {"type": "string"}}},
+        "sample_input": {"p": ""},
+    }
+    pad = wi.INTERFACE_MAX_BYTES - len(wi.canonical_bytes(padded_interface))
+    padded_interface["sample_input"]["p"] = "x" * pad
+    assert len(wi.canonical_bytes(padded_interface)) == wi.INTERFACE_MAX_BYTES
+    wi.validate_interface_document(padded_interface)  # exactly at the cap: accepted
+    padded_interface["sample_input"]["p"] += "x"
+    assert "exceeds" in _expect_raises(wi.validate_interface_document, padded_interface)
+
     huge_interface = {
         "schema_version": 1,
         "input_schema": {"type": "object", "properties": {f"p{i}": {"type": "string"} for i in range(1)}},
@@ -783,6 +804,134 @@ def check_possible_outputs_and_undeclared_artifacts(runtime) -> None:
     print("possible-output / undeclared-artifact checks ok")
 
 
+# The canonical Permit Application fixture (flow-designer test plan §4.1-4.3 /
+# PERMIT_APPLICATION_CONTRACT_V1): nested closed object, array-of-closed-objects,
+# Thai annotations, enum, optional downstream-only field, two possible text outputs.
+PERMIT_INTERFACE = {
+    "schema_version": 1,
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["applicant_name", "permit_type", "detail", "attachments"],
+        "properties": {
+            "applicant_name": {"type": "string", "title": "ชื่อผู้ขอ", "minLength": 1},
+            "permit_type": {"type": "string", "title": "ประเภทคำขอ", "enum": ["ขออนุญาตก่อสร้าง", "ขออนุญาตดัดแปลงอาคาร"]},
+            "detail": {
+                "type": "object", "title": "รายละเอียด", "additionalProperties": False,
+                "required": ["building_type", "floors"],
+                "properties": {"building_type": {"type": "string"}, "floors": {"type": "integer", "minimum": 1}},
+            },
+            "attachments": {
+                "type": "array", "title": "รายการเอกสารแนบ",
+                "items": {
+                    "type": "object", "additionalProperties": False, "required": ["name", "kind"],
+                    "properties": {"name": {"type": "string"}, "kind": {"type": "string"}},
+                },
+            },
+            "review_context": {"type": "string", "title": "บริบทเพิ่มเติม"},
+        },
+    },
+    "sample_input": {
+        "applicant_name": "นายทดสอบ ระบบ",
+        "permit_type": "ขออนุญาตก่อสร้าง",
+        "detail": {"building_type": "อาคารพาณิชย์", "floors": 2},
+        "attachments": [
+            {"name": "synthetic-id-copy.pdf", "kind": "identity-copy"},
+            {"name": "synthetic-land-title.pdf", "kind": "land-record"},
+        ],
+        "review_context": "ข้อมูลสมมติสำหรับทดสอบ PoC เท่านั้น",
+    },
+    "outputs": [
+        {"key": "intake_review", "kind": "text", "title": "ผลตรวจความครบถ้วน"},
+        {"key": "assessment_result", "kind": "text", "title": "ผลการประเมิน"},
+    ],
+    "primary_output": "assessment_result",
+}
+
+PERMIT_VALID_INPUT = {
+    "applicant_name": "นายทดสอบ ระบบ",
+    "permit_type": "ขออนุญาตก่อสร้าง",
+    "detail": {"building_type": "อาคารพาณิชย์", "floors": 2},
+    "attachments": [
+        {"name": "synthetic-id-copy.pdf", "kind": "identity-copy"},
+        {"name": "synthetic-land-title.pdf", "kind": "land-record"},
+    ],
+    "review_context": "ข้อมูลสมมติสำหรับทดสอบ PoC เท่านั้น",
+    "_meta": {"source": {"channel": "web_form", "adapter": "hermetic-check", "form": "permit-poc", "external_id": "TEST-PERMIT-001"}},
+}
+
+
+def _permit_graph(worker_id: str) -> dict:
+    return {
+        "start": "intake",
+        "nodes": [
+            {
+                "id": "intake", "type": "worker", "worker_id": worker_id,
+                "prompt": "STEP=intake\nผู้ขอ: {input.applicant_name}\nประเภทคำขอ: {input.permit_type}\nรายละเอียด: {input.detail}\nเอกสารแนบ: {input.attachments}",
+                "outputs": ["intake_review"], "budget_units": 1,
+            },
+            {
+                "id": "assessment", "type": "worker", "worker_id": worker_id,
+                "prompt": "STEP=assessment\nประเมินผล {artifact.intake_review}\nบริบทเพิ่มเติม: {input.review_context}",
+                "outputs": ["assessment_result"], "budget_units": 1,
+            },
+        ],
+        "edges": [{"from": "intake", "to": "assessment", "condition": {"type": "always"}}],
+    }
+
+
+def check_permit_fixture(base_url: str, runtime) -> None:
+    """The canonical Permit contract end to end: API round trip, nested/array/Thai
+    validation errors with no side effect, and a real run through the SYNCHRONOUS
+    run_workflow path — which must validate interface input and stamp the
+    interface/version snapshots exactly like start_workflow (no bypass entry point)."""
+    worker = runtime.db.upsert_worker({"base_url": "http://permit-check.local", "name": "permit"})
+    wf = request(base_url, "POST", "/api/workflows", {
+        "name": "PoC Permit Application",
+        "graph": _permit_graph(worker["id"]),
+        "policy": {"max_jobs": 2, "allowed_worker_ids": [worker["id"]]},
+        "interface": PERMIT_INTERFACE,
+    })["workflow"]
+    assert request(base_url, "GET", f"/api/workflows/{wf['id']}")["workflow"]["interface"] == PERMIT_INTERFACE
+
+    runs_before = len(request(base_url, "GET", "/api/workflow-runs")["runs"])
+    for bad_input, expected_fragment in (
+        ({k: v for k, v in PERMIT_VALID_INPUT.items() if k != "attachments"}, "attachments"),
+        ({**PERMIT_VALID_INPUT, "secret_override": True}, "secret_override"),
+        ({**PERMIT_VALID_INPUT, "detail": {"building_type": "x", "floors": True}}, "floors"),
+        ({**PERMIT_VALID_INPUT, "detail": None}, "detail"),
+    ):
+        error = request_error(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": wf["id"], "input": bad_input})
+        assert expected_fragment in error["error"], (expected_fragment, error)
+    assert len(request(base_url, "GET", "/api/workflow-runs")["runs"]) == runs_before, "invalid Permit input must create no run"
+
+    # Synchronous run_workflow: same validation (ValueError, no run) ...
+    jobs = FakeJobService(runtime.db, worker["id"])
+    runner = WorkflowRunner(runtime.db, jobs, poll_interval_seconds=0)
+    try:
+        runner.run_workflow(wf["id"], {"applicant_name": "x"})
+    except ValueError as exc:
+        assert "missing required" in str(exc), exc
+    else:
+        raise AssertionError("run_workflow must validate interface input, not bypass it")
+    assert len(request(base_url, "GET", "/api/workflow-runs")["runs"]) == runs_before
+
+    # ... and same snapshots + rendering on success.
+    final = runner.run_workflow(wf["id"], PERMIT_VALID_INPUT)
+    assert final["state"] == "succeeded", final
+    assert final["interface_snapshot"] == PERMIT_INTERFACE, "run_workflow must snapshot the interface"
+    assert final["workflow_version_snapshot"] == wf["version"], "run_workflow must snapshot the workflow version"
+    for key, value in PERMIT_VALID_INPUT.items():
+        assert final["input"][key] == value, (key, final["input"].get(key))
+    artifact_keys = {artifact["key"] for artifact in runtime.db.list_artifacts(run_id=final["id"])}
+    assert {"intake_review", "assessment_result"} <= artifact_keys, artifact_keys
+    joined = "\n".join(jobs.prompts)
+    assert "นายทดสอบ ระบบ" in joined and "synthetic-id-copy.pdf" in joined and "building_type" in joined
+    assert "{input." not in joined, "no literal placeholder may reach a worker"
+
+    print("canonical Permit fixture checks ok")
+
+
 def check_pack_round_trip() -> None:
     bundle = {
         "schema_version": 1,
@@ -854,6 +1003,7 @@ def main() -> None:
             check_snapshot_survival(base_url)
             check_rbac_and_audit(base_url, runtime)
             check_possible_outputs_and_undeclared_artifacts(runtime)
+            check_permit_fixture(base_url, runtime)
         finally:
             runtime.close()
             server.shutdown()

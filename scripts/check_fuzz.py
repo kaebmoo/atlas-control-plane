@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from atlas.thclaws_client import SseEvent, ThClawsError, extract_session_id, extract_text, iter_sse, parse_event_payload
 from atlas.usage import usage_csv
+from atlas.workflow_interface import validate_input_schema, validate_interface, validate_run_input
 from atlas.workflows import validate_workflow_graph, validate_workflow_policy, validate_workflow_trigger_payload
 
 random.seed(20260630)
@@ -62,10 +63,18 @@ def check_csv_never_crashes() -> None:
 
 
 def check_validators_only_raise_valueerror() -> None:
+    # workflow.interface (docs/adr/0002): callers guarantee `graph` is a dict and run
+    # input is a dict before these are reached, so fuzz mirrors that boundary shape;
+    # interface/schema/instance values themselves are fully attacker-shaped.
+    _iface_schema = {"type": "object", "properties": {"a": {"type": "string"}, "id": {"type": "integer"}}, "required": ["a"], "additionalProperties": False}
+    _iface = {"schema_version": 1, "input_schema": _iface_schema}
     validators = [
         ("trigger", lambda v: validate_workflow_trigger_payload(v if isinstance(v, dict) else {"x": v})),
         ("graph", lambda v: validate_workflow_graph(v if isinstance(v, dict) else {}, {})),
         ("policy", lambda v: validate_workflow_policy(v if isinstance(v, dict) else {})),
+        ("interface_schema", validate_input_schema),
+        ("interface_doc", lambda v: validate_interface(v, v if isinstance(v, dict) else {})),
+        ("interface_run_input", lambda v: validate_run_input(_iface, v if isinstance(v, dict) else {"a": v})),
     ]
     for _ in range(3000):
         value = _rand_value()

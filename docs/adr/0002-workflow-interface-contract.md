@@ -39,7 +39,10 @@ exactly once, with no new concurrency mechanism.
 
 `atlas/workflow_interface.py` implements a **profile**, not a JSON Schema engine:
 
-- Root must declare exactly `type: "object"`.
+- Root must declare exactly `type: "object"` — the single-element list form
+  `"type": ["object"]` is accepted as equivalent (a one-entry union of `object` IS
+  exactly `object`); any other list at the root is rejected. The same equivalence
+  applies to the "exactly object" rule for required start-path intermediate segments.
 - Supported keywords: `type` (one primitive or a unique array of primitives),
   `properties`, `required`, boolean `additionalProperties`, `items`, `enum`, `const`,
   `minLength`, `maxLength`, `minimum`, `maximum`, `minItems`, `maxItems`, and
