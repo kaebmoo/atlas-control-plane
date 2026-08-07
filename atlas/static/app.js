@@ -51,7 +51,7 @@ async function api(path, options = {}) {
     const message = data?.error || data?.message || response.statusText || `HTTP ${response.status}`;
     if (response.status === 401 && path !== "/api/auth/login") {
       localStorage.removeItem("atlasApiToken");
-      showLogin("เซสชันหมดอายุหรือไม่พบ กรุณาเข้าสู่ระบบอีกครั้ง");
+      showLogin("Session expired — please sign in again · เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่");
     }
     throw new Error(message);
   }
@@ -112,14 +112,16 @@ function toast(message) {
 }
 
 const VIEWS = ["overview", "monitor", "jobs", "audit", "usage", "fleet", "accounts"];
+// Page subtitles are English-only: the title row already pairs EN + Thai, and the subtitle
+// must survive narrow topbars. Thai supplements live in the body copy with lang="th".
 const VIEW_META = {
-  overview:  ["ภาพรวม", "Overview", "สรุปสถานะฟลีตและงานล่าสุด"],
-  monitor:   ["ติดตาม", "Monitor", "สถานะและไทม์ไลน์ของ workflow run"],
-  jobs:      ["งาน", "Jobs", "สตรีมผลงานแบบสดและประวัติงาน"],
-  fleet:     ["ฟลีต", "Fleet", "จัดการ worker และ workspace"],
-  audit:     ["ตรวจสอบ", "Audit", "30 การกระทำล่าสุดบน control plane"],
-  usage:     ["การใช้งาน", "Usage", "Workflow run, งาน และ budget units ต่อช่วงเวลา"],
-  accounts:  ["บัญชี", "Accounts", "จัดการผู้ใช้ บทบาท และ API token"],
+  overview:  ["ภาพรวม", "Overview", "Fleet, jobs and workflow runs at a glance"],
+  monitor:   ["ติดตาม", "Monitor", "Status and timeline of each workflow run"],
+  jobs:      ["งาน", "Jobs", "Live output stream and job history"],
+  fleet:     ["ฟลีต", "Fleet", "Manage workers and workspaces"],
+  audit:     ["ตรวจสอบ", "Audit", "Last 30 actions on the control plane"],
+  usage:     ["การใช้งาน", "Usage", "Workflow runs, jobs and budget units over time"],
+  accounts:  ["บัญชี", "Accounts", "Manage users, roles and API tokens"],
 };
 
 // Role-gated views: one table drives showView's navigation guard AND applyRoleGate's
@@ -160,10 +162,13 @@ function showView(view) {
   }
 }
 
+const NAV_BADGE_LABELS = { approvals: "pending approvals", jobs: "active jobs", workers: "workers" };
+
 function setNavBadge(name, count) {
   const badge = document.querySelector(`.nav-badge[data-badge="${name}"]`);
   if (!badge) return;
   badge.textContent = count > 99 ? "99+" : String(count);
+  badge.setAttribute("aria-label", `${count} ${NAV_BADGE_LABELS[name] || name}`);
   badge.hidden = !count;
 }
 
@@ -240,7 +245,7 @@ function render() {
   updateStreamHeader();
 }
 
-function showLogin(message = "ลงชื่อเข้าใช้ด้วยบัญชีผู้ดูแลของอินสแตนซ์นี้") {
+function showLogin(message = "Use the admin account of this Atlas instance") {
   state.currentUser = null;
   if (state.eventSource) state.eventSource.close();
   $("#loginMessage").textContent = message;
@@ -253,7 +258,7 @@ function showLogin(message = "ลงชื่อเข้าใช้ด้ว�
 function hideLogin() {
   $("#loginScreen").hidden = true;
   document.querySelector(".app-shell").inert = false;
-  $("#loginMessage").textContent = "ลงชื่อเข้าใช้ด้วยบัญชีผู้ดูแลของอินสแตนซ์นี้";
+  $("#loginMessage").textContent = "Use the admin account of this Atlas instance";
 }
 
 function renderIdentity() {
@@ -307,7 +312,7 @@ async function signOut() {
   try { await api("/api/auth/logout", { method: "POST" }); } catch { /* token may already be invalid */ }
   localStorage.removeItem("atlasApiToken");
   state.currentUser = null;
-  showLogin("ออกจากระบบแล้ว");
+  showLogin("Signed out · ออกจากระบบแล้ว");
 }
 
 function renderRunSummary() {
@@ -346,15 +351,15 @@ function renderMetrics() {
   const activeRuns = state.workflowRuns.filter((r) => ["running", "waiting_for_human", "paused"].includes(r.state)).length;
   set("metricWorkers", online);
   set("metricWorkersUnit", `/ ${total}`);
-  set("metricWorkersDelta", total ? `ออนไลน์ ${online} · ออฟไลน์ ${offline}` : "ยังไม่มี worker");
+  set("metricWorkersDelta", total ? `online ${online} · offline ${offline}` : "no workers yet");
   set("metricRunning", active);
   set("metricRunningDelta", `queued ${queued} · running ${running}`);
   const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
   const runsToday = state.workflowRuns.filter((run) => run.created_at && new Date(run.created_at) >= midnight).length;
   set("metricRuns", runsToday);
-  set("metricRunsDelta", activeRuns ? `กำลังทำงาน ${activeRuns} · ทั้งหมด ${state.workflowRuns.length}` : `จากทั้งหมด ${state.workflowRuns.length}`);
+  set("metricRunsDelta", activeRuns ? `active ${activeRuns} · total ${state.workflowRuns.length}` : `of ${state.workflowRuns.length} total`);
   set("metricApprovals", state.approvals.length);
-  set("metricApprovalsDelta", state.approvals.length ? "ต้องการการอนุมัติ" : "ไม่มีรายการรออนุมัติ");
+  set("metricApprovalsDelta", state.approvals.length ? "needs a decision" : "none pending");
   // Fleet health donut: yellow arc = online / total (r=40 → circumference 251.33)
   const arc = document.getElementById("fleetArc");
   if (arc) {
@@ -385,30 +390,31 @@ function renderOverviewLists() {
           <span class="status ${statusClass(job.state)}">${escapeHtml(job.state)}</span>
           <span class="ago">${escapeHtml(formatTime(job.created_at))}</span>
         </button>`).join("")
-      : '<div class="empty">ยังไม่มีงาน</div>';
+      : '<div class="empty">No jobs yet · <span lang="th">ยังไม่มีงาน</span></div>';
   }
   const apBox = document.getElementById("overviewApproval");
   if (apBox) {
     const a = state.approvals[0];
+    const more = state.approvals.length - 1;
     apBox.innerHTML = a
       ? `<div class="approve-row">
           <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span>
-          <div class="grow"><div class="title">${escapeHtml(a.label || a.reason || "รออนุมัติ")}</div><div class="meta">run ${escapeHtml(shortId(a.run_id))} · ${escapeHtml(formatTime(a.created_at))}</div></div>
-          <button class="primary-btn btn-sm" type="button" data-view-link="monitor">ตรวจสอบ</button>
-        </div>`
-      : '<div class="approve-empty">ไม่มีรายการรออนุมัติในขณะนี้</div>';
+          <div class="grow"><div class="title">${escapeHtml(a.label || a.reason || "Waiting for approval")}</div><div class="meta">run ${escapeHtml(shortId(a.run_id))} · ${escapeHtml(formatTime(a.created_at))}</div></div>
+          <button class="primary-btn btn-sm" type="button" data-view-link="monitor" data-run-id="${escapeHtml(a.run_id)}">Review</button>
+        </div>${more > 0 ? `<div class="approve-more">+ ${more} more waiting · <span lang="th">รออีก ${more} รายการ</span></div>` : ""}`
+      : '<div class="approve-empty">Nothing waiting for approval · <span lang="th">ไม่มีรายการรออนุมัติ</span></div>';
   }
 }
 
 function renderWorkers() {
   const list = $("#workerList");
   if (!state.workers.length) {
-    list.innerHTML = '<div class="empty">No workers</div>';
+    list.innerHTML = '<div class="empty">No workers yet — press “+ Add worker” to connect one · <span lang="th">ยังไม่มี worker</span></div>';
     return;
   }
   list.innerHTML = state.workers.map((worker) => {
     const tags = (worker.tags || []).map((tag) => `<span class="wc-tag">${escapeHtml(tag)}</span>`).join("");
-    const seen = worker.last_seen_at ? `เห็นล่าสุด ${formatTime(worker.last_seen_at)}` : "ยังไม่เคยเห็น";
+    const seen = worker.last_seen_at ? `last seen ${formatTime(worker.last_seen_at)}` : "never seen";
     // T4 advisory surfaces. All worker-reported values escaped/scheme-checked before render.
     const info = worker.agent_info || {};
     const agent = info.agent || {};
@@ -436,9 +442,9 @@ function renderWorkers() {
         <span class="status ${statusClass(worker.status)}">${escapeHtml(worker.status)}</span>
       </div>
       <div class="wc-url">${escapeHtml(worker.base_url)}</div>
-      <div class="wc-url" title="Worker ID">${escapeHtml(worker.id)}<button class="copy-btn" type="button" data-copy="${escapeHtml(worker.id)}" title="คัดลอก Worker ID" aria-label="Copy worker id">⧉</button></div>
+      <div class="wc-url" title="Worker ID">${escapeHtml(worker.id)}<button class="copy-btn" type="button" data-copy="${escapeHtml(worker.id)}" title="Copy worker ID" aria-label="Copy id of ${escapeHtml(worker.name)}">⧉</button></div>
       <div class="wc-role">
-        <span class="role-chip">${escapeHtml(worker.role || "unassigned")}<button class="copy-btn" type="button" data-copy="${escapeHtml(worker.role || "unassigned")}" title="คัดลอก role" aria-label="Copy role">⧉</button></span>
+        <span class="role-chip">${escapeHtml(worker.role || "unassigned")}<button class="copy-btn" type="button" data-copy="${escapeHtml(worker.role || "unassigned")}" title="Copy role" aria-label="Copy role of ${escapeHtml(worker.name)}">⧉</button></span>
         <span class="latency">${escapeHtml(seen)}</span>
       </div>
       <div class="wc-tags">${tags}</div>
@@ -446,9 +452,9 @@ function renderWorkers() {
       <div class="wc-advisory">${busyBadge}${syncControl}${uiLink}</div>
       ${skillsBlock}
       <div class="wc-actions">
-        <button class="secondary-btn poll-worker" data-worker-id="${escapeHtml(worker.id)}">Poll</button>
-        <button class="secondary-btn edit-worker" data-worker-id="${escapeHtml(worker.id)}">แก้ไข</button>
-        <button class="danger-btn delete-worker" data-worker-id="${escapeHtml(worker.id)}">ลบ</button>
+        <button class="secondary-btn poll-worker" data-worker-id="${escapeHtml(worker.id)}" aria-label="Poll ${escapeHtml(worker.name)}">Poll</button>
+        <button class="secondary-btn edit-worker" data-worker-id="${escapeHtml(worker.id)}" aria-label="Edit ${escapeHtml(worker.name)}">Edit</button>
+        <button class="danger-btn delete-worker" data-worker-id="${escapeHtml(worker.id)}" aria-label="Delete ${escapeHtml(worker.name)}">Delete</button>
       </div>
     </article>`;
   }).join("");
@@ -457,7 +463,7 @@ function renderWorkers() {
 function renderWorkspaces() {
   const list = $("#workspaceList");
   if (!state.workspaces.length) {
-    list.innerHTML = '<div class="empty">No workspaces</div>';
+    list.innerHTML = '<div class="empty">No workspaces yet · <span lang="th">ยังไม่มี workspace</span></div>';
     return;
   }
   list.innerHTML = state.workspaces.map((workspace) => `
@@ -467,8 +473,8 @@ function renderWorkspaces() {
       <span class="dir">${escapeHtml(workspace.workspace_dir)}</span>
       <span>${escapeHtml(workspace.company || "—")}</span>
       <span class="ws-actions">
-        <button class="ws-mini edit-workspace" data-workspace-id="${escapeHtml(workspace.id)}">แก้ไข</button>
-        <button class="ws-mini danger delete-workspace" data-workspace-id="${escapeHtml(workspace.id)}">ลบ</button>
+        <button class="ws-mini edit-workspace" data-workspace-id="${escapeHtml(workspace.id)}" aria-label="Edit workspace ${escapeHtml(workspace.workspace_key)}">Edit</button>
+        <button class="ws-mini danger delete-workspace" data-workspace-id="${escapeHtml(workspace.id)}" aria-label="Delete workspace ${escapeHtml(workspace.workspace_key)}">Delete</button>
       </span>
     </div>
   `).join("");
@@ -514,9 +520,9 @@ function renderJobs() {
   const jobs = filter === "all" ? state.jobs
     : filter === "manual" ? state.jobs.filter((job) => !job.run_id)
     : state.jobs.filter((job) => job.run_id === filter);
-  if (count) count.textContent = `${jobs.length} รายการ`;
+  if (count) count.textContent = `${jobs.length} jobs`;
   if (!jobs.length) {
-    list.innerHTML = '<div class="empty">ยังไม่มีงาน</div>';
+    list.innerHTML = '<div class="empty">No jobs yet · <span lang="th">ยังไม่มีงาน</span></div>';
     return;
   }
   list.innerHTML = jobs.map((job) => {
@@ -556,9 +562,9 @@ function wfElapsed(run) {
   const start = new Date(run.created_at).getTime();
   const end = new Date(run.updated_at || run.created_at).getTime();
   const minutes = Math.max(0, Math.round((end - start) / 60000));
-  if (minutes < 1) return "ไม่ถึง 1 น.";
-  if (minutes < 60) return `${minutes} น.`;
-  return `${Math.floor(minutes / 60)} ชม. ${minutes % 60} น.`;
+  if (minutes < 1) return "under 1 min";
+  if (minutes < 60) return `${minutes} min`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 function wfBarColor(runState) {
   const cls = statusClass(runState);
@@ -571,7 +577,7 @@ function wfBarColor(runState) {
 function nodeChip(stateName, label, jobId, runId) {
   const key = String(label);
   if (jobId) {
-    return `<button class="nchip ${stateName} is-nav" type="button" data-node-job="${escapeHtml(jobId)}" data-node-run="${escapeHtml(runId || "")}" title="เปิด job ของโหนดนี้"><span class="d"></span>${escapeHtml(key)}<span class="njob">${escapeHtml(shortId(jobId))}</span></button>`;
+    return `<button class="nchip ${stateName} is-nav" type="button" data-node-job="${escapeHtml(jobId)}" data-node-run="${escapeHtml(runId || "")}" title="Open this node's job"><span class="d"></span>${escapeHtml(key)}<span class="njob">${escapeHtml(shortId(jobId))}</span></button>`;
   }
   return `<span class="nchip ${stateName}"><span class="d"></span>${escapeHtml(key)}</span>`;
 }
@@ -592,7 +598,7 @@ function renderNodeChips(run) {
   if (!Array.isArray(nodes) || !nodes.length) {
     const chips = [...done].map((id) => nodeChip("done", id, jobByNode[id], run.id))
       .concat([...failed].map((id) => nodeChip("err", id, jobByNode[id], run.id)));
-    return chips.length ? chips.join("") : '<span class="hint">ไม่มีข้อมูลโหนด</span>';
+    return chips.length ? chips.join("") : '<span class="hint">No node data · <span lang="th">ไม่มีข้อมูลโหนด</span></span>';
   }
   let markedRun = false;
   return nodes.map((node) => {
@@ -613,10 +619,10 @@ function renderWorkflowRuns() {
   if (legend) {
     const running = runs.filter((run) => run.state === "running").length;
     const waiting = runs.filter((run) => run.state === "waiting_for_human").length;
-    legend.innerHTML = `<span><span class="d" style="background:var(--nt-yellow-500)"></span>${running} ทำงาน</span><span><span class="d" style="background:var(--nt-warning)"></span>${waiting} รออนุมัติ</span>`;
+    legend.innerHTML = `<span><span class="d" style="background:var(--nt-yellow-500)"></span>${running} running</span><span><span class="d" style="background:var(--nt-warning)"></span>${waiting} waiting</span>`;
   }
   if (!runs.length) {
-    list.innerHTML = '<div class="empty">ยังไม่มี run</div>';
+    list.innerHTML = '<div class="empty">No workflow runs yet · <span lang="th">ยังไม่มี run</span></div>';
   } else {
     list.innerHTML = runs.slice(0, 20).map((run) => {
       const progress = wfRunProgress(run);
@@ -637,7 +643,7 @@ function renderWorkflowRuns() {
   // No selection → hide the skeleton progress/stat scaffolding instead of showing empty bars.
   document.querySelector(".mon-detail")?.classList.toggle("is-empty", !run);
   const set = (id, fn) => { const node = document.getElementById(id); if (node) fn(node); };
-  set("monRunName", (node) => { node.textContent = run ? run.name : "เลือก run จากรายการ"; });
+  set("monRunName", (node) => { node.textContent = run ? run.name : "Select a run · เลือก run จากรายการ"; });
   set("monRunChip", (node) => { node.hidden = !run; if (run) { node.className = `status ${statusClass(run.state)}`; node.textContent = run.state; } });
   set("monRunId", (node) => { node.textContent = run ? run.id : ""; });
   // Show only the controls valid for the current state (prototype behaviour). Role gating
@@ -652,22 +658,23 @@ function renderWorkflowRuns() {
   const recoveryEl = $("#workflowRecoveryWarning");
   recoveryEl.textContent = recovery ? `${recovery.warning} Interrupted: ${(recovery.interrupted || []).map((item) => `${item.node_key}${item.job_id ? ` (${item.job_id})` : ""}`).join(", ")}` : "";
   recoveryEl.hidden = !recovery;
+  renderRunApprovals(run);
 
   const progress = run ? wfRunProgress(run) : { done: 0, total: 0, pct: 0 };
-  set("monProgressBar", (node) => { node.style.width = `${progress.pct}%`; node.style.background = run ? wfBarColor(run.state) : "var(--nt-yellow-500)"; });
+  set("monProgressBar", (node) => { node.style.transform = `scaleX(${progress.pct / 100})`; node.style.background = run ? wfBarColor(run.state) : "var(--nt-yellow-500)"; });
   set("monStats", (node) => {
     if (!run) { node.innerHTML = ""; return; }
     const counters = run.counters || {};
     const stats = [
-      ["โหนดเสร็จ", `${progress.done} / ${progress.total}`],
-      ["งาน (jobs)", String(counters.jobs_started ?? 0)],
-      ["budget units", String(counters.budget_units_spent ?? 0)],
-      ["iteration", counters.iteration != null ? String(counters.iteration) : "—"],
-      ["เวลาที่ใช้", wfElapsed(run)],
+      ["Nodes done", `${progress.done} / ${progress.total}`],
+      ["Jobs", String(counters.jobs_started ?? 0)],
+      ["Budget units", String(counters.budget_units_spent ?? 0)],
+      ["Iteration", counters.iteration != null ? String(counters.iteration) : "—"],
+      ["Elapsed", wfElapsed(run)],
     ];
     node.innerHTML = stats.map(([label, value]) => `<div class="mon-stat"><div class="l">${escapeHtml(label)}</div><div class="v">${escapeHtml(value)}</div></div>`).join("");
   });
-  set("monNodeChips", (node) => { node.innerHTML = run ? renderNodeChips(run) : '<span class="hint">เลือก run เพื่อดูความคืบหน้าของโหนด</span>'; });
+  set("monNodeChips", (node) => { node.innerHTML = run ? renderNodeChips(run) : '<span class="hint">Select a run to see node progress · <span lang="th">เลือก run เพื่อดูโหนด</span></span>'; });
   set("workflowEventList", (node) => {
     // Events arrive seq ASC (oldest→newest); show the most RECENT 14 so mid/late-run events
     // (e.g. files_pushed) surface instead of only the run's first 14 setup events.
@@ -696,6 +703,33 @@ function renderWorkflowRuns() {
   renderRunSummary();
 }
 
+// Pending human gates for the selected run. Approve continues the run; a gate that declares
+// branch choices renders one button per choice (the API rejects a plain approve for those);
+// Reject fails the whole run, so it goes through the two-step arm like Cancel.
+function renderRunApprovals(run) {
+  const box = document.getElementById("monApprovals");
+  if (!box) return;
+  const pending = run ? state.approvals.filter((approval) => approval.run_id === run.id) : [];
+  const operator = ["admin", "operator"].includes(state.currentUser?.role);
+  const dis = operator ? "" : " disabled";
+  box.innerHTML = pending.map((approval) => {
+    const choices = Array.isArray(approval.choices) ? approval.choices : [];
+    const gateName = escapeHtml(approval.label || approval.node_key || "approval");
+    const decide = choices.length
+      ? choices.map((choice) => `<button class="primary-btn btn-sm approval-choose" type="button" data-approval-id="${escapeHtml(approval.id)}" data-choice="${escapeHtml(choice.id)}" aria-label="Choose ${escapeHtml(choice.label || choice.id)} for ${gateName}"${dis}>${escapeHtml(choice.label || choice.id)}</button>`).join("")
+      : `<button class="primary-btn btn-sm approval-approve" type="button" data-approval-id="${escapeHtml(approval.id)}" aria-label="Approve ${gateName}"${dis}>Approve</button>`;
+    const reason = approval.reason && approval.reason !== approval.label ? ` · ${escapeHtml(approval.reason)}` : "";
+    return `
+    <div class="approval-gate">
+      <div class="grow">
+        <div class="title">${escapeHtml(approval.label || approval.reason || "Waiting for approval")}</div>
+        <div class="meta">${escapeHtml(approval.node_key || "")} · ${escapeHtml(formatTime(approval.created_at))}${reason}</div>
+      </div>
+      <div class="approval-actions">${decide}<button class="danger-btn btn-sm approval-reject" type="button" data-approval-id="${escapeHtml(approval.id)}" aria-label="Reject ${gateName}"${dis}>Reject</button></div>
+    </div>`;
+  }).join("");
+}
+
 function renderAudit() {
   const list = $("#auditList");
   const filter = state.auditFilter || "all";
@@ -704,7 +738,7 @@ function renderAudit() {
     rows = rows.filter((entry) => (entry.resource_type || "").includes(filter) || (entry.action || "").includes(filter));
   }
   if (!rows.length) {
-    list.innerHTML = '<div class="empty">ไม่มีรายการ</div>';
+    list.innerHTML = '<div class="empty">No matching entries · <span lang="th">ไม่มีรายการ</span></div>';
     return;
   }
   list.innerHTML = rows.slice(0, 30).map((entry) => {
@@ -805,7 +839,7 @@ async function loadJobArtifacts(jobId) {
       <span class="item-sub">${escapeHtml(artifact.metadata?.size ?? 0)} bytes · ${escapeHtml(artifact.metadata?.sha256 || "")}</span>
     </button>`;
       }).join("")
-    : '<div class="empty">ยังไม่มีไฟล์ที่เก็บจากงานนี้</div>';
+    : '<div class="empty">No files collected from this job yet · <span lang="th">ยังไม่มีไฟล์จากงานนี้</span></div>';
 }
 
 // Read-only run-count threshold alert. Derived purely from usage_events; never touches
@@ -847,15 +881,15 @@ async function loadUsage() {
     ? "$0"
     : `$${estCost >= 0.0001 ? estCost.toFixed(4) : estCost.toPrecision(2)}`;
   $("#usageMeta").textContent = (data.from || data.to)
-    ? `ช่วง ${data.from || "…"} → ${data.to || "…"}`
-    : "ทุกช่วงเวลา";
+    ? `range ${data.from || "…"} → ${data.to || "…"}`
+    : "all time";
   renderUsageBars(data.usage || []);
   renderUsageQuota(totals.workflow_runs ?? 0);
   renderUsageEvents(data.usage || []);
   renderUsageAlert(totals.workflow_runs ?? 0);
 }
 
-const USAGE_DOW = ["อา", "จ", "อ", "พ", "พฤ", "ศ", "ส"];
+const USAGE_DOW = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 
 function renderUsageBars(events) {
   const box = document.getElementById("usageBars");
@@ -867,7 +901,7 @@ function renderUsageBars(events) {
     if (day) counts[day] = (counts[day] || 0) + 1;
   }
   const days = Object.keys(counts).sort().slice(-7);
-  if (!days.length) { box.innerHTML = '<div class="hint">ยังไม่มีข้อมูล run ในช่วงนี้</div>'; return; }
+  if (!days.length) { box.innerHTML = '<div class="hint">No runs in this range · <span lang="th">ไม่มี run ในช่วงนี้</span></div>'; return; }
   const max = Math.max(1, ...days.map((day) => counts[day]));
   box.innerHTML = days.map((day) => {
     const value = counts[day];
@@ -883,21 +917,21 @@ function renderUsageQuota(usedRuns) {
   const expected = Number($("#usageExpectedInput").value) || 0;
   const threshold = Number($("#usageThresholdInput").value) || 80;
   if (expected <= 0) {
-    box.innerHTML = '<p class="hint" style="margin-top:14px">ใส่ Expected runs เพื่อดูโควตาและการแจ้งเตือน</p>';
+    box.innerHTML = '<p class="hint" style="margin-top:14px">Enter Expected runs to see quota and alerts · <span lang="th">ใส่ Expected runs เพื่อดูโควตา</span></p>';
     return;
   }
   const pct = Math.round((usedRuns / expected) * 100);
   const over = pct >= threshold;
   box.innerHTML = `
-    <div class="usage-quota-val"><b>${usedRuns}</b><span>/ ${expected} run ที่คาดไว้</span></div>
+    <div class="usage-quota-val"><b>${usedRuns}</b><span>/ ${expected} expected runs</span></div>
     <div class="usage-quota-track"><div class="usage-quota-fill ${over ? "over" : ""}" style="width:${Math.min(100, pct)}%"></div></div>
-    <div class="usage-quota-note ${over ? "over" : ""}"><span class="d"></span><span>ใช้ไป <b>${pct}%</b> ของเป้า · ${over ? `เกินเกณฑ์แจ้งเตือน ${threshold}%` : `ต่ำกว่าเกณฑ์แจ้งเตือน ${threshold}%`}</span></div>`;
+    <div class="usage-quota-note ${over ? "over" : ""}"><span class="d"></span><span><b>${pct}%</b> of target · ${over ? `over the ${threshold}% alert threshold` : `under the ${threshold}% alert threshold`}</span></div>`;
 }
 
 function renderUsageEvents(events) {
   const box = document.getElementById("usageEvents");
   if (!box) return;
-  if (!events.length) { box.innerHTML = '<div class="empty">ไม่มีเหตุการณ์ในช่วงนี้</div>'; return; }
+  if (!events.length) { box.innerHTML = '<div class="empty">No events in this range · <span lang="th">ไม่มีเหตุการณ์</span></div>'; return; }
   box.innerHTML = events.slice(0, 30).map((event) => `
     <div class="ue-row">
       <span>${escapeHtml(event.kind || "—")}</span>
@@ -921,7 +955,7 @@ function openJobStream(jobId) {
   updateStreamHeader();
   $("#streamOutput").textContent = "";
   $("#eventList").innerHTML = "";
-  $("#jobArtifactDownloads").innerHTML = '<div class="empty">ยังไม่มีไฟล์ที่เก็บจากงานนี้</div>';
+  $("#jobArtifactDownloads").innerHTML = '<div class="empty">No files collected from this job yet · <span lang="th">ยังไม่มีไฟล์จากงานนี้</span></div>';
   renderToolTimeline();
   renderJobs();
   // Load any already-collected files now (revisiting a finished job); collection for a still-
@@ -1063,14 +1097,14 @@ function renderToolTimeline() {
   const countersNode = document.getElementById("toolCounters");
   if (countersNode) {
     countersNode.innerHTML = `
-      <span class="tl-count">เครื่องมือ · tools <b>${counts.run}</b></span>
-      <span class="tl-count denied">ปฏิเสธ · denied <b>${counts.denied}</b></span>
-      <span class="tl-count err">ล้มเหลว · failed <b>${counts.failed}</b></span>`;
+      <span class="tl-count">tools · <span lang="th">เครื่องมือ</span> <b>${counts.run}</b></span>
+      <span class="tl-count denied">denied · <span lang="th">ปฏิเสธ</span> <b>${counts.denied}</b></span>
+      <span class="tl-count err">failed · <span lang="th">ล้มเหลว</span> <b>${counts.failed}</b></span>`;
   }
   const listNode = document.getElementById("toolTimelineList");
   if (!listNode) return;
   if (!calls.length) {
-    listNode.innerHTML = `<div class="empty">ยังไม่มีการเรียกเครื่องมือ</div>`;
+    listNode.innerHTML = `<div class="empty">No tool calls yet · <span lang="th">ยังไม่มีการเรียกเครื่องมือ</span></div>`;
     return;
   }
   listNode.innerHTML = calls.map((call) => {
@@ -1103,7 +1137,7 @@ function updateStreamHeader() {
   set("jobDetailDot", (n) => { n.className = `status ${st} dot-only`; });
   set("jobDetailChip", (n) => { n.className = `status ${st}`; n.textContent = job ? job.state : "—"; });
   set("jobDetailId", (n) => { n.textContent = job ? job.id : ""; });
-  set("jobDetailPrompt", (n) => { n.textContent = job ? job.prompt : "เลือกงานจากรายการเพื่อดูสตรีมสด"; });
+  set("jobDetailPrompt", (n) => { n.textContent = job ? job.prompt : "Select a job to watch its live stream · เลือกงานเพื่อดูสตรีมสด"; });
   set("jobDetailRoute", (n) => {
     n.textContent = job
       ? `${job.route_reason || `${job.worker_name || shortId(job.worker_id)} · ${job.workspace_key || "auto"}`}${job.handoff_job_id ? ` · handoff ${shortId(job.handoff_job_id)}` : ""}`
@@ -1205,6 +1239,39 @@ async function controlWorkflowRun(action) {
   toast(`Workflow ${action} requested`);
 }
 
+// Two-step arm for irreversible controls: the first click arms the button for 4 seconds
+// (solid danger + confirm label), a second click within the window fires the action. A stray
+// click reverts on its own — cancelling an hours-long run should never be a single mis-click.
+function armedClick(button, armedLabel, action) {
+  if (button.dataset.armed) {
+    clearTimeout(button.armTimer);
+    disarmButton(button);
+    action();
+    return;
+  }
+  button.dataset.armed = "1";
+  button.dataset.restoreLabel = button.textContent;
+  button.textContent = armedLabel;
+  button.classList.add("is-armed");
+  button.armTimer = setTimeout(() => disarmButton(button), 4000);
+}
+
+function disarmButton(button) {
+  if (!button.dataset.armed) return;
+  delete button.dataset.armed;
+  button.classList.remove("is-armed");
+  button.textContent = button.dataset.restoreLabel || button.textContent;
+  delete button.dataset.restoreLabel;
+}
+
+async function decideApproval(approvalId, action, body) {
+  await api(`/api/approvals/${encodeURIComponent(approvalId)}/${action}`, {
+    method: "POST",
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  await loadAll();
+}
+
 async function retryInterruptedRun() {
   if (!state.selectedWorkflowRunId) return;
   const warning = state.workflowRunDetail?.run?.counters?.recovery?.warning || "Retry may duplicate worker side effects.";
@@ -1292,7 +1359,7 @@ function setHealth(ok) {
   const text = document.getElementById("healthChipText");
   if (!chip || !text) return;
   chip.classList.toggle("err", !ok);
-  text.textContent = ok ? "ระบบทำงานปกติ" : "เชื่อมต่อไม่ได้";
+  text.textContent = ok ? "Connected · ปกติ" : "Connection lost · เชื่อมต่อไม่ได้";
 }
 
 async function loadAccounts() {
@@ -1314,13 +1381,13 @@ function renderAccounts() {
         <span>${escapeHtml(user.username)}</span>
         <span class="role-chip">${escapeHtml(user.role)}</span>
       </div>
-      <div class="item-sub">${escapeHtml(user.status)} · token ${Number(user.token_count) || 0} · สร้าง ${escapeHtml(formatTime(user.created_at))}</div>
+      <div class="item-sub">${escapeHtml(user.status)} · tokens ${Number(user.token_count) || 0} · created ${escapeHtml(formatTime(user.created_at))}</div>
       <div class="item-actions">
-        <button class="preview-btn toggle-user-status" type="button" data-user-id="${escapeHtml(user.id)}" data-next-status="${user.status === "active" ? "disabled" : "active"}" ${user.id === state.currentUser?.id ? "disabled" : ""}>${user.status === "active" ? "ระงับ" : "เปิดใช้"}</button>
-        <button class="preview-btn danger-mini delete-user" type="button" data-user-id="${escapeHtml(user.id)}" ${user.id === state.currentUser?.id ? "disabled" : ""}>ลบ</button>
+        <button class="preview-btn toggle-user-status" type="button" data-user-id="${escapeHtml(user.id)}" data-next-status="${user.status === "active" ? "disabled" : "active"}" aria-label="${user.status === "active" ? "Disable" : "Enable"} user ${escapeHtml(user.username)}" ${user.id === state.currentUser?.id ? "disabled" : ""}>${user.status === "active" ? "Disable" : "Enable"}</button>
+        <button class="preview-btn danger-mini delete-user" type="button" data-user-id="${escapeHtml(user.id)}" aria-label="Delete user ${escapeHtml(user.username)}" ${user.id === state.currentUser?.id ? "disabled" : ""}>Delete</button>
       </div>
     </article>
-  `).join("") : '<div class="empty">ยังไม่มีผู้ใช้</div>';
+  `).join("") : '<div class="empty">No users yet · <span lang="th">ยังไม่มีผู้ใช้</span></div>';
   if (tokenUserSelect) {
     // Preserve the admin's picked target across re-renders (a status toggle or revoke
     // refreshes the list); falling back silently to the current user would mint the
@@ -1334,13 +1401,13 @@ function renderAccounts() {
   tokenList.innerHTML = state.apiTokens.length ? state.apiTokens.map((token) => `
     <article class="workflow-run-item ${token.revoked_at ? "is-revoked" : ""}">
       <div class="item-title">
-        <span>${escapeHtml(token.name || "(ไม่มีชื่อ)")}</span>
+        <span>${escapeHtml(token.name || "(unnamed)")}</span>
         <span class="item-sub">${escapeHtml(token.username || "")}</span>
       </div>
-      <div class="item-sub">สร้าง ${escapeHtml(formatTime(token.created_at))} · ใช้ล่าสุด ${token.last_used_at ? escapeHtml(formatTime(token.last_used_at)) : "—"}${token.revoked_at ? " · เพิกถอนแล้ว" : ""}</div>
-      ${token.revoked_at ? "" : `<button class="preview-btn danger-mini revoke-token" type="button" data-token-id="${escapeHtml(token.id)}">เพิกถอน</button>`}
+      <div class="item-sub">created ${escapeHtml(formatTime(token.created_at))} · last used ${token.last_used_at ? escapeHtml(formatTime(token.last_used_at)) : "—"}${token.revoked_at ? " · revoked" : ""}</div>
+      ${token.revoked_at ? "" : `<button class="preview-btn danger-mini revoke-token" type="button" data-token-id="${escapeHtml(token.id)}" aria-label="Revoke token ${escapeHtml(token.name || "(unnamed)")}">Revoke</button>`}
     </article>
-  `).join("") : '<div class="empty">ยังไม่มี token</div>';
+  `).join("") : '<div class="empty">No tokens yet · <span lang="th">ยังไม่มี token</span></div>';
 }
 
 async function createUser(event) {
@@ -1348,7 +1415,7 @@ async function createUser(event) {
   const form = event.currentTarget;
   await api("/api/users", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
   form.reset();
-  toast("เพิ่มผู้ใช้แล้ว");
+  toast("User added · เพิ่มผู้ใช้แล้ว");
   await loadAccounts();
 }
 
@@ -1360,9 +1427,9 @@ async function createToken(event) {
   const reveal = document.getElementById("newTokenReveal");
   if (reveal) {
     reveal.hidden = false;
-    reveal.innerHTML = `<div class="token-reveal-title">token ใหม่ — แสดงครั้งเดียว คัดลอกเก็บทันที</div>
+    reveal.innerHTML = `<div class="token-reveal-title">New token — shown only once, copy it now · <span lang="th">แสดงครั้งเดียว คัดลอกเก็บทันที</span></div>
       <code>${escapeHtml(data.api_token)}</code>
-      <button class="preview-btn" type="button" data-copy="${escapeHtml(data.api_token)}">คัดลอก</button>`;
+      <button class="preview-btn" type="button" data-copy="${escapeHtml(data.api_token)}">Copy</button>`;
   }
   await loadAccounts();
 }
@@ -1386,9 +1453,9 @@ document.addEventListener("click", async (event) => {
   if (copyButton) {
     try {
       await navigator.clipboard.writeText(copyButton.dataset.copy);
-      toast("คัดลอกแล้ว");
+      toast("Copied · คัดลอกแล้ว");
     } catch {
-      toast("คัดลอกไม่สำเร็จ");
+      toast("Copy failed · คัดลอกไม่สำเร็จ");
     }
     return;
   }
@@ -1438,7 +1505,7 @@ document.addEventListener("click", async (event) => {
   }
   const deleteUserButton = event.target.closest(".delete-user");
   if (deleteUserButton) {
-    if (!confirm("ลบผู้ใช้นี้? token ทั้งหมดของผู้ใช้จะถูกลบไปด้วย")) return;
+    if (!confirm("Delete this user? All of their API tokens are removed too.\nลบผู้ใช้นี้? token ทั้งหมดของผู้ใช้จะถูกลบด้วย")) return;
     await api(`/api/users/${encodeURIComponent(deleteUserButton.dataset.userId)}`, { method: "DELETE" })
       .then(() => loadAccounts())
       .catch((error) => toast(error.message));
@@ -1448,7 +1515,7 @@ document.addEventListener("click", async (event) => {
   if (revokeTokenButton) {
     // Dashboard sessions are themselves tokens (named "dashboard login") and look identical —
     // warn before revoking, because killing the current session's token logs you out instantly.
-    if (!confirm("เพิกถอน token นี้? ถ้าเป็น token ของเซสชันที่กำลังใช้อยู่ คุณจะหลุดจากระบบทันที")) return;
+    if (!confirm("Revoke this token? Revoking your current session's token signs you out immediately.\nเพิกถอน token นี้? ถ้าเป็นของเซสชันปัจจุบัน คุณจะหลุดจากระบบทันที")) return;
     await api(`/api/tokens/${encodeURIComponent(revokeTokenButton.dataset.tokenId)}`, { method: "DELETE" })
       .then(() => loadAccounts())
       .catch((error) => toast(error.message));
@@ -1466,33 +1533,53 @@ document.addEventListener("click", async (event) => {
   }
 });
 
-// Jobs: stream / events tab toggle.
+// Jobs: stream / events tab toggle. ARIA tabs pattern: aria-selected + roving tabindex,
+// arrow keys move and activate (screen readers announce "tab, 2 of 4, selected").
 for (const tab of document.querySelectorAll(".tab[data-job-tab]")) {
   tab.addEventListener("click", () => {
-    for (const other of document.querySelectorAll(".tab[data-job-tab]")) other.classList.toggle("is-active", other === tab);
+    for (const other of document.querySelectorAll(".tab[data-job-tab]")) {
+      const active = other === tab;
+      other.classList.toggle("is-active", active);
+      other.setAttribute("aria-selected", String(active));
+      other.tabIndex = active ? 0 : -1;
+    }
     for (const pane of document.querySelectorAll("[data-job-pane]")) pane.hidden = pane.dataset.jobPane !== tab.dataset.jobTab;
   });
 }
+document.querySelector(".tabs")?.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+  const tabs = [...document.querySelectorAll(".tab[data-job-tab]")];
+  const index = tabs.indexOf(document.activeElement);
+  if (index === -1) return;
+  event.preventDefault();
+  const next = tabs[(index + (event.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+  next.focus();
+  next.click();
+});
 $("#refreshBtn").addEventListener("click", (event) => {
   const btn = event.currentTarget;
   btn.classList.add("spinning");
-  setTimeout(() => btn.classList.remove("spinning"), 600);
-  refreshAll({ poll: true, notice: true }).catch((error) => toast(error.message));
+  refreshAll({ poll: true, notice: true })
+    .catch((error) => toast(error.message))
+    .finally(() => btn.classList.remove("spinning"));  // spinner reflects the real request
 });
 // Overview "ดูทั้งหมด" buttons and list rows navigate to a view.
 document.addEventListener("click", (event) => {
   const link = event.target.closest("[data-view-link]");
   if (!link) return;
+  // An approval CTA carries the waiting run's id — select it so Monitor opens on that run
+  // instead of making the operator re-find which run needs them.
+  if (link.dataset.runId) selectWorkflowRun(link.dataset.runId).catch((error) => toast(error.message));
   showView(link.dataset.viewLink);
 });
 $("#pollAllBtn").addEventListener("click", async () => {
   await refreshAll({ poll: true, notice: true }).catch((error) => toast(error.message));
 });
-$("#cancelJobBtn").addEventListener("click", () => cancelSelectedJob().catch((error) => toast(error.message)));
+$("#cancelJobBtn").addEventListener("click", (event) => armedClick(event.currentTarget, "Confirm cancel", () => cancelSelectedJob().catch((error) => toast(error.message))));
 $("#pauseWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("pause").catch((error) => toast(error.message)));
 $("#resumeWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("resume").catch((error) => toast(error.message)));
 $("#retryInterruptedRunBtn").addEventListener("click", () => retryInterruptedRun().catch((error) => toast(error.message)));
-$("#cancelWorkflowRunBtn").addEventListener("click", () => controlWorkflowRun("cancel").catch((error) => toast(error.message)));
+$("#cancelWorkflowRunBtn").addEventListener("click", (event) => armedClick(event.currentTarget, "Confirm cancel", () => controlWorkflowRun("cancel").catch((error) => toast(error.message))));
 $("#addWorkerBtn").addEventListener("click", () => openWorkerModal());
 $("#addWorkspaceBtn").addEventListener("click", () => openWorkspaceModal());
 $("#createUserForm").addEventListener("submit", (event) => createUser(event).catch((error) => toast(error.message)));
@@ -1500,7 +1587,7 @@ $("#createTokenForm").addEventListener("submit", (event) => createToken(event).c
 $("#workerForm").addEventListener("submit", (event) => saveWorker(event).catch((error) => toast(error.message)));
 $("#workspaceForm").addEventListener("submit", (event) => saveWorkspace(event).catch((error) => toast(error.message)));
 $("#loginForm").addEventListener("submit", (event) => login(event).catch((error) => {
-  $("#loginMessage").textContent = error.message === "unauthorized" ? "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" : error.message;
+  $("#loginMessage").textContent = error.message === "unauthorized" ? "Wrong username or password · ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" : error.message;
 }));
 $("#signOutBtn").addEventListener("click", () => signOut());
 // Mobile nav: hamburger toggles the sidebar drawer; picking a view collapses it again.
@@ -1539,6 +1626,25 @@ document.getElementById("jobFilters")?.addEventListener("click", (event) => {
   if (!chip) return;
   state.jobRunFilter = chip.dataset.jobFilter;
   renderJobs();
+});
+
+// Monitor approval gate: approve / choose continue the run; reject fails it (two-step arm).
+// Buttons in the gate disable while the request is in flight (double-submission guard).
+document.getElementById("monApprovals")?.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-approval-id]");
+  if (!button || button.disabled) return;
+  const approvalId = button.dataset.approvalId;
+  const gate = button.closest(".approval-gate");
+  const setBusy = (busy) => { for (const node of gate.querySelectorAll("button")) node.disabled = busy; };
+  const fire = (action, body, message) => {
+    setBusy(true);
+    decideApproval(approvalId, action, body)
+      .then(() => toast(message))
+      .catch((error) => { toast(error.message); setBusy(false); loadAll().catch(() => undefined); });
+  };
+  if (button.classList.contains("approval-approve")) fire("approve", null, "Approved — run continuing");
+  else if (button.classList.contains("approval-choose")) fire("choose", { choice: button.dataset.choice }, "Choice submitted — run continuing");
+  else if (button.classList.contains("approval-reject")) armedClick(button, "Confirm reject", () => fire("reject", null, "Rejected — run stopped"));
 });
 
 // Monitor node chip → open that node's job in Jobs, filtered to the run it belongs to.
@@ -1593,6 +1699,17 @@ showView(VIEWS.includes(bootHash) ? bootHash : (localStorage.getItem("atlasView"
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeModals();
+  // Focus trap: while a modal is open, Tab cycles inside it instead of escaping to the
+  // page behind the backdrop (which stays interactive in the DOM).
+  if (event.key !== "Tab") return;
+  const modal = document.querySelector(".modal-backdrop:not([hidden]) .modal");
+  if (!modal) return;
+  const focusables = modal.querySelectorAll("button, input:not([type=hidden]), select, textarea, a[href]");
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && (document.activeElement === last || !modal.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
 });
 
 loadAll()
