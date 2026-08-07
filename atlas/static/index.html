@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Atlas Control Plane</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260722-ops2">
+    <link rel="stylesheet" href="/static/styles.css?v=20260807-ops3">
     <script>
       // Restore theme before first paint so there is no light→dark flash.
       (function () { try { if (localStorage.getItem("atlas-theme") === "dark") document.documentElement.dataset.theme = "dark"; } catch (e) { /* pre-paint theme is best-effort */ } })();
@@ -128,6 +128,8 @@
             <span>Refresh</span>
           </button>
         </header>
+
+        <div id="staleBanner" class="stale-banner" hidden></div>
 
         <div class="content" id="main" tabindex="-1">
 
@@ -303,7 +305,9 @@
                 <button class="audit-chip" type="button" data-audit-filter="workflow">workflow</button>
                 <button class="audit-chip" type="button" data-audit-filter="worker">worker</button>
                 <button class="audit-chip" type="button" data-audit-filter="approval">approval</button>
-                <span class="audit-note">Click a row to open its job / run · last 30 shown <span lang="th">· คลิกแถวเพื่อเปิด</span></span>
+                <input id="auditSearchInput" class="audit-search" type="search" placeholder="Filter actions, targets, actors…" aria-label="Filter audit entries">
+                <button id="auditCsvBtn" class="secondary-btn" type="button">↓ CSV</button>
+                <span class="audit-note">Click a row to open its job / run <span lang="th">· คลิกแถวเพื่อเปิด</span></span>
               </div>
               <div class="audit-table" role="group" aria-label="Audit log — time, action, target, detail, actor">
                 <div class="audit-head">
@@ -311,6 +315,7 @@
                 </div>
                 <div id="auditList"><div class="empty">Loading… · <span lang="th">กำลังโหลด</span></div></div>
               </div>
+              <button id="auditMoreBtn" class="secondary-btn audit-more" type="button" hidden>Load older entries · <span lang="th">โหลดเพิ่ม</span></button>
             </div>
           </section>
 
@@ -488,8 +493,23 @@
       </form>
     </div>
 
+    <div id="confirmModal" class="modal-backdrop" hidden>
+      <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmBody">
+        <div class="modal-head">
+          <h2 id="confirmTitle"></h2>
+          <button class="icon-btn close-modal" type="button" data-close-modal aria-label="Close">×</button>
+        </div>
+        <p id="confirmBody" class="confirm-body"></p>
+        <div class="form-actions">
+          <button id="confirmCancelBtn" class="secondary-btn" type="button">Cancel</button>
+          <button id="confirmOkBtn" class="danger-btn" type="button">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="ariaStatus" class="sr-only" role="status"></div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/static/config.js?v=20260722-ops2"></script>
-    <script src="/static/app.js?v=20260722-ops2" type="module"></script>
+    <script src="/static/config.js?v=20260807-ops3"></script>
+    <script src="/static/app.js?v=20260807-ops3" type="module"></script>
   </body>
 </html>

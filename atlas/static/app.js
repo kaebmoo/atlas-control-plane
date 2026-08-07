@@ -17,6 +17,8 @@ const state = {
   apiTokens: [],
   eventSource: null,
   auditFilter: "all",
+  auditFilterText: "",
+  auditLimit: 30,
   jobRunFilter: "all",
   streamText: "",
   events: [],
@@ -48,7 +50,11 @@ async function api(path, options = {}) {
     }
   }
   if (!response.ok) {
-    const message = data?.error || data?.message || response.statusText || `HTTP ${response.status}`;
+    // A non-JSON error body (e.g. a proxy's HTML error page) must not become the operator-facing
+    // message — fall back to the status line instead of dumping markup into toasts/banners.
+    const raw = data?.error || data?.message || "";
+    const usable = typeof raw === "string" && raw && raw.length <= 200 && !raw.trimStart().startsWith("<");
+    const message = usable ? raw : `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
     if (response.status === 401 && path !== "/api/auth/login") {
       localStorage.removeItem("atlasApiToken");
       showLogin("Session expired — please sign in again · เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่");
@@ -93,6 +99,17 @@ function statusClass(value) {
   // character outside [A-Za-z0-9-] (e.g. a quote) could break out of the attribute and inject
   // markup. An operator can set an arbitrary workflow status via PUT, so sanitize at the sink.
   return String(value || "unknown").replaceAll("_", "-").replace(/[^A-Za-z0-9-]/g, "") || "unknown";
+}
+
+// Operator-facing labels for machine states; statusClass() keeps the raw token for CSS.
+const STATUS_LABELS = {
+  waiting_for_human: "waiting for human",
+  recovery_required: "needs recovery",
+  cancel_requested: "cancelling…",
+};
+function statusLabel(value) {
+  const raw = String(value || "unknown");
+  return STATUS_LABELS[raw] || raw.replaceAll("_", " ");
 }
 
 function shortId(value) {
@@ -205,7 +222,7 @@ async function loadAll() {
     api("/api/workflows"),
     api("/api/workflow-runs"),
     api("/api/approvals?state=pending"),
-    canReadAudit ? api("/api/audit?limit=30") : Promise.resolve({ audit: [] }),
+    canReadAudit ? api(`/api/audit?limit=${state.auditLimit}`) : Promise.resolve({ audit: [] }),
   ]);
   state.workers = workers.workers || [];
   state.workspaces = workspaces.workspaces || [];
@@ -217,7 +234,66 @@ async function loadAll() {
   if (state.selectedWorkflowRunId && state.workflowRuns.some((run) => run.id === state.selectedWorkflowRunId)) {
     await loadWorkflowRunDetail(state.selectedWorkflowRunId);
   }
-  render();
+  preserveListFocus(render);
+  setStale(null);
+  announceApprovals();
+}
+
+// The 5s poll rewrites list innerHTML, which ejects keyboard focus to <body>. Remember the
+// focused element's identifying data-* attribute (and class, to pick the same button among
+// row siblings) and restore focus onto the rebuilt node.
+function preserveListFocus(renderFn) {
+  const active = document.activeElement;
+  let marker = null;
+  if (active && active.dataset) {
+    for (const key of ["jobId", "runId", "workerId", "workspaceId", "userId", "tokenId", "approvalId", "jobFilter"]) {
+      if (active.dataset[key]) { marker = { key, value: active.dataset[key], className: active.className }; break; }
+    }
+  }
+  renderFn();
+  if (!marker) return;
+  const attr = "data-" + marker.key.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+  const candidates = [...document.querySelectorAll(`[${attr}="${CSS.escape(marker.value)}"]`)];
+  const target = candidates.find((node) => node.className === marker.className) || candidates[0];
+  target?.focus?.();
+}
+
+// Persistent staleness signal: a failed poll shows a banner (with retry) until the next
+// successful load — a 2.6s toast is not enough warning that every list may be out of date.
+function setStale(error) {
+  const banner = document.getElementById("staleBanner");
+  if (!banner) return;
+  if (!error) { banner.hidden = true; return; }
+  const wasHidden = banner.hidden;
+  banner.hidden = false;
+  banner.innerHTML = `<span>⚠ Last update failed (${escapeHtml(error.message || "error")}) — data may be stale · <span lang="th">ข้อมูลอาจไม่เป็นปัจจุบัน</span></span><button id="staleRetryBtn" class="secondary-btn btn-sm" type="button">Retry</button>`;
+  if (wasHidden) announce("Update failed — data may be stale");
+}
+
+// First-load failure: lists otherwise sit on "Loading…" forever, indistinguishable from slow.
+// Only replaces containers still showing an .empty placeholder — stale real data is left alone.
+function markLoadFailed() {
+  for (const selector of ["#overviewJobs", "#jobList", "#workerList", "#workspaceList", "#auditList", "#workflowRunList", "#userList", "#tokenList"]) {
+    const node = document.querySelector(selector);
+    if (node && node.querySelector(".empty")) {
+      node.innerHTML = '<div class="empty">Could not load — check the connection, then Retry above · <span lang="th">โหลดไม่สำเร็จ</span></div>';
+    }
+  }
+}
+
+// Polite screen-reader announcements for events that otherwise change silently.
+function announce(message) {
+  const node = document.getElementById("ariaStatus");
+  if (node) node.textContent = message;
+}
+
+let lastApprovalCount = null;
+function announceApprovals() {
+  const count = state.approvals.length;
+  if (lastApprovalCount !== null && count > lastApprovalCount) {
+    announce(`${count} approval${count === 1 ? "" : "s"} waiting for a decision`);
+  }
+  lastApprovalCount = count;
 }
 
 async function refreshAll({ poll = false, notice = false } = {}) {
@@ -323,7 +399,7 @@ function renderRunSummary() {
     return;
   }
   const counters = run.counters || {};
-  const chips = [`<span class="chip">state <b>${escapeHtml(run.state)}</b></span>`];
+  const chips = [`<span class="chip">state <b>${escapeHtml(statusLabel(run.state))}</b></span>`];
   if (typeof counters.jobs_started === "number") chips.push(`<span class="chip">jobs <b>${counters.jobs_started}</b></span>`);
   if (typeof counters.budget_units_spent === "number") chips.push(`<span class="chip">budget <b>${counters.budget_units_spent}</b></span>`);
   const completed = (counters.completed_nodes || []).length;
@@ -387,7 +463,7 @@ function renderOverviewLists() {
             <div class="title">${escapeHtml(job.prompt || job.id)}</div>
             <div class="meta">${escapeHtml(job.worker_name || shortId(job.worker_id) || "—")} · ${escapeHtml(shortId(job.id))}</div>
           </div>
-          <span class="status ${statusClass(job.state)}">${escapeHtml(job.state)}</span>
+          <span class="status ${statusClass(job.state)}">${escapeHtml(statusLabel(job.state))}</span>
           <span class="ago">${escapeHtml(formatTime(job.created_at))}</span>
         </button>`).join("")
       : '<div class="empty">No jobs yet · <span lang="th">ยังไม่มีงาน</span></div>';
@@ -439,7 +515,7 @@ function renderWorkers() {
       <div class="wc-head">
         <span class="status ${statusClass(worker.status)} dot-only" aria-hidden="true"></span>
         <span class="name">${escapeHtml(worker.name)}</span>
-        <span class="status ${statusClass(worker.status)}">${escapeHtml(worker.status)}</span>
+        <span class="status ${statusClass(worker.status)}">${escapeHtml(statusLabel(worker.status))}</span>
       </div>
       <div class="wc-url">${escapeHtml(worker.base_url)}</div>
       <div class="wc-url" title="Worker ID">${escapeHtml(worker.id)}<button class="copy-btn" type="button" data-copy="${escapeHtml(worker.id)}" title="Copy worker ID" aria-label="Copy id of ${escapeHtml(worker.name)}">⧉</button></div>
@@ -535,7 +611,7 @@ function renderJobs() {
     <button class="job-row ${job.id === state.selectedJobId ? "selected" : ""}" type="button" data-job-id="${escapeHtml(job.id)}">
       <div class="job-row-top">
         <span class="status ${statusClass(job.state)} dot-only" aria-hidden="true"></span>
-        <span class="status ${statusClass(job.state)}">${escapeHtml(job.state)}</span>
+        <span class="status ${statusClass(job.state)}">${escapeHtml(statusLabel(job.state))}</span>
         <span class="job-row-ago">${escapeHtml(formatTime(job.created_at))}</span>
       </div>
       <div class="job-row-prompt">${escapeHtml(job.prompt)}</div>
@@ -631,7 +707,7 @@ function renderWorkflowRuns() {
         <div class="run-row-top">
           <span class="status ${statusClass(run.state)} dot-only" aria-hidden="true"></span>
           <span class="name">${escapeHtml(run.name)}</span>
-          <span class="status ${statusClass(run.state)}">${escapeHtml(run.state)}</span>
+          <span class="status ${statusClass(run.state)}">${escapeHtml(statusLabel(run.state))}</span>
         </div>
         <div class="run-bar"><div class="track"><div class="fill" style="width:${progress.pct}%;background:${wfBarColor(run.state)}"></div></div><span class="pct">${progress.pct}%</span></div>
         <div class="run-row-meta"><span class="mono">${escapeHtml(shortId(run.id))}</span><span>·</span><span>${escapeHtml(wfElapsed(run))}</span></div>
@@ -644,7 +720,7 @@ function renderWorkflowRuns() {
   document.querySelector(".mon-detail")?.classList.toggle("is-empty", !run);
   const set = (id, fn) => { const node = document.getElementById(id); if (node) fn(node); };
   set("monRunName", (node) => { node.textContent = run ? run.name : "Select a run · เลือก run จากรายการ"; });
-  set("monRunChip", (node) => { node.hidden = !run; if (run) { node.className = `status ${statusClass(run.state)}`; node.textContent = run.state; } });
+  set("monRunChip", (node) => { node.hidden = !run; if (run) { node.className = `status ${statusClass(run.state)}`; node.textContent = statusLabel(run.state); } });
   set("monRunId", (node) => { node.textContent = run ? run.id : ""; });
   // Show only the controls valid for the current state (prototype behaviour). Role gating
   // (applyRoleGate) still disables them for non-operators; this just hides the inapplicable ones.
@@ -733,15 +809,24 @@ function renderRunApprovals(run) {
 function renderAudit() {
   const list = $("#auditList");
   const filter = state.auditFilter || "all";
+  const text = (state.auditFilterText || "").trim().toLowerCase();
   let rows = state.audit;
   if (filter !== "all") {
     rows = rows.filter((entry) => (entry.resource_type || "").includes(filter) || (entry.action || "").includes(filter));
   }
+  if (text) {
+    rows = rows.filter((entry) =>
+      [entry.action, entry.resource_id, entry.resource_type, entry.actor, JSON.stringify(entry.details ?? "")]
+        .join(" ").toLowerCase().includes(text));
+  }
+  // A full page from the server means older entries likely exist — offer to widen the window.
+  const more = document.getElementById("auditMoreBtn");
+  if (more) more.hidden = state.audit.length < state.auditLimit;
   if (!rows.length) {
     list.innerHTML = '<div class="empty">No matching entries · <span lang="th">ไม่มีรายการ</span></div>';
     return;
   }
-  list.innerHTML = rows.slice(0, 30).map((entry) => {
+  list.innerHTML = rows.map((entry) => {
     const action = entry.action || "";
     let tone = "grey";
     if (/fail|error|cancel|reject|refused|denied|delete/.test(action)) tone = "danger";
@@ -791,6 +876,25 @@ async function downloadUsage(format) {
   const link = document.createElement("a");
   link.href = url;
   link.download = format === "csv" ? "usage.csv" : "usage.json";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Audit CSV export mirrors downloadUsage: authenticated fetch (Bearer header, never a token
+// in the URL), saved as a local blob. Exports the currently loaded window (auditLimit rows).
+async function downloadAudit() {
+  const headers = new Headers();
+  const token = localStorage.getItem("atlasApiToken");
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(`${API_BASE}/api/audit?format=csv&limit=${state.auditLimit}`, { headers });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "audit.csv";
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -1135,7 +1239,7 @@ function updateStreamHeader() {
   const st = statusClass(job?.state || "queued");
   const set = (id, fn) => { const node = document.getElementById(id); if (node) fn(node); };
   set("jobDetailDot", (n) => { n.className = `status ${st} dot-only`; });
-  set("jobDetailChip", (n) => { n.className = `status ${st}`; n.textContent = job ? job.state : "—"; });
+  set("jobDetailChip", (n) => { n.className = `status ${st}`; n.textContent = job ? statusLabel(job.state) : "—"; });
   set("jobDetailId", (n) => { n.textContent = job ? job.id : ""; });
   set("jobDetailPrompt", (n) => { n.textContent = job ? job.prompt : "Select a job to watch its live stream · เลือกงานเพื่อดูสตรีมสด"; });
   set("jobDetailRoute", (n) => {
@@ -1253,6 +1357,7 @@ function armedClick(button, armedLabel, action) {
   button.dataset.restoreLabel = button.textContent;
   button.textContent = armedLabel;
   button.classList.add("is-armed");
+  announce(`${armedLabel} — press again to confirm`);
   button.armTimer = setTimeout(() => disarmButton(button), 4000);
 }
 
@@ -1275,7 +1380,11 @@ async function decideApproval(approvalId, action, body) {
 async function retryInterruptedRun() {
   if (!state.selectedWorkflowRunId) return;
   const warning = state.workflowRunDetail?.run?.counters?.recovery?.warning || "Retry may duplicate worker side effects.";
-  if (!confirm(`${warning}\n\nAuthorize retry of interrupted nodes?`)) return;
+  if (!(await confirmDialog({
+    title: "Retry interrupted nodes",
+    body: `${warning}\nAuthorize retry of interrupted nodes? · อนุญาตให้รันโหนดที่ค้างใหม่?`,
+    confirmLabel: "Authorize retry",
+  }))) return;
   await api(`/api/workflow-runs/${state.selectedWorkflowRunId}/resume`, {
     method: "POST",
     body: JSON.stringify({ retry_interrupted: true }),
@@ -1322,10 +1431,32 @@ function openWorkspaceModal(workspace = null) {
   form.elements.workspace_key.focus();
 }
 
+// Styled confirm dialog replacing native confirm(): destructive flows share one visual
+// language with the rest of the console, render bilingual copy properly (pre-line), and
+// reuse the existing modal focus trap + Escape handling. Resolves false on any dismiss.
+let confirmResolve = null;
+function confirmDialog({ title, body, confirmLabel = "Confirm" }) {
+  lastModalTrigger = document.activeElement;
+  $("#confirmTitle").textContent = title;
+  $("#confirmBody").textContent = body;
+  $("#confirmOkBtn").textContent = confirmLabel;
+  $("#confirmModal").hidden = false;
+  $("#confirmOkBtn").focus();
+  return new Promise((resolve) => { confirmResolve = resolve; });
+}
+function settleConfirm(result) {
+  if (!confirmResolve) return;
+  const resolve = confirmResolve;
+  confirmResolve = null;
+  resolve(result);
+}
+
 function closeModals() {
-  const wasOpen = !$("#workerModal").hidden || !$("#workspaceModal").hidden;
+  const wasOpen = !$("#workerModal").hidden || !$("#workspaceModal").hidden || !$("#confirmModal").hidden;
   $("#workerModal").hidden = true;
   $("#workspaceModal").hidden = true;
+  $("#confirmModal").hidden = true;
+  settleConfirm(false);
   if (wasOpen) {
     // Return focus to the control that opened the modal (a11y); fall back to the content
     // region if that trigger was re-rendered away by a poll while the modal was open.
@@ -1337,7 +1468,11 @@ function closeModals() {
 
 async function deleteWorker(workerId) {
   const worker = state.workers.find((item) => item.id === workerId);
-  if (!confirm(`Delete worker ${worker?.name || workerId}? Its workspaces will be removed too. Workers with job history are kept for audit and cannot be deleted.`)) return;
+  if (!(await confirmDialog({
+    title: "Delete worker",
+    body: `Delete ${worker?.name || workerId}? Its workspaces are removed too. Workers with job history are kept for audit and cannot be deleted.\nลบ worker นี้? workspace ของมันจะถูกลบด้วย`,
+    confirmLabel: "Delete worker",
+  }))) return;
   await api(`/api/workers/${workerId}`, { method: "DELETE" });
   if (state.selectedJobId) state.selectedJobId = null;
   toast("Worker deleted");
@@ -1346,7 +1481,11 @@ async function deleteWorker(workerId) {
 
 async function deleteWorkspace(workspaceId) {
   const workspace = state.workspaces.find((item) => item.id === workspaceId);
-  if (!confirm(`Delete workspace ${workspace?.workspace_key || workspaceId}?`)) return;
+  if (!(await confirmDialog({
+    title: "Delete workspace",
+    body: `Delete workspace ${workspace?.workspace_key || workspaceId}?\nลบ workspace นี้?`,
+    confirmLabel: "Delete workspace",
+  }))) return;
   await api(`/api/workspaces/${workspaceId}`, { method: "DELETE" });
   toast("Workspace deleted");
   await loadAll();
@@ -1354,12 +1493,15 @@ async function deleteWorkspace(workspaceId) {
 
 // ----- Health chip · Accounts -----
 
+let lastHealth = null;
 function setHealth(ok) {
   const chip = document.getElementById("healthChip");
   const text = document.getElementById("healthChipText");
   if (!chip || !text) return;
   chip.classList.toggle("err", !ok);
   text.textContent = ok ? "Connected · ปกติ" : "Connection lost · เชื่อมต่อไม่ได้";
+  if (lastHealth !== null && lastHealth !== ok) announce(ok ? "Connection restored" : "Connection lost");
+  lastHealth = ok;
 }
 
 async function loadAccounts() {
@@ -1449,6 +1591,10 @@ document.addEventListener("click", async (event) => {
     closeModals();
     return;
   }
+  if (event.target.closest("#staleRetryBtn")) {
+    await loadAll().catch((error) => { setStale(error); toast(error.message); });
+    return;
+  }
   const copyButton = event.target.closest("[data-copy]");
   if (copyButton) {
     try {
@@ -1505,7 +1651,11 @@ document.addEventListener("click", async (event) => {
   }
   const deleteUserButton = event.target.closest(".delete-user");
   if (deleteUserButton) {
-    if (!confirm("Delete this user? All of their API tokens are removed too.\nลบผู้ใช้นี้? token ทั้งหมดของผู้ใช้จะถูกลบด้วย")) return;
+    if (!(await confirmDialog({
+      title: "Delete user",
+      body: "Delete this user? All of their API tokens are removed too.\nลบผู้ใช้นี้? token ทั้งหมดของผู้ใช้จะถูกลบด้วย",
+      confirmLabel: "Delete user",
+    }))) return;
     await api(`/api/users/${encodeURIComponent(deleteUserButton.dataset.userId)}`, { method: "DELETE" })
       .then(() => loadAccounts())
       .catch((error) => toast(error.message));
@@ -1515,7 +1665,11 @@ document.addEventListener("click", async (event) => {
   if (revokeTokenButton) {
     // Dashboard sessions are themselves tokens (named "dashboard login") and look identical —
     // warn before revoking, because killing the current session's token logs you out instantly.
-    if (!confirm("Revoke this token? Revoking your current session's token signs you out immediately.\nเพิกถอน token นี้? ถ้าเป็นของเซสชันปัจจุบัน คุณจะหลุดจากระบบทันที")) return;
+    if (!(await confirmDialog({
+      title: "Revoke token",
+      body: "Revoke this token? Revoking your current session's token signs you out immediately.\nเพิกถอน token นี้? ถ้าเป็นของเซสชันปัจจุบัน คุณจะหลุดจากระบบทันที",
+      confirmLabel: "Revoke token",
+    }))) return;
     await api(`/api/tokens/${encodeURIComponent(revokeTokenButton.dataset.tokenId)}`, { method: "DELETE" })
       .then(() => loadAccounts())
       .catch((error) => toast(error.message));
@@ -1682,6 +1836,17 @@ document.getElementById("themeToggle")?.addEventListener("click", () => {
   try { localStorage.setItem("atlas-theme", next); } catch { /* private mode */ }
   applyTheme(next);
 });
+$("#confirmOkBtn").addEventListener("click", () => { settleConfirm(true); closeModals(); });
+$("#confirmCancelBtn").addEventListener("click", () => closeModals());
+document.getElementById("auditSearchInput")?.addEventListener("input", (event) => {
+  state.auditFilterText = event.currentTarget.value;
+  renderAudit();
+});
+document.getElementById("auditMoreBtn")?.addEventListener("click", () => {
+  state.auditLimit += 50;
+  loadAll().catch((error) => toast(error.message));
+});
+document.getElementById("auditCsvBtn")?.addEventListener("click", () => downloadAudit().catch((error) => toast(error.message)));
 $("#loadUsageBtn").addEventListener("click", () => loadUsage().catch((error) => toast(error.message)));
 $("#usageJsonBtn").addEventListener("click", () => downloadUsage("").catch((error) => toast(error.message)));
 $("#usageCsvBtn").addEventListener("click", () => downloadUsage("csv").catch((error) => toast(error.message)));
@@ -1723,15 +1888,21 @@ loadAll()
   })
   .catch((error) => {
     document.body.classList.remove("is-loading");
+    // A pre-auth failure shows the login screen via api()'s 401 path; anything else here is a
+    // real load failure — make it look like one instead of an eternal "Loading…".
+    if ($("#loginScreen").hidden) {
+      setStale(error);
+      markLoadFailed();
+    }
     toast(error.message);
   });
 
 setInterval(() => {
   if (!$("#loginScreen").hidden) return;
-  loadAll().catch(() => undefined);  // health is tracked at the fetch layer in api()
+  loadAll().catch((error) => setStale(error));  // health chip tracks transport; banner tracks API
 }, 5000);
 
 setInterval(() => {
   if (!$("#loginScreen").hidden) return;
-  refreshAll({ poll: true }).catch(() => undefined);
+  refreshAll({ poll: true }).catch((error) => setStale(error));
 }, AUTO_POLL_MS);
