@@ -122,8 +122,16 @@ body.is-loading .loading-bar { opacity: 1; animation: nt-load 1.1s var(--ease) i
 .login-field input { width: 100%; padding: 11px 14px; border: 1.5px solid var(--line); border-radius: var(--r-in); background: var(--panel2); color: var(--ink); font-size: 17px; }
 .login-field:last-of-type { margin-bottom: 22px; }
 .login-field input:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgba(255,209,0,.25); }
+.pw-field { position: relative; display: block; }
+.pw-field input { width: 100%; padding-right: 42px; }
+.acct-form .pw-field { flex: 1; min-width: 120px; }
+.acct-form .pw-field input { width: 100%; min-width: 0; }
+.pw-toggle { position: absolute; top: 50%; right: 4px; transform: translateY(-50%); width: 30px; height: 30px; padding: 0; border: none; border-radius: 8px; background: transparent; color: var(--faint); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.pw-toggle:hover { background: var(--hov); color: var(--ink); }
+.pw-toggle svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .login-submit { width: 100%; padding: 12px; border-radius: var(--r-pill); background: var(--yellow); color: var(--ink900); font-size: 18px; font-weight: 700; box-shadow: 0 6px 16px rgba(255,209,0,.35); transition: background var(--fast); }
-.login-submit:hover { background: var(--yellow-hi); }
+.login-submit:hover:not(:disabled) { background: var(--yellow-hi); }
+.login-submit:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
 .login-note { font-size: 15px; color: var(--faint); text-align: center; margin-top: 18px; }
 
 /* ============================ APP SHELL ============================ */
@@ -153,6 +161,9 @@ body.is-loading .loading-bar { opacity: 1; animation: nt-load 1.1s var(--ease) i
 .nav-badge[hidden] { display: none; }
 
 .sidebar-foot { padding: 14px; border-top: 1px solid var(--line); }
+.doc-link { display: flex; align-items: center; gap: 11px; padding: 9px 12px; margin-bottom: 8px; border-radius: 11px; color: var(--mut); font-size: 15.5px; font-weight: 600; transition: background var(--fast), color var(--fast); }
+.doc-link:hover { background: var(--hov); color: var(--ink); }
+.doc-link svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 .signed-in { display: flex; align-items: center; gap: 10px; }
 .signed-in[hidden] { display: none; }
 .user-avatar { width: 34px; height: 34px; flex: none; border-radius: var(--r-pill); background: var(--yellow); color: var(--ink900); display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 17px; }
@@ -192,6 +203,12 @@ body.is-loading .loading-bar { opacity: 1; animation: nt-load 1.1s var(--ease) i
 .micro-head span { font-weight: 400; letter-spacing: 0; }
 
 /* ============================ BUTTONS ============================ */
+/* primary-btn (yellow): the one action in its context that changes state — a form's save/
+   create submit, or the single highlighted default among several mutually-exclusive
+   state-changing controls (e.g. Resume among Pause/Resume/Retry/Cancel). Never a read-only
+   trigger (query/load/export) or a secondary action already covered by another primary in
+   the same cluster — those get btn-dark or secondary-btn. danger-btn is separate, for
+   destructive actions, and always uses the two-step arm (armedClick) or a confirm dialog. */
 .primary-btn, .secondary-btn, .danger-btn, .preview-btn, .btn-dark {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
   padding: 8px 16px; border-radius: var(--r-pill); font-size: 15.5px; font-weight: 700;
@@ -222,6 +239,7 @@ body.is-loading .loading-bar { opacity: 1; animation: nt-load 1.1s var(--ease) i
 .card-pad-0 { padding: 0; overflow: hidden; }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 22px; border-bottom: 1px solid var(--line2); }
 .card-sub { font-size: 15px; color: var(--faint); margin-top: 2px; }
+.card-sub--tight { margin-bottom: 18px; }
 .card-count { font-size: 15px; color: var(--faint); }
 .empty { padding: 22px 12px; text-align: center; color: var(--faint); font-size: 16px; }
 .mono { font-family: var(--mono); }
@@ -578,7 +596,12 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 .acct-form input, .acct-form select { flex: 1; min-width: 120px; padding: 9px 13px; border: 1.5px solid var(--line); border-radius: 10px; background: var(--panel2); color: var(--ink); font-size: 16px; }
 .acct-form button { flex: none; }
 .accounts .stack-list { padding: 6px 0; }
-.accounts .stack-list .workflow-run-item { border: none; border-bottom: 1px solid var(--line2); border-radius: 0; background: transparent; padding: 13px 22px; }
+/* Base .workflow-run-item is a row (correct for the 2-span artifact-download button);
+   the accounts title/subtitle/actions structure needs a column, or the title/actions
+   compete for the same horizontal space and the username gets ellipsis-truncated to a
+   few characters. .item-sub/.item-actions already carry their own margin-top for this
+   exact stacked layout — column is what they were authored for. */
+.accounts .stack-list .workflow-run-item { flex-direction: column; align-items: stretch; border: none; border-bottom: 1px solid var(--line2); border-radius: 0; background: transparent; padding: 13px 22px; }
 .accounts .stack-list .workflow-run-item:hover { background: var(--hov); }
 .token-reveal { margin: 14px 22px 0; padding: 12px 14px; background: rgba(255,209,0,.12); border: 1px solid rgba(255,209,0,.4); border-radius: var(--r-in); display: flex; flex-direction: column; gap: 8px; }
 .token-reveal[hidden] { display: none; }
@@ -659,4 +682,45 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
   * { animation: none !important; transition: none !important; }
   /* The boot loading bar is state, not decoration — keep a static visible version. */
   body.is-loading .loading-bar { transform: scaleX(1); opacity: .5; }
+}
+
+/* ============================ DOCS PAGE (/docs) ============================
+   Server-rendered, standalone from the SPA shell above — reuses the same
+   tokens/fonts so it never reads as a bolted-on page. */
+.doc-topbar { display: flex; align-items: center; gap: 14px; padding: 16px 28px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.doc-topbar img { height: 24px; filter: var(--logo-f); }
+.doc-topbar .doc-brand { font-weight: 700; font-size: 17px; }
+.doc-topbar .spring { flex: 1; }
+.doc-topbar a { font-size: 15px; color: var(--mut); padding: 7px 13px; border-radius: var(--r-pill); transition: background var(--fast), color var(--fast); }
+.doc-topbar a:hover { background: var(--hov); color: var(--ink); }
+.doc-wrap { max-width: 72ch; margin: 0 auto; padding: 48px 24px 96px; }
+.doc-article h1 { font-size: 30px; font-weight: 700; letter-spacing: -.4px; margin-bottom: 24px; }
+.doc-article h2 { font-size: 22px; font-weight: 700; margin: 40px 0 14px; padding-top: 24px; border-top: 1px solid var(--line2); }
+.doc-article h2:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
+.doc-article h3 { font-size: 18px; font-weight: 700; margin: 26px 0 10px; }
+.doc-article h4 { font-size: 16px; font-weight: 700; margin: 20px 0 8px; }
+.doc-article p { margin: 0 0 16px; line-height: 1.6; }
+.doc-article ul { margin: 0 0 16px; padding-left: 22px; line-height: 1.6; }
+.doc-article li { margin-bottom: 6px; }
+.doc-article code { background: var(--chip); padding: 2px 6px; border-radius: 5px; font-size: 15px; }
+.doc-article pre { background: var(--code-bg); color: var(--code-ink); padding: 16px 18px; border-radius: var(--r-in); overflow: auto; margin: 0 0 20px; }
+.doc-article pre code { background: none; padding: 0; color: inherit; font-size: 15px; }
+/* Tinted fill, no side border — matches .alert-warn's callout treatment (a colored
+   border-left is a banned pattern here). */
+.doc-article blockquote { background: rgba(255,209,0,.12); border-radius: var(--r-in); padding: 14px 18px; margin: 0 0 20px; color: var(--warn-ink); }
+:root[data-theme="dark"] .doc-article blockquote { background: rgba(255,209,0,.08); }
+.doc-article blockquote p { margin: 0; color: inherit; }
+.doc-article table { width: 100%; border-collapse: collapse; margin: 0 0 24px; font-size: 15.5px; }
+.doc-article th, .doc-article td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.doc-article th { color: var(--mut); font-weight: 700; }
+.doc-article a { text-decoration: underline; text-underline-offset: 2px; }
+@media (max-width: 640px) {
+  .doc-topbar { padding: 14px 18px; }
+  .doc-topbar .doc-brand { display: none; }
+  .doc-wrap { padding: 32px 18px 72px; }
+  .doc-article h1 { font-size: 25px; }
+  .doc-article table, .doc-article thead, .doc-article tbody, .doc-article th, .doc-article td, .doc-article tr { display: block; }
+  .doc-article thead { display: none; }
+  .doc-article tr { margin-bottom: 14px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+  .doc-article td { border-bottom: none; padding: 4px 0; }
 }

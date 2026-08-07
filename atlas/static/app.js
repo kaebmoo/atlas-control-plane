@@ -121,11 +121,13 @@ function formatTime(value) {
   return new Date(value).toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
+let toastTimer = null;
 function toast(message) {
   const node = $("#toast");
   node.textContent = message || "Done";
   node.classList.add("visible");
-  setTimeout(() => node.classList.remove("visible"), 2600);
+  clearTimeout(toastTimer); // a still-pending timer from a prior toast would hide this one early
+  toastTimer = setTimeout(() => node.classList.remove("visible"), 2600);
 }
 
 const VIEWS = ["overview", "monitor", "jobs", "audit", "usage", "fleet", "accounts"];
@@ -246,7 +248,7 @@ function preserveListFocus(renderFn) {
   const active = document.activeElement;
   let marker = null;
   if (active && active.dataset) {
-    for (const key of ["jobId", "runId", "workerId", "workspaceId", "userId", "tokenId", "approvalId", "jobFilter"]) {
+    for (const key of ["jobId", "runId", "workerId", "workspaceId", "userId", "tokenId", "approvalId", "jobFilter", "navJob", "navRun"]) {
       if (active.dataset[key]) { marker = { key, value: active.dataset[key], className: active.className }; break; }
     }
   }
@@ -256,6 +258,15 @@ function preserveListFocus(renderFn) {
   const candidates = [...document.querySelectorAll(`[${attr}="${CSS.escape(marker.value)}"]`)];
   const target = candidates.find((node) => node.className === marker.className) || candidates[0];
   target?.focus?.();
+}
+
+// A user's in-progress text selection (e.g. dragging to copy a job id) lives in the DOM; the
+// poll's innerHTML rewrite would silently discard it. Skip that one list's redraw for this
+// cycle when the selection anchors inside it — it catches up on the next poll once released.
+function selectionInside(node) {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
+  return node.contains(selection.getRangeAt(0).commonAncestorContainer);
 }
 
 // Persistent staleness signal: a failed poll shows a banner (with retry) until the next
@@ -375,13 +386,19 @@ function applyRoleGate() {
 async function login(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const data = await api("/api/auth/login", {
-    method: "POST",
-    body: JSON.stringify({ username: form.elements.username.value, password: form.elements.password.value }),
-  });
-  localStorage.setItem("atlasApiToken", data.token);
-  form.elements.password.value = "";
-  await loadAll();
+  const submitBtn = form.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+  try {
+    const data = await api("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username: form.elements.username.value, password: form.elements.password.value }),
+    });
+    localStorage.setItem("atlasApiToken", data.token);
+    form.elements.password.value = "";
+    await loadAll();
+  } finally {
+    submitBtn.disabled = false;
+  }
 }
 
 async function signOut() {
@@ -429,11 +446,12 @@ function renderMetrics() {
   set("metricWorkersUnit", `/ ${total}`);
   set("metricWorkersDelta", total ? `online ${online} · offline ${offline}` : "no workers yet");
   set("metricRunning", active);
-  set("metricRunningDelta", `queued ${queued} · running ${running}`);
+  set("metricRunningDelta", active ? `queued ${queued} · running ${running}` : "no active jobs");
   const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
   const runsToday = state.workflowRuns.filter((run) => run.created_at && new Date(run.created_at) >= midnight).length;
   set("metricRuns", runsToday);
-  set("metricRunsDelta", activeRuns ? `active ${activeRuns} · total ${state.workflowRuns.length}` : `of ${state.workflowRuns.length} total`);
+  set("metricRunsDelta", !state.workflowRuns.length ? "no runs yet"
+    : activeRuns ? `active ${activeRuns} · total ${state.workflowRuns.length}` : `of ${state.workflowRuns.length} total`);
   set("metricApprovals", state.approvals.length);
   set("metricApprovalsDelta", state.approvals.length ? "needs a decision" : "none pending");
   // Fleet health donut: yellow arc = online / total (r=40 → circumference 251.33)
@@ -484,6 +502,7 @@ function renderOverviewLists() {
 
 function renderWorkers() {
   const list = $("#workerList");
+  if (selectionInside(list)) return;
   if (!state.workers.length) {
     list.innerHTML = '<div class="empty">No workers yet — press “+ Add worker” to connect one · <span lang="th">ยังไม่มี worker</span></div>';
     return;
@@ -597,6 +616,7 @@ function renderJobs() {
     : filter === "manual" ? state.jobs.filter((job) => !job.run_id)
     : state.jobs.filter((job) => job.run_id === filter);
   if (count) count.textContent = `${jobs.length} jobs`;
+  if (selectionInside(list)) return;
   if (!jobs.length) {
     list.innerHTML = '<div class="empty">No jobs yet · <span lang="th">ยังไม่มีงาน</span></div>';
     return;
@@ -697,12 +717,13 @@ function renderWorkflowRuns() {
     const waiting = runs.filter((run) => run.state === "waiting_for_human").length;
     legend.innerHTML = `<span><span class="d" style="background:var(--nt-yellow-500)"></span>${running} running</span><span><span class="d" style="background:var(--nt-warning)"></span>${waiting} waiting</span>`;
   }
-  if (!runs.length) {
-    list.innerHTML = '<div class="empty">No workflow runs yet · <span lang="th">ยังไม่มี run</span></div>';
-  } else {
-    list.innerHTML = runs.slice(0, 20).map((run) => {
-      const progress = wfRunProgress(run);
-      return `
+  if (!selectionInside(list)) {
+    if (!runs.length) {
+      list.innerHTML = '<div class="empty">No workflow runs yet · <span lang="th">ยังไม่มี run</span></div>';
+    } else {
+      list.innerHTML = runs.slice(0, 20).map((run) => {
+        const progress = wfRunProgress(run);
+        return `
       <button class="run-row ${run.id === state.selectedWorkflowRunId ? "selected" : ""}" type="button" data-run-id="${escapeHtml(run.id)}">
         <div class="run-row-top">
           <span class="status ${statusClass(run.state)} dot-only" aria-hidden="true"></span>
@@ -712,7 +733,8 @@ function renderWorkflowRuns() {
         <div class="run-bar"><div class="track"><div class="fill" style="width:${progress.pct}%;background:${wfBarColor(run.state)}"></div></div><span class="pct">${progress.pct}%</span></div>
         <div class="run-row-meta"><span class="mono">${escapeHtml(shortId(run.id))}</span><span>·</span><span>${escapeHtml(wfElapsed(run))}</span></div>
       </button>`;
-    }).join("");
+      }).join("");
+    }
   }
 
   const run = state.workflowRunDetail?.run;
@@ -822,6 +844,7 @@ function renderAudit() {
   // A full page from the server means older entries likely exist — offer to widen the window.
   const more = document.getElementById("auditMoreBtn");
   if (more) more.hidden = state.audit.length < state.auditLimit;
+  if (selectionInside(list)) return;
   if (!rows.length) {
     list.innerHTML = '<div class="empty">No matching entries · <span lang="th">ไม่มีรายการ</span></div>';
     return;
@@ -1267,29 +1290,41 @@ async function saveWorker(event) {
   event.preventDefault();
   const formElement = event.currentTarget || event.target.closest("form");
   if (!formElement) throw new Error("Worker form is not available; refresh the page");
-  const form = new FormData(formElement);
-  const payload = Object.fromEntries(form.entries());
-  const data = await api("/api/workers", { method: "POST", body: JSON.stringify(payload) });
-  formElement.reset();
-  closeModals();
-  toast("Worker saved; polling status");
-  await api(`/api/workers/${data.worker.id}/poll`, { method: "POST" });
-  await loadAll();
-  const worker = state.workers.find((item) => item.id === data.worker.id);
-  toast(`Worker saved · ${worker?.status || "unknown"}`);
+  const submitBtn = $("#workerSubmitBtn");
+  submitBtn.disabled = true;
+  try {
+    const form = new FormData(formElement);
+    const payload = Object.fromEntries(form.entries());
+    const data = await api("/api/workers", { method: "POST", body: JSON.stringify(payload) });
+    formElement.reset();
+    closeModals();
+    toast("Worker saved; polling status");
+    await api(`/api/workers/${data.worker.id}/poll`, { method: "POST" });
+    await loadAll();
+    const worker = state.workers.find((item) => item.id === data.worker.id);
+    toast(`Worker saved · ${worker?.status || "unknown"}`);
+  } finally {
+    submitBtn.disabled = false;
+  }
 }
 
 async function saveWorkspace(event) {
   event.preventDefault();
   const formElement = event.currentTarget || event.target.closest("form");
   if (!formElement) throw new Error("Workspace form is not available; refresh the page");
-  const form = new FormData(formElement);
-  const payload = Object.fromEntries(form.entries());
-  await api("/api/workspaces", { method: "POST", body: JSON.stringify(payload) });
-  formElement.reset();
-  closeModals();
-  toast("Workspace saved");
-  await loadAll();
+  const submitBtn = $("#workspaceSubmitBtn");
+  submitBtn.disabled = true;
+  try {
+    const form = new FormData(formElement);
+    const payload = Object.fromEntries(form.entries());
+    await api("/api/workspaces", { method: "POST", body: JSON.stringify(payload) });
+    formElement.reset();
+    closeModals();
+    toast("Workspace saved");
+    await loadAll();
+  } finally {
+    submitBtn.disabled = false;
+  }
 }
 
 async function pollWorker(workerId) {
@@ -1349,7 +1384,7 @@ async function controlWorkflowRun(action) {
 function armedClick(button, armedLabel, action) {
   if (button.dataset.armed) {
     clearTimeout(button.armTimer);
-    disarmButton(button);
+    disarmButton(button, { silent: true }); // action() below announces its own result
     action();
     return;
   }
@@ -1361,12 +1396,17 @@ function armedClick(button, armedLabel, action) {
   button.armTimer = setTimeout(() => disarmButton(button), 4000);
 }
 
-function disarmButton(button) {
+// silent=true is the confirmed-click path (action() is about to announce its own result);
+// the default (timeout) path announces, since the arm otherwise expires with no SR signal
+// that the confirmation window closed and nothing happened (WCAG 2.2.1 timing concern).
+function disarmButton(button, { silent = false } = {}) {
   if (!button.dataset.armed) return;
+  const label = button.dataset.restoreLabel || button.textContent;
   delete button.dataset.armed;
   button.classList.remove("is-armed");
-  button.textContent = button.dataset.restoreLabel || button.textContent;
+  button.textContent = label;
   delete button.dataset.restoreLabel;
+  if (!silent) announce(`${label} — confirmation window closed, not confirmed`);
 }
 
 async function decideApproval(approvalId, action, body) {
@@ -1555,25 +1595,37 @@ function renderAccounts() {
 async function createUser(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  await api("/api/users", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
-  form.reset();
-  toast("User added · เพิ่มผู้ใช้แล้ว");
-  await loadAccounts();
+  const submitBtn = form.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+  try {
+    await api("/api/users", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
+    form.reset();
+    toast("User added · เพิ่มผู้ใช้แล้ว");
+    await loadAccounts();
+  } finally {
+    submitBtn.disabled = false;
+  }
 }
 
 async function createToken(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const data = await api("/api/tokens", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
-  form.reset();
-  const reveal = document.getElementById("newTokenReveal");
-  if (reveal) {
-    reveal.hidden = false;
-    reveal.innerHTML = `<div class="token-reveal-title">New token — shown only once, copy it now · <span lang="th">แสดงครั้งเดียว คัดลอกเก็บทันที</span></div>
-      <code>${escapeHtml(data.api_token)}</code>
-      <button class="preview-btn" type="button" data-copy="${escapeHtml(data.api_token)}">Copy</button>`;
+  const submitBtn = form.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+  try {
+    const data = await api("/api/tokens", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
+    form.reset();
+    const reveal = document.getElementById("newTokenReveal");
+    if (reveal) {
+      reveal.hidden = false;
+      reveal.innerHTML = `<div class="token-reveal-title">New token — shown only once, copy it now · <span lang="th">แสดงครั้งเดียว คัดลอกเก็บทันที</span></div>
+        <code>${escapeHtml(data.api_token)}</code>
+        <button class="preview-btn" type="button" data-copy="${escapeHtml(data.api_token)}">Copy</button>`;
+    }
+    await loadAccounts();
+  } finally {
+    submitBtn.disabled = false;
   }
-  await loadAccounts();
 }
 
 document.addEventListener("change", async (event) => {
@@ -1603,6 +1655,18 @@ document.addEventListener("click", async (event) => {
     } catch {
       toast("Copy failed · คัดลอกไม่สำเร็จ");
     }
+    return;
+  }
+  const pwToggle = event.target.closest(".pw-toggle");
+  if (pwToggle) {
+    const input = pwToggle.previousElementSibling;
+    const noun = pwToggle.getAttribute("aria-label").replace(/^(Show|Hide) /, "");
+    const wasShown = input.type === "text";
+    input.type = wasShown ? "password" : "text";
+    pwToggle.querySelector(".pw-icon-open").hidden = !wasShown;
+    pwToggle.querySelector(".pw-icon-closed").hidden = wasShown;
+    pwToggle.setAttribute("aria-pressed", String(!wasShown));
+    pwToggle.setAttribute("aria-label", `${wasShown ? "Show" : "Hide"} ${noun}`);
     return;
   }
   const editWorkerButton = event.target.closest(".edit-worker");
@@ -1825,6 +1889,14 @@ function applyTheme(theme) {
   document.documentElement.dataset.theme = dark ? "dark" : "light";
   const label = document.getElementById("themeToggleLabel");
   if (label) label.textContent = dark ? "Light" : "Dark";
+  const toggle = document.getElementById("themeToggle");
+  if (toggle) {
+    // The label already reads as "the theme you'll switch to"; the icon and aria-label now
+    // say the same thing explicitly, so neither reads as a status readout of the current theme.
+    toggle.setAttribute("aria-label", dark ? "Switch to light theme" : "Switch to dark theme");
+    toggle.querySelector(".theme-icon-moon").hidden = dark;
+    toggle.querySelector(".theme-icon-sun").hidden = !dark;
+  }
 }
 (function initTheme() {
   let saved = "light";
