@@ -20,9 +20,9 @@
   color-scheme: light;
   /* Theme tokens (light) — mirrored under [data-theme="dark"] below. */
   --app-bg: #EFF1F1; --panel: #FFFFFF; --panel2: #F6F7F7; --ink: #1F2122;
-  --mut: #666C6E; --faint: #8B9193; --line: #E2E4E5; --line2: #EBEDED;
+  --mut: #666C6E; --faint: #6B7173; --line: #E2E4E5; --line2: #EBEDED;
   --hov: #F3F4F4; --chip: #EEF0F0; --nav-on: #FFF3BF;
-  --ok-ink: #1E7A50; --err-ink: #C43D2B; --run-ink: #137F6C; --warn-ink: #8F7400;
+  --ok-ink: #1E7A50; --err-ink: #C43D2B; --run-ink: #137F6C; --warn-ink: #7A6300;
   --logo-f: none; --shadow: 0 1px 3px rgba(31,33,34,.06);
   --lift: 0 6px 18px rgba(31,33,34,.1);
   --code-bg: #1F2122; --code-ink: #D8DCDC;
@@ -42,7 +42,7 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
   --app-bg: #121415; --panel: #1C1F20; --panel2: #232729; --ink: #F1F3F3;
-  --mut: #A6ACAE; --faint: #7C8385; --line: #2E3335; --line2: #282D2F;
+  --mut: #A6ACAE; --faint: #8F9698; --line: #2E3335; --line2: #282D2F;
   --hov: #262B2D; --chip: #2A2F31; --nav-on: rgba(255,209,0,.16);
   --ok-ink: #4CC98A; --err-ink: #F07B62; --run-ink: #45C7AE; --warn-ink: #FFD100;
   --logo-f: brightness(0) invert(1); --shadow: 0 1px 3px rgba(0,0,0,.35);
@@ -64,15 +64,17 @@ body {
 }
 h1, h2, h3, h4, h5, h6, p { margin: 0; }
 h1, h2, h3, h4, h5, h6, strong, b { color: inherit; }
-h3 { font-size: 18.5px; font-weight: 700; letter-spacing: -.2px; }
-h4 { font-size: 16.5px; font-weight: 700; }
+h2 { font-size: 18.5px; font-weight: 700; letter-spacing: -.2px; }
+h3 { font-size: 16.5px; font-weight: 700; }
 [hidden] { display: none !important; }
 button, input, select, textarea { font: inherit; color: inherit; }
 button { border: 0; background: none; cursor: pointer; }
 a { color: var(--ink); text-decoration: none; }
 a:hover { color: var(--warn-ink); }
 code, pre, kbd, .mono { font-family: var(--mono); }
-:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(255,209,0,.45); border-radius: 8px; }
+/* Two-layer ring: a panel-colored gap + an ink ring stays ≥3:1 visible on every surface,
+   both themes — the old 45% yellow halo was ~1.3:1 on white (invisible to keyboard users). */
+:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--ink); border-radius: 8px; }
 ::selection { background: rgba(255,209,0,.4); color: var(--ink900); }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 999px; border: 2px solid transparent; background-clip: content-box; }
@@ -119,7 +121,7 @@ body.is-loading .loading-bar { opacity: 1; animation: nt-load 1.1s var(--ease) i
 .login-field > span { display: block; font-size: 15.5px; font-weight: 700; color: var(--mut); margin-bottom: 6px; }
 .login-field input { width: 100%; padding: 11px 14px; border: 1.5px solid var(--line); border-radius: var(--r-in); background: var(--panel2); color: var(--ink); font-size: 17px; }
 .login-field:last-of-type { margin-bottom: 22px; }
-.login-field input:focus { outline: none; border-color: var(--yellow-hi); }
+.login-field input:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgba(255,209,0,.25); }
 .login-submit { width: 100%; padding: 12px; border-radius: var(--r-pill); background: var(--yellow); color: var(--ink900); font-size: 18px; font-weight: 700; box-shadow: 0 6px 16px rgba(255,209,0,.35); transition: background var(--fast); }
 .login-submit:hover { background: var(--yellow-hi); }
 .login-note { font-size: 15px; color: var(--faint); text-align: center; margin-top: 18px; }
@@ -203,6 +205,9 @@ body.is-loading .loading-bar { opacity: 1; animation: nt-load 1.1s var(--ease) i
 .secondary-btn:hover:not(:disabled), .preview-btn:hover:not(:disabled) { background: var(--hov); }
 .danger-btn { background: transparent; color: var(--err-ink); border-color: rgba(225,82,62,.4); }
 .danger-btn:hover:not(:disabled) { background: rgba(225,82,62,.08); }
+/* Two-step arm on irreversible controls: first click arms (solid danger), second fires. */
+.danger-btn.is-armed { background: var(--nt-danger); color: #fff; border-color: transparent; }
+.danger-btn.is-armed:hover:not(:disabled) { background: var(--nt-danger); opacity: .9; }
 .btn-sm { padding: 6px 12px; font-size: 14.5px; }
 .block-btn { width: 100%; }
 .primary-btn:active:not(:disabled), .secondary-btn:active:not(:disabled), .danger-btn:active:not(:disabled), .btn-dark:active:not(:disabled) { transform: scale(.98); }
@@ -232,6 +237,7 @@ body.is-loading .loading-bar { opacity: 1; animation: nt-load 1.1s var(--ease) i
 .status.running { background: rgba(64,193,172,.16); color: var(--run-ink); }
 .status.running::before { background: var(--st-run); animation: nt-pulse 1.6s infinite; }
 .status.waiting, .status.waiting-for-human { background: rgba(255,209,0,.22); color: var(--warn-ink); }
+.status.cancel-requested { background: rgba(232,167,0,.18); color: var(--warn-ink); }
 .status.waiting::before, .status.waiting-for-human::before { background: var(--st-wait); animation: nt-pulse 1.6s infinite; }
 .status.failed, .status.recovery-required, .status.rejected, .status.error { background: rgba(225,82,62,.14); color: var(--err-ink); }
 .status.failed::before, .status.recovery-required::before, .status.rejected::before, .status.error::before { background: var(--st-err); }
@@ -312,7 +318,7 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 
 .card-dark { position: relative; overflow: hidden; background: var(--ink900); color: #fff; border-radius: var(--r-card); padding: 20px 22px; }
 .card-dark-mark { position: absolute; right: -40px; bottom: -46px; width: 190px; opacity: .1; pointer-events: none; }
-.card-dark h3 { color: #fff; }
+.card-dark h2 { color: #fff; }
 .card-dark-sub { font-size: 15px; color: rgba(255,255,255,.55); margin: 2px 0 14px; }
 .approve-row { position: relative; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); border-radius: var(--r-tile); padding: 14px 16px; display: flex; align-items: flex-start; gap: 12px; }
 .approve-row .ico { width: 34px; height: 34px; border-radius: 10px; background: var(--yellow); color: var(--ink900); display: inline-flex; align-items: center; justify-content: center; flex: none; }
@@ -321,6 +327,7 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 .approve-row .title { font-size: 16.5px; font-weight: 700; }
 .approve-row .meta { font-size: 15px; color: rgba(255,255,255,.6); font-family: var(--mono); margin-top: 3px; }
 .approve-empty { position: relative; font-size: 16px; color: rgba(255,255,255,.6); padding: 4px 2px; }
+.approve-more { position: relative; font-size: 15px; color: rgba(255,255,255,.6); margin-top: 8px; }
 
 /* ============================ MONITOR ============================ */
 .mon { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start; }
@@ -346,12 +353,21 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 .mon-detail-head { display: flex; align-items: center; gap: 14px; padding: 18px 22px; border-bottom: 1px solid var(--line2); flex-wrap: wrap; }
 .mon-detail-head .grow { flex: 1; min-width: 220px; }
 .mon-detail-title { display: flex; align-items: center; gap: 10px; }
-.mon-detail-title h3 { font-size: 20.5px; }
+.mon-detail-title h2 { font-size: 20.5px; }
 .mon-detail-id { font-size: 15px; color: var(--faint); font-family: var(--mono); margin-top: 3px; }
 .mon-controls { display: flex; gap: 8px; flex-wrap: wrap; }
 .mon-detail-body { padding: 20px 22px; }
+/* Pending human gates on the selected run: approve / choose / reject without leaving the console. */
+.mon-approvals { display: grid; gap: 10px; margin-bottom: 14px; }
+.mon-approvals:empty { display: none; }
+.approval-gate { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 14px; border-radius: var(--r-in); background: rgba(255,209,0,.16); border: 1px solid rgba(255,209,0,.45); }
+.approval-gate .grow { flex: 1; min-width: 180px; }
+.approval-gate .title { font-size: 16px; font-weight: 700; color: var(--ink); }
+.approval-gate .meta { font-size: 14.5px; color: var(--warn-ink); font-family: var(--mono); margin-top: 2px; overflow-wrap: anywhere; }
+.approval-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .mon-progress { height: 7px; border-radius: 99px; background: var(--chip); overflow: hidden; margin-bottom: 18px; }
-.mon-progress-bar { height: 100%; width: 0; border-radius: 99px; background: var(--yellow); transition: width .3s; }
+/* Progress animates on transform (compositor-only), not width — no layout work per poll. */
+.mon-progress-bar { height: 100%; width: 100%; border-radius: 99px; background: var(--yellow); transform: scaleX(0); transform-origin: left; transition: transform .3s; }
 .mon-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 20px; }
 .mon-stat { background: var(--panel2); border: 1px solid var(--line2); border-radius: var(--r-tile); padding: 12px 14px; }
 .mon-stat .l { font-size: 14.5px; font-weight: 700; color: var(--faint); margin-bottom: 4px; }
@@ -371,7 +387,7 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 .nchip .njob { opacity: .6; font-size: 14px; }
 
 .mon-timeline { display: flex; flex-direction: column; }
-.mon-timeline:empty::before { content: "ยังไม่มีเหตุการณ์"; color: var(--faint); font-size: 16px; }
+.mon-timeline:empty::before { content: "No events yet · ยังไม่มีเหตุการณ์"; color: var(--faint); font-size: 16px; }
 .tl-item { display: flex; gap: 14px; }
 .tl-item::before { content: ""; }
 .tl-dot { width: 9px; height: 9px; border-radius: 99px; margin-top: 5px; flex: none; background: var(--st-queued); position: relative; }
@@ -382,7 +398,7 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 .tl-item .ttl { font-size: 16px; font-weight: 600; }
 .tl-item .sub { font-size: 14.5px; color: var(--faint); font-family: var(--mono); margin-top: 1px; }
 
-.mon-artifacts h3 { margin-bottom: 12px; }
+.mon-artifacts h2 { margin-bottom: 12px; }
 
 /* ============================ JOBS ============================ */
 .jobs { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start; }
@@ -423,7 +439,7 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 .tab { padding: 9px 15px; font-size: 16px; font-weight: 700; color: var(--faint); border-bottom: 2.5px solid transparent; background: none; }
 .tab.is-active { color: var(--ink); border-bottom-color: var(--yellow); }
 .stream-output { margin: 0; padding: 20px 22px; background: var(--code-bg); color: var(--code-ink); font-family: var(--mono); font-size: 15.5px; line-height: 1.7; flex: 1; min-height: 340px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
-.stream-output:empty::before { content: "เลือกงานเพื่อดูสตรีมสด"; color: #6a6f71; }
+.stream-output:empty::before { content: "Select a job · เลือกงานเพื่อดูสตรีมสด"; color: #9AA0A2; }
 .stream-output.stream-live:not(:empty)::after { content: "▋"; color: var(--yellow); animation: nt-blink 1s step-end infinite; }
 .event-pane { padding: 20px 22px; min-height: 340px; overflow-y: auto; }
 .event-pane[hidden] { display: none; }
@@ -447,6 +463,9 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 .audit-chip:hover { border-color: var(--faint); }
 .audit-chip.is-active { background: var(--ink900); color: #fff; border-color: var(--ink900); }
 .audit-note { margin-left: auto; font-size: 15px; color: var(--faint); }
+.audit-search { padding: 7px 14px; border: 1.5px solid var(--line); border-radius: var(--r-pill); background: var(--panel); color: var(--ink); font-size: 16px; min-width: 200px; }
+.audit-search:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgba(255,209,0,.25); }
+.audit-more { display: block; margin: 12px auto 0; }
 .audit-table { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-card); box-shadow: var(--shadow); overflow: hidden; }
 .audit-head, .audit-row { display: grid; grid-template-columns: 88px 150px 160px 1fr 110px; gap: 14px; align-items: center; padding: 12px 22px; }
 .audit-head { border-bottom: 1px solid var(--line); font-size: 14px; font-weight: 700; letter-spacing: .1em; color: var(--faint); }
@@ -464,7 +483,7 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 .fleet { display: flex; flex-direction: column; gap: 22px; }
 .fleet-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
 .fleet-head > div:first-child { flex: 1; }
-.fleet-head h3 { font-size: 19px; }
+.fleet-head h2 { font-size: 19px; }
 .worker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
 .worker-card { background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--line); border-radius: var(--r-card); box-shadow: var(--shadow); padding: 18px 20px; }
 .worker-card.online, .worker-card:has(.status.online) { border-top-color: var(--yellow); }
@@ -576,9 +595,21 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 .form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 15.5px; font-weight: 700; color: var(--mut); }
 .field input, .field select { padding: 10px 13px; border: 1.5px solid var(--line); border-radius: var(--r-in); background: var(--panel2); color: var(--ink); font-size: 17px; font-weight: 400; }
-.field input:focus, .field select:focus, .usage-controls input:focus, .acct-form input:focus, .acct-form select:focus { outline: none; border-color: var(--yellow-hi); box-shadow: 0 0 0 3px rgba(255,209,0,.25); }
+.field input:focus, .field select:focus, .usage-controls input:focus, .acct-form input:focus, .acct-form select:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgba(255,209,0,.25); }
 
 /* ============================ TOAST ============================ */
+/* Screen-reader-only live region: visually clipped, still announced. */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* Stale-data banner: persists until the next successful poll (a 2.6s toast is not enough
+   warning that every list on screen may be out of date). */
+.stale-banner { display: flex; align-items: center; gap: 14px; padding: 9px 28px; background: rgba(255,209,0,.16); color: var(--warn-ink); font-size: 15.5px; font-weight: 600; border-bottom: 1px solid rgba(255,209,0,.4); }
+.stale-banner[hidden] { display: none; }
+
+/* Styled confirm dialog — replaces native confirm() so destructive flows share one language. */
+.modal-sm { max-width: 460px; }
+.confirm-body { font-size: 16.5px; line-height: 1.55; color: var(--mut); white-space: pre-line; margin-bottom: 4px; }
+
 .toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 20px); z-index: 300; max-width: min(440px, calc(100vw - 36px)); background: var(--ink900); color: #fff; padding: 12px 20px; border-radius: var(--r-pill); font-size: 16.5px; font-weight: 600; box-shadow: 0 12px 30px rgba(0,0,0,.35); opacity: 0; pointer-events: none; transition: opacity var(--base) var(--ease), transform var(--base) var(--ease); }
 .toast.visible { opacity: 1; transform: translate(-50%, 0); }
 
@@ -594,8 +625,14 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
   .main { overflow: visible; }
   .login-screen { grid-template-columns: 1fr; }
   .login-aside { display: none; }
-  .health-chip { display: none; }
-  .topbar { padding: 14px 16px; }
+  /* Narrow topbar: title takes its own full row so it never wraps into the control pills;
+     the health chip stays (connectivity matters most in the field) but collapses to its dot —
+     the text is clipped visually yet kept for screen readers. */
+  .topbar { flex-wrap: wrap; row-gap: 10px; padding: 14px 16px; }
+  .topbar-title { flex: 1 1 100%; }
+  .theme-toggle { margin-left: auto; }
+  .health-chip { padding: 8px; }
+  .health-chip #healthChipText { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .content { padding: 18px 16px 44px; }
   .mon-runs, .jobs-list-card { max-height: none; }
   .audit-head, .audit-row { grid-template-columns: 80px 1fr 90px; }
@@ -605,4 +642,21 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
   .ue-head, .ue-row { grid-template-columns: 1fr 1fr 90px; }
   .ue-head span:nth-child(4), .ue-head span:nth-child(5), .ue-row > span:nth-child(4), .ue-row > span:nth-child(5) { display: none; }
 }
-@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+/* Touch input: raise the small controls to an effective ≥44px target (WCAG 2.5.8).
+   Keyed on pointer, not viewport — a touch laptop gets the larger targets too. */
+@media (pointer: coarse) {
+  .btn-sm { padding: 11px 16px; }
+  .copy-btn { padding: 10px 12px; font-size: 18px; }
+  .ws-mini { padding: 12px 14px; }
+  .tab { padding: 12px 15px; }
+  .audit-chip { padding: 11px 16px; }
+  .job-filter { padding: 10px 14px; }
+  .preview-btn { padding: 11px 15px; }
+  .icon-btn, .nav-toggle, .signout-btn { width: 44px; height: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+  /* The boot loading bar is state, not decoration — keep a static visible version. */
+  body.is-loading .loading-bar { transform: scaleX(1); opacity: .5; }
+}

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Atlas Control Plane</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260722-ops2">
+    <link rel="stylesheet" href="/static/styles.css?v=20260807-ops3">
     <script>
       // Restore theme before first paint so there is no light→dark flash.
       (function () { try { if (localStorage.getItem("atlas-theme") === "dark") document.documentElement.dataset.theme = "dark"; } catch (e) { /* pre-paint theme is best-effort */ } })();
@@ -22,24 +22,24 @@
         <div class="login-copy">
           <div class="vital" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
           <h1>One console for every AI worker</h1>
-          <p>Atlas orchestrates thClaws workers across machines — route jobs, chain workflows and watch results stream live. ศูนย์ควบคุมงาน AI หลายเครื่อง ในที่เดียว</p>
+          <p>Atlas orchestrates thClaws workers across machines — route jobs, chain workflows and watch results stream live. <span lang="th">ศูนย์ควบคุมงาน AI หลายเครื่อง ในที่เดียว</span></p>
         </div>
-        <div class="login-foot"><span>National Telecom</span><span>·</span><span>โครงข่ายแห่งชาติเพื่อคนไทยทุกคน</span></div>
+        <div class="login-foot"><span>National Telecom</span><span>·</span><span lang="th">โครงข่ายแห่งชาติเพื่อคนไทยทุกคน</span></div>
       </div>
       <div class="login-main">
         <form id="loginForm" class="login-card" autocomplete="on">
-          <p class="login-eyebrow">SIGN IN · เข้าสู่ระบบ</p>
+          <p class="login-eyebrow">SIGN IN · <span lang="th">เข้าสู่ระบบ</span></p>
           <h2>Welcome back</h2>
           <p id="loginMessage">Use the admin account of this Atlas instance</p>
           <label class="login-field">
-            <span>Username · ชื่อผู้ใช้</span>
+            <span>Username · <span lang="th">ชื่อผู้ใช้</span></span>
             <input name="username" autocomplete="username" placeholder="admin" required>
           </label>
           <label class="login-field">
-            <span>Password · รหัสผ่าน</span>
+            <span>Password · <span lang="th">รหัสผ่าน</span></span>
             <input name="password" type="password" autocomplete="current-password" placeholder="••••••••" required>
           </label>
-          <button class="login-submit" type="submit">Sign in · เข้าสู่ระบบ</button>
+          <button class="login-submit" type="submit">Sign in · <span lang="th">เข้าสู่ระบบ</span></button>
           <p class="login-note">VPN / Tailscale only · never expose to the public internet</p>
         </form>
       </div>
@@ -54,7 +54,7 @@
             <div class="brand-name">Atlas</div>
             <div class="brand-sub">CONTROL PLANE</div>
           </div>
-          <button id="navToggle" class="nav-toggle" type="button" aria-label="Toggle menu · สลับเมนู" aria-expanded="false">
+          <button id="navToggle" class="nav-toggle" type="button" aria-label="Toggle menu" aria-expanded="false">
             <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
           </button>
         </div>
@@ -63,35 +63,35 @@
           <p class="nav-group-label">OPERATE</p>
           <button class="nav-item" type="button" data-view="overview" aria-current="page">
             <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg></span>
-            <span class="nav-label">Overview <span class="th">ภาพรวม</span></span>
+            <span class="nav-label">Overview <span class="th" lang="th">ภาพรวม</span></span>
           </button>
           <button class="nav-item" type="button" data-view="monitor">
             <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
-            <span class="nav-label">Monitor <span class="th">ติดตาม</span></span>
+            <span class="nav-label">Monitor <span class="th" lang="th">ติดตาม</span></span>
             <span class="nav-badge attn" data-badge="approvals" hidden></span>
           </button>
           <button class="nav-item" type="button" data-view="jobs">
             <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg></span>
-            <span class="nav-label">Jobs <span class="th">งาน</span></span>
+            <span class="nav-label">Jobs <span class="th" lang="th">งาน</span></span>
             <span class="nav-badge" data-badge="jobs" hidden></span>
           </button>
           <p class="nav-group-label">MANAGE</p>
           <button class="nav-item" type="button" data-view="fleet">
             <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="20" height="6" rx="1"/><rect x="2" y="15" width="20" height="6" rx="1"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></span>
-            <span class="nav-label">Fleet <span class="th">ฟลีต</span></span>
+            <span class="nav-label">Fleet <span class="th" lang="th">ฟลีต</span></span>
             <span class="nav-badge" data-badge="workers" hidden></span>
           </button>
           <button class="nav-item" type="button" data-view="audit">
             <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/><path d="M9 13h6M9 17h4"/></svg></span>
-            <span class="nav-label">Audit <span class="th">ตรวจสอบ</span></span>
+            <span class="nav-label">Audit <span class="th" lang="th">ตรวจสอบ</span></span>
           </button>
           <button class="nav-item" type="button" data-view="usage">
             <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></span>
-            <span class="nav-label">Usage <span class="th">การใช้งาน</span></span>
+            <span class="nav-label">Usage <span class="th" lang="th">การใช้งาน</span></span>
           </button>
           <button class="nav-item" type="button" data-view="accounts">
             <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
-            <span class="nav-label">Accounts <span class="th">บัญชี</span></span>
+            <span class="nav-label">Accounts <span class="th" lang="th">บัญชี</span></span>
           </button>
         </nav>
 
@@ -114,7 +114,7 @@
           <div class="topbar-title">
             <div class="row">
               <h1 id="pageTitleEn">Overview</h1>
-              <span class="th" id="pageTitleTh">ภาพรวม</span>
+              <span class="th" lang="th" id="pageTitleTh">ภาพรวม</span>
             </div>
             <p id="pageSub">Fleet, jobs and workflow runs at a glance</p>
           </div>
@@ -129,6 +129,8 @@
           </button>
         </header>
 
+        <div id="staleBanner" class="stale-banner" hidden></div>
+
         <div class="content" id="main" tabindex="-1">
 
           <!-- ============================ OVERVIEW ============================ -->
@@ -136,22 +138,22 @@
             <div class="view-wrap dash">
               <div class="stat-grid">
                 <button class="stat-tile" type="button" data-view-link="fleet">
-                  <div class="stat-top"><span class="stat-label">Workers online <span class="th">ออนไลน์</span></span><span class="stat-ico brand">W</span></div>
+                  <div class="stat-top"><span class="stat-label">Workers online <span class="th" lang="th">ออนไลน์</span></span><span class="stat-ico brand">W</span></div>
                   <div class="stat-num"><b id="metricWorkers">0</b><span id="metricWorkersUnit">/ 0</span></div>
-                  <div class="stat-delta" id="metricWorkersDelta">ยังไม่มีข้อมูล</div>
+                  <div class="stat-delta" id="metricWorkersDelta">no data yet</div>
                 </button>
                 <button class="stat-tile" type="button" data-view-link="jobs">
-                  <div class="stat-top"><span class="stat-label">Active jobs <span class="th">กำลังทำ</span></span><span class="stat-ico run">J</span></div>
+                  <div class="stat-top"><span class="stat-label">Active jobs <span class="th" lang="th">กำลังทำ</span></span><span class="stat-ico run">J</span></div>
                   <div class="stat-num"><b id="metricRunning">0</b><span>active</span></div>
                   <div class="stat-delta" id="metricRunningDelta">queued + running</div>
                 </button>
                 <button class="stat-tile" type="button" data-view-link="monitor">
-                  <div class="stat-top"><span class="stat-label">Runs today <span class="th">วันนี้</span></span><span class="stat-ico ok">R</span></div>
+                  <div class="stat-top"><span class="stat-label">Runs today <span class="th" lang="th">วันนี้</span></span><span class="stat-ico ok">R</span></div>
                   <div class="stat-num"><b id="metricRuns">0</b><span>runs</span></div>
                   <div class="stat-delta" id="metricRunsDelta">workflow runs</div>
                 </button>
                 <button class="stat-tile" type="button" data-view-link="monitor">
-                  <div class="stat-top"><span class="stat-label">Pending approvals <span class="th">รออนุมัติ</span></span><span class="stat-ico brand">!</span></div>
+                  <div class="stat-top"><span class="stat-label">Pending approvals <span class="th" lang="th">รออนุมัติ</span></span><span class="stat-ico brand">!</span></div>
                   <div class="stat-num"><b id="metricApprovals">0</b><span>pending</span></div>
                   <div class="stat-delta" id="metricApprovalsDelta">human approvals</div>
                 </button>
@@ -160,16 +162,16 @@
               <div class="dash-cols">
                 <div class="card card-pad-0">
                   <div class="card-head">
-                    <div><h3>Recent jobs</h3><p class="card-sub">งานล่าสุดทั้งฟลีต</p></div>
+                    <div><h2>Recent jobs</h2><p class="card-sub" lang="th">งานล่าสุดทั้งฟลีต</p></div>
                     <button class="link-btn" type="button" data-view-link="jobs">View all →</button>
                   </div>
-                  <div id="overviewJobs"><div class="empty">ยังไม่มีงาน</div></div>
+                  <div id="overviewJobs"><div class="empty">No jobs yet · <span lang="th">ยังไม่มีงาน</span></div></div>
                 </div>
 
                 <div class="dash-side">
                   <div class="card">
-                    <h3>Fleet health</h3>
-                    <p class="card-sub" style="margin-bottom:16px">สุขภาพฟลีต</p>
+                    <h2>Fleet health</h2>
+                    <p class="card-sub" lang="th" style="margin-bottom:16px">สุขภาพฟลีต</p>
                     <div class="donut-row">
                       <div class="donut">
                         <svg width="96" height="96" viewBox="0 0 96 96" aria-hidden="true">
@@ -179,17 +181,17 @@
                         <div class="donut-center"><b id="fleetFraction">0/0</b><span>online</span></div>
                       </div>
                       <div class="donut-legend">
-                        <div><span class="lg-dot" style="background:#2E9E6B"></span><span>Online</span><b id="fleetOnline">0</b></div>
+                        <div><span class="lg-dot" style="background:var(--nt-success)"></span><span>Online</span><b id="fleetOnline">0</b></div>
                         <div><span class="lg-dot" style="background:var(--faint)"></span><span>Offline</span><b id="fleetOffline">0</b></div>
-                        <div><span class="lg-dot" style="background:#E8A700"></span><span>Unknown</span><b id="fleetUnknown">0</b></div>
+                        <div><span class="lg-dot" style="background:var(--nt-warning)"></span><span>Unknown</span><b id="fleetUnknown">0</b></div>
                       </div>
                     </div>
                   </div>
 
                   <div class="card-dark">
                     <img class="card-dark-mark" src="/static/nt-mark.png" alt="" aria-hidden="true">
-                    <h3>Pending approval</h3>
-                    <p class="card-dark-sub">รออนุมัติจากคน</p>
+                    <h2>Pending approval</h2>
+                    <p class="card-dark-sub" lang="th">รออนุมัติจากคน</p>
                     <div id="overviewApproval"></div>
                   </div>
                 </div>
@@ -202,10 +204,10 @@
             <div class="view-wrap mon">
               <div class="card card-pad-0 mon-runs">
                 <div class="card-head">
-                  <div><h3>Workflow runs</h3><p class="card-sub">ทุก run ที่ทำงานพร้อมกัน</p></div>
+                  <div><h2>Workflow runs</h2><p class="card-sub" lang="th">ทุก run ที่ทำงานพร้อมกัน</p></div>
                   <div class="mon-legend" id="monRunsLegend"></div>
                 </div>
-                <div id="workflowRunList" class="mon-runs-list"><div class="empty">กำลังโหลด…</div></div>
+                <div id="workflowRunList" class="mon-runs-list"><div class="empty">Loading… · <span lang="th">กำลังโหลด</span></div></div>
               </div>
 
               <div class="mon-detail-col">
@@ -213,7 +215,7 @@
                   <div class="mon-detail-head">
                     <div class="grow">
                       <div class="mon-detail-title">
-                        <h3 id="monRunName">เลือก run จากรายการ</h3>
+                        <h2 id="monRunName">Select a run · <span lang="th">เลือก run จากรายการ</span></h2>
                         <span class="status queued" id="monRunChip" hidden></span>
                       </div>
                       <div class="mon-detail-id" id="monRunId"></div>
@@ -227,18 +229,19 @@
                   </div>
                   <div class="mon-detail-body">
                     <div id="workflowRecoveryWarning" class="alert alert-warn" hidden></div>
+                    <div id="monApprovals" class="mon-approvals"></div>
                     <div class="mon-progress"><div class="mon-progress-bar" id="monProgressBar"></div></div>
                     <div class="mon-stats" id="monStats"></div>
-                    <h4 class="micro-head">NODE PROGRESS <span>· สถานะของแต่ละโหนด</span></h4>
-                    <div class="mon-node-chips" id="monNodeChips"><span class="hint">เลือก run เพื่อดูความคืบหน้าของโหนด</span></div>
-                    <h4 class="micro-head">TIMELINE</h4>
+                    <h3 class="micro-head">NODE PROGRESS <span lang="th">· สถานะของแต่ละโหนด</span></h3>
+                    <div class="mon-node-chips" id="monNodeChips"><span class="hint">Select a run to see node progress · <span lang="th">เลือก run เพื่อดูโหนด</span></span></div>
+                    <h3 class="micro-head">TIMELINE</h3>
                     <div id="workflowEventList" class="mon-timeline"></div>
                     <div id="workflowRunSummary" class="chip-row"></div>
                   </div>
                 </div>
 
                 <div class="card mon-artifacts">
-                  <h3>Artifacts</h3>
+                  <h2>Artifacts</h2>
                   <div id="workflowArtifactDownloads" class="tile-list"></div>
                   <details class="fold">
                     <summary>Raw artifacts · run detail (JSON)</summary>
@@ -255,11 +258,11 @@
             <div class="view-wrap jobs">
               <div class="card card-pad-0 jobs-list-card">
                 <div class="card-head">
-                  <div><h3>All jobs</h3><p class="card-sub">แยกตาม flow ที่ run</p></div>
-                  <span class="card-count" id="jobCount">0 รายการ</span>
+                  <div><h2>All jobs</h2><p class="card-sub" lang="th">แยกตาม flow ที่ run</p></div>
+                  <span class="card-count" id="jobCount">0 jobs</span>
                 </div>
                 <div id="jobFilters" class="job-filters" hidden></div>
-                <div id="jobList" class="jobs-scroll"><div class="empty">กำลังโหลด…</div></div>
+                <div id="jobList" class="jobs-scroll"><div class="empty">Loading… · <span lang="th">กำลังโหลด</span></div></div>
               </div>
 
               <div class="card card-pad-0 stream-card">
@@ -269,26 +272,26 @@
                     <div class="job-detail-meta">
                       <span class="status queued" id="jobDetailChip">—</span>
                       <span class="job-detail-id" id="jobDetailId"></span>
-                      <button id="jobDetailRunChip" class="job-run-chip" type="button" title="เปิด workflow run นี้ใน Monitor" hidden></button>
+                      <button id="jobDetailRunChip" class="job-run-chip" type="button" title="Open this run in Monitor" hidden></button>
                     </div>
-                    <div class="job-detail-prompt" id="jobDetailPrompt">เลือกงานจากรายการเพื่อดูสตรีมสด</div>
+                    <div class="job-detail-prompt" id="jobDetailPrompt">Select a job to watch its live stream · เลือกงานเพื่อดูสตรีมสด</div>
                     <div class="job-detail-route" id="jobDetailRoute"></div>
                   </div>
                   <button id="cancelJobBtn" class="danger-btn" type="button" disabled>Cancel job</button>
                 </div>
-                <div class="tabs" role="tablist">
-                  <button class="tab is-active" type="button" data-job-tab="stream">Live stream</button>
-                  <button class="tab" type="button" data-job-tab="timeline">Tool timeline</button>
-                  <button class="tab" type="button" data-job-tab="events">Events</button>
-                  <button class="tab" type="button" data-job-tab="files">Files</button>
+                <div class="tabs" role="tablist" aria-label="Job detail views">
+                  <button class="tab is-active" type="button" data-job-tab="stream" role="tab" id="jobTabStream" aria-selected="true" aria-controls="streamOutput">Live stream</button>
+                  <button class="tab" type="button" data-job-tab="timeline" role="tab" id="jobTabTimeline" aria-selected="false" aria-controls="toolTimeline" tabindex="-1">Tool timeline</button>
+                  <button class="tab" type="button" data-job-tab="events" role="tab" id="jobTabEvents" aria-selected="false" aria-controls="eventList" tabindex="-1">Events</button>
+                  <button class="tab" type="button" data-job-tab="files" role="tab" id="jobTabFiles" aria-selected="false" aria-controls="jobArtifactDownloads" tabindex="-1">Files</button>
                 </div>
-                <pre id="streamOutput" class="stream-output" data-job-pane="stream"></pre>
-                <div id="toolTimeline" class="event-pane timeline-pane" data-job-pane="timeline" hidden>
+                <pre id="streamOutput" class="stream-output" data-job-pane="stream" role="tabpanel" aria-labelledby="jobTabStream"></pre>
+                <div id="toolTimeline" class="event-pane timeline-pane" data-job-pane="timeline" role="tabpanel" aria-labelledby="jobTabTimeline" hidden>
                   <div class="tl-counters" id="toolCounters"></div>
-                  <div class="mon-timeline" id="toolTimelineList"><div class="empty">ยังไม่มีการเรียกเครื่องมือ</div></div>
+                  <div class="mon-timeline" id="toolTimelineList"><div class="empty">No tool calls yet · <span lang="th">ยังไม่มีการเรียกเครื่องมือ</span></div></div>
                 </div>
-                <div id="eventList" class="event-pane" data-job-pane="events" hidden></div>
-                <div id="jobArtifactDownloads" class="event-pane tile-list" data-job-pane="files" hidden><div class="empty">ยังไม่มีไฟล์ที่เก็บจากงานนี้</div></div>
+                <div id="eventList" class="event-pane" data-job-pane="events" role="tabpanel" aria-labelledby="jobTabEvents" hidden></div>
+                <div id="jobArtifactDownloads" class="event-pane tile-list" data-job-pane="files" role="tabpanel" aria-labelledby="jobTabFiles" hidden><div class="empty">No files collected from this job yet · <span lang="th">ยังไม่มีไฟล์จากงานนี้</span></div></div>
               </div>
             </div>
           </section>
@@ -297,19 +300,22 @@
           <section class="view" id="view-audit" data-view="audit" tabindex="-1">
             <div class="view-wrap audit">
               <div class="audit-filters">
-                <button class="audit-chip is-active" type="button" data-audit-filter="all">All · ทั้งหมด</button>
+                <button class="audit-chip is-active" type="button" data-audit-filter="all">All · <span lang="th">ทั้งหมด</span></button>
                 <button class="audit-chip" type="button" data-audit-filter="job">job</button>
                 <button class="audit-chip" type="button" data-audit-filter="workflow">workflow</button>
                 <button class="audit-chip" type="button" data-audit-filter="worker">worker</button>
                 <button class="audit-chip" type="button" data-audit-filter="approval">approval</button>
-                <span class="audit-note">คลิกแถวเพื่อเปิด job / run · แสดง 30 รายการล่าสุด</span>
+                <input id="auditSearchInput" class="audit-search" type="search" placeholder="Filter actions, targets, actors…" aria-label="Filter audit entries">
+                <button id="auditCsvBtn" class="secondary-btn" type="button">↓ CSV</button>
+                <span class="audit-note">Click a row to open its job / run <span lang="th">· คลิกแถวเพื่อเปิด</span></span>
               </div>
-              <div class="audit-table">
+              <div class="audit-table" role="group" aria-label="Audit log — time, action, target, detail, actor">
                 <div class="audit-head">
                   <span>TIME</span><span>ACTION</span><span>TARGET</span><span>DETAIL</span><span>ACTOR</span>
                 </div>
-                <div id="auditList"><div class="empty">กำลังโหลด…</div></div>
+                <div id="auditList"><div class="empty">Loading… · <span lang="th">กำลังโหลด</span></div></div>
               </div>
+              <button id="auditMoreBtn" class="secondary-btn audit-more" type="button" hidden>Load older entries · <span lang="th">โหลดเพิ่ม</span></button>
             </div>
           </section>
 
@@ -318,23 +324,23 @@
             <div class="view-wrap fleet">
               <div class="fleet-section">
                 <div class="fleet-head">
-                  <div><h3>Workers</h3><p class="card-sub">thClaws worker แต่ละเครื่องในฟลีต</p></div>
+                  <div><h2>Workers</h2><p class="card-sub" lang="th">thClaws worker แต่ละเครื่องในฟลีต</p></div>
                   <div class="head-actions">
                     <button id="pollAllBtn" class="secondary-btn" type="button">Poll all</button>
                     <button id="addWorkerBtn" class="btn-dark" type="button">+ Add worker</button>
                   </div>
                 </div>
-                <div id="workerList" class="worker-grid"><div class="empty">กำลังโหลด…</div></div>
+                <div id="workerList" class="worker-grid"><div class="empty">Loading… · <span lang="th">กำลังโหลด</span></div></div>
               </div>
 
               <div class="fleet-section">
                 <div class="fleet-head">
-                  <div><h3>Workspaces</h3><p class="card-sub">ไดเรกทอรีโปรเจกต์บนเครื่อง worker</p></div>
+                  <div><h2>Workspaces</h2><p class="card-sub" lang="th">ไดเรกทอรีโปรเจกต์บนเครื่อง worker</p></div>
                   <button id="addWorkspaceBtn" class="secondary-btn" type="button">+ Add workspace</button>
                 </div>
-                <div class="ws-table">
+                <div class="ws-table" role="group" aria-label="Workspaces — key, worker, directory, company">
                   <div class="ws-head"><span>KEY</span><span>WORKER</span><span>DIRECTORY</span><span>COMPANY</span><span></span></div>
-                  <div id="workspaceList"><div class="empty">กำลังโหลด…</div></div>
+                  <div id="workspaceList"><div class="empty">Loading… · <span lang="th">กำลังโหลด</span></div></div>
                 </div>
               </div>
             </div>
@@ -344,8 +350,8 @@
           <section class="view" id="view-usage" data-view="usage" tabindex="-1">
             <div class="view-wrap usage">
               <div class="card usage-controls">
-                <label>From · ตั้งแต่<input id="usageFromInput" type="date"></label>
-                <label>To · ถึง<input id="usageToInput" type="date"></label>
+                <label>From · <span lang="th">ตั้งแต่</span><input id="usageFromInput" type="date"></label>
+                <label>To · <span lang="th">ถึง</span><input id="usageToInput" type="date"></label>
                 <label>Expected runs<input id="usageExpectedInput" type="number" min="0" step="1" placeholder="1000"></label>
                 <label>Alert at %<input id="usageThresholdInput" type="number" min="1" max="100" step="1" value="80"></label>
                 <button id="loadUsageBtn" class="primary-btn" type="button">Load</button>
@@ -358,7 +364,7 @@
                 <div class="usage-headline-num" id="usageRuns">—</div>
                 <div class="usage-headline-txt">
                   <div class="t1">Workflow runs</div>
-                  <div class="t2" id="usageMeta">headline unit · หน่วยใช้งานหลัก</div>
+                  <div class="t2" id="usageMeta">all time</div>
                 </div>
                 <div class="vital small" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
               </div>
@@ -367,7 +373,7 @@
                 <div class="metric">
                   <div class="metric-label">Jobs</div>
                   <div class="metric-value" id="usageJobs">—</div>
-                  <div class="metric-foot">all workers · รวมทุก worker</div>
+                  <div class="metric-foot">all workers · <span lang="th">รวมทุก worker</span></div>
                 </div>
                 <div class="metric">
                   <div class="metric-label">Budget units</div>
@@ -377,31 +383,31 @@
                 <div class="metric">
                   <div class="metric-label">Tokens (in · out)</div>
                   <div class="metric-value" id="usageTokens">—</div>
-                  <div class="metric-foot">T1a · counted from worker usage</div>
+                  <div class="metric-foot">counted from worker usage</div>
                 </div>
                 <div class="metric">
                   <div class="metric-label">Est. cost (USD)</div>
                   <div class="metric-value" id="usageEstCost">—</div>
-                  <div class="metric-foot">T1b · an estimate, not a bill (ประมาณการ)</div>
+                  <div class="metric-foot">an estimate, not a bill · <span lang="th">ประมาณการ</span></div>
                 </div>
               </div>
 
               <div class="usage-charts">
                 <div class="card">
-                  <h3>Workflow runs · last 7 days</h3>
-                  <p class="card-sub" style="margin-bottom:20px">ปริมาณ run ต่อวัน</p>
-                  <div class="usage-bar-row" id="usageBars"><div class="hint">กดโหลดเพื่อดูกราฟ</div></div>
+                  <h2>Workflow runs · last 7 days</h2>
+                  <p class="card-sub" lang="th" style="margin-bottom:20px">ปริมาณ run ต่อวัน</p>
+                  <div class="usage-bar-row" id="usageBars"><div class="hint">Loading usage… · <span lang="th">กำลังโหลด</span></div></div>
                 </div>
                 <div class="card">
-                  <h3>Run quota</h3>
-                  <p class="card-sub" style="margin-bottom:18px">โควตา run เทียบ expected</p>
-                  <div id="usageQuota"><p class="hint">ใส่ Expected runs เพื่อดูโควตาและการแจ้งเตือน</p></div>
+                  <h2>Run quota</h2>
+                  <p class="card-sub" lang="th" style="margin-bottom:18px">โควตา run เทียบ expected</p>
+                  <div id="usageQuota"><p class="hint">Enter Expected runs to see quota and alerts · <span lang="th">ใส่ Expected runs เพื่อดูโควตา</span></p></div>
                 </div>
               </div>
 
-              <div class="usage-events">
+              <div class="usage-events" role="group" aria-label="Usage events — type, reference, budget, seconds, time">
                 <div class="ue-head"><span>TYPE</span><span>REF</span><span>BUDGET</span><span>SECONDS</span><span>TIME</span></div>
-                <div id="usageEvents"><div class="empty">กดโหลดเพื่อดูเหตุการณ์</div></div>
+                <div id="usageEvents"><div class="empty">Loading usage events… · <span lang="th">กำลังโหลด</span></div></div>
               </div>
 
               <div id="usageAlert" class="usage-alert" hidden></div>
@@ -412,7 +418,7 @@
           <section class="view" id="view-accounts" data-view="accounts" tabindex="-1">
             <div class="view-wrap accounts">
               <div class="card card-pad-0">
-                <div class="card-head"><div><h3>Users</h3><p class="card-sub">Roles: admin / operator / viewer / auditor</p></div></div>
+                <div class="card-head"><div><h2>Users</h2><p class="card-sub">Roles: admin / operator / viewer / auditor</p></div></div>
                 <form id="createUserForm" class="acct-form" autocomplete="off">
                   <input name="username" placeholder="username" aria-label="New user username" required autocomplete="off">
                   <input name="password" type="password" placeholder="password" aria-label="New user password" required autocomplete="new-password">
@@ -424,18 +430,18 @@
                   </select>
                   <button class="btn-dark" type="submit">Add</button>
                 </form>
-                <div id="userList" class="stack-list"><div class="empty">กำลังโหลด…</div></div>
+                <div id="userList" class="stack-list"><div class="empty">Loading… · <span lang="th">กำลังโหลด</span></div></div>
               </div>
 
               <div class="card card-pad-0">
-                <div class="card-head"><div><h3>API tokens</h3><p class="card-sub">Shown in full once at creation · เก็บให้ดี</p></div></div>
+                <div class="card-head"><div><h2>API tokens</h2><p class="card-sub">Shown in full once at creation · <span lang="th">เก็บให้ดี</span></p></div></div>
                 <form id="createTokenForm" class="acct-form" autocomplete="off">
                   <input name="name" placeholder="token name, e.g. ci-deploy" aria-label="New token name" required>
                   <select name="user_id" id="tokenUserSelect" aria-label="Token owner"></select>
                   <button class="primary-btn" type="submit">Create</button>
                 </form>
                 <div id="newTokenReveal" class="token-reveal" hidden></div>
-                <div id="tokenList" class="stack-list"><div class="empty">กำลังโหลด…</div></div>
+                <div id="tokenList" class="stack-list"><div class="empty">Loading… · <span lang="th">กำลังโหลด</span></div></div>
               </div>
             </div>
           </section>
@@ -487,8 +493,23 @@
       </form>
     </div>
 
+    <div id="confirmModal" class="modal-backdrop" hidden>
+      <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmBody">
+        <div class="modal-head">
+          <h2 id="confirmTitle"></h2>
+          <button class="icon-btn close-modal" type="button" data-close-modal aria-label="Close">×</button>
+        </div>
+        <p id="confirmBody" class="confirm-body"></p>
+        <div class="form-actions">
+          <button id="confirmCancelBtn" class="secondary-btn" type="button">Cancel</button>
+          <button id="confirmOkBtn" class="danger-btn" type="button">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="ariaStatus" class="sr-only" role="status"></div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/static/config.js?v=20260722-ops2"></script>
-    <script src="/static/app.js?v=20260722-ops2" type="module"></script>
+    <script src="/static/config.js?v=20260807-ops3"></script>
+    <script src="/static/app.js?v=20260807-ops3" type="module"></script>
   </body>
 </html>
