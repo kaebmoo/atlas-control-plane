@@ -83,6 +83,7 @@ The workflow implementation checklist is in
 
 ## User Documentation
 
+- [Changelog](CHANGELOG.md)
 - [Documentation Index](docs/README.md)
 - [คู่มือใช้งานผ่านเว็บ (ภาษาไทย)](docs/guides/web-user-guide-th.md)
 - [Web User Guide (English)](docs/guides/web-user-guide-en.md)
