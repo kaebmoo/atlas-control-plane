@@ -36,6 +36,8 @@
 
 ## เอกสารอ้างอิง / Reference
 
+- [Changelog](../CHANGELOG.md) — notable changes by release, following Keep a
+  Changelog and Semantic Versioning
 - [Concepts & Reference (EN)](concepts-en.md) · [นิยามและอ้างอิง (ไทย)](concepts-th.md)
   — นิยามทุกตัวที่ระบบใช้จริง: node type, join mode, condition, artifact kind, policy,
   trigger, state ฯลฯ
