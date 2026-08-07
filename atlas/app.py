@@ -21,6 +21,7 @@ from . import __version__
 from .auth import LoginRateLimiter
 from .config import Config
 from .db import ARTIFACT_KINDS, WORKER_SYNC_MODES, Database, WorkflowVersionConflict, new_id, now_iso, resolve_in_store
+from .docmd import render_markdown
 from .jobs import CallbackSessionPending, JobManager, TERMINAL_STATES, verify_callback_token
 from .outbound import OutboundService, OutboundSettings
 from .packs import export_pack, import_pack, list_available_packs
@@ -45,6 +46,41 @@ from .workflows import (
 
 
 STATIC_DIR = Path(__file__).parent / "static"
+# The one curated operator doc reachable from the running console (not the whole docs/
+# tree — ADRs/specs/plans stay repo-only, for contributors rather than operators).
+_DOCS_GUIDES_DIR = Path(__file__).parent.parent / "docs" / "guides"
+DOCS_FILES = {"en": _DOCS_GUIDES_DIR / "web-user-guide-en.md", "th": _DOCS_GUIDES_DIR / "web-user-guide-th.md"}
+_DOCS_PAGE = """<!doctype html>
+<html lang="{lang}">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Atlas Docs — Web User Guide</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script>(function () {{ try {{ if (localStorage.getItem("atlas-theme") === "dark") document.documentElement.dataset.theme = "dark"; }} catch (e) {{ /* pre-paint theme is best-effort */ }} }})();</script>
+  </head>
+  <body>
+    <header class="doc-topbar">
+      <img src="/static/nt-logo.png" alt="NT">
+      <span class="doc-brand">Atlas Docs</span>
+      <span class="spring"></span>
+      <a href="/docs?lang={other_lang}">{other_label}</a>
+      <a href="/">&larr; Back to console</a>
+    </header>
+    <div class="doc-wrap">
+      <article class="doc-article">
+{body}
+      </article>
+    </div>
+  </body>
+</html>
+"""
+
+
+def _render_docs_page(lang: str, body_html: str) -> str:
+    other_lang = "en" if lang == "th" else "th"
+    other_label = "English" if lang == "th" else "ภาษาไทย"
+    return _DOCS_PAGE.format(lang=lang, other_lang=other_lang, other_label=other_label, body=body_html)
 # Safety caps live in atlas/workflows.py so the workflow API and pack import share them.
 _WORKFLOW_POLICY_LIMITS = WORKFLOW_POLICY_LIMITS
 _WORKFLOW_POLICY_DEFAULTS = {
@@ -279,6 +315,14 @@ class AtlasHandler(BaseHTTPRequestHandler):
             # not under /api/, and intentionally leaks nothing (no db path / counts).
             if method == "GET" and path == "/healthz":
                 self._json({"ok": True, "service": "atlas-control-plane", "version": __version__})
+                return
+            # Unauthenticated by design (same trust boundary as the login screen itself —
+            # VPN/Tailscale-only, never public) so an operator can read it before signing in.
+            if method == "GET" and path == "/docs":
+                if not self.server.runtime.config.serve_ui:
+                    self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                self._handle_docs(parse_qs(parsed.query))
                 return
             if path.startswith("/api/"):
                 parts = [part for part in path.split("/") if part]
@@ -1053,6 +1097,22 @@ class AtlasHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self._cors_headers()
         self.send_header("Content-Type", mimetypes.guess_type(str(target))[0] or "application/octet-stream")
+        self.send_header("Cache-Control", "no-store, max-age=0")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(content)
+
+    def _handle_docs(self, query: dict[str, list[str]]) -> None:
+        lang = query.get("lang", ["en"])[0]
+        target = DOCS_FILES.get(lang) or DOCS_FILES["en"]
+        if not target.exists():
+            raise FileNotFoundError()
+        body_html = render_markdown(target.read_text(encoding="utf-8"))
+        content = _render_docs_page(lang if lang in DOCS_FILES else "en", body_html).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self._cors_headers()
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store, max-age=0")
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
