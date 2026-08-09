@@ -189,6 +189,11 @@ job in **Jobs**, filtered to this run.
 - **Retry interrupted** is only for `recovery_required` and requires explicit
   confirmation of duplicate-side-effect risk.
 
+A run detail may also show a yellow banner listing settings its workflow declares
+that Atlas accepts but never acts on — for example `collect_files` on a node that
+runs no job, so no file is ever collected there. The run is unaffected; move the
+setting to a `worker`/`manager` node if the files were meant to be collected.
+
 ```mermaid
 stateDiagram-v2
   [*] --> running

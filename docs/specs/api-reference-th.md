@@ -537,6 +537,9 @@ response ของการสร้าง, อัปเดต และ validat
 graph เดิมได้ แต่จะไม่มีผลตอน runtime; หากต้องการเก็บไฟล์ให้ย้าย field ไปไว้ที่ job node
 `POST /api/packs/import` คืน array เดียวกันนี้ด้วย การ import จึงไม่ใช่ทางที่เงียบกว่า
 โดยแต่ละบรรทัดขึ้นต้นด้วยชื่อ workflow เพราะหนึ่ง bundle มีได้หลาย workflow
+response ของการอ่านก็มีเช่นกัน โดยอยู่ในตัว definition แต่ละอัน (`GET /api/workflows`,
+`GET /api/workflows/{id}`) คำนวณตอนอ่านและ write path ไม่สนใจค่านี้ ops console ใช้ตรงนี้
+ขึ้นแถบเตือนบน run ของ workflow ที่ตั้งค่าไว้แล้วไม่มีผล
 
 สำหรับ visual editor ให้ส่ง version ที่ client โหลดมาเป็น `expected_version` (และห้ามส่ง
 `version` พร้อมกัน) save ที่ version ตรงกันจะเพิ่ม version ของ definition แบบ atomic;

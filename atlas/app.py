@@ -722,7 +722,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
         if parts == ["api", "workflows"]:
             if method == "GET":
                 limit = _parse_limit(query)
-                self._json({"workflows": runtime.db.list_workflow_definitions(limit)})
+                self._json({"workflows": [_with_graph_warnings(row) for row in runtime.db.list_workflow_definitions(limit)]})
                 return
             if method == "POST":
                 payload = self._read_json()
@@ -771,7 +771,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
             if not workflow:
                 raise FileNotFoundError()
             if method == "GET":
-                self._json({"workflow": workflow})
+                self._json({"workflow": _with_graph_warnings(workflow)})
                 return
             if method == "PUT":
                 payload = self._read_json()
@@ -1614,6 +1614,14 @@ def _validate_artifact_payload(runtime: AtlasRuntime, payload: dict[str, Any]) -
             raise ValueError("job_id does not belong to the workflow run")
     if payload.get("metadata") is not None and not isinstance(payload.get("metadata"), dict):
         raise ValueError("artifact metadata must be an object")
+
+
+def _with_graph_warnings(workflow: dict[str, Any]) -> dict[str, Any]:
+    """Attach the accepted-but-inert report to a definition being READ. Computed per read, never
+    stored: the rule lives in workflow_graph_warnings alone, so a reader (the ops console) can
+    show it without re-implementing it and drifting when the rule grows. Writers allowlist their
+    columns, so a GET → edit → PUT round trip drops this key."""
+    return {**workflow, "warnings": workflow_graph_warnings(workflow.get("graph") or {})}
 
 
 def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any], require_name: bool = False) -> list[str]:

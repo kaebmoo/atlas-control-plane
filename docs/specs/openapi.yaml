@@ -2224,6 +2224,14 @@ components:
           $ref: '#/components/schemas/WorkflowDefaultReply'
         interface:
           $ref: '#/components/schemas/WorkflowInterface'
+        warnings:
+          type: array
+          items: {type: string}
+          description: >-
+            Present on read responses (GET /api/workflows and
+            GET /api/workflows/{workflow_id}). Computed per read, never stored:
+            accepted legacy fields in this graph that have no runtime effect. Write
+            paths ignore it, so a GET → edit → PUT round trip is safe.
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
       additionalProperties: true

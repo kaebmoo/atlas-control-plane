@@ -84,6 +84,23 @@ def main() -> None:
             assert request(base_url, "POST", f"/api/workflows/{legacy['workflow']['id']}/validate")["warnings"] == legacy["warnings"]
             updated_legacy = request(base_url, "PUT", f"/api/workflows/{legacy['workflow']['id']}", {"description": "still compatible"})
             assert updated_legacy["warnings"] == legacy["warnings"], updated_legacy
+            # Reads carry the same report, so a client that never saves the definition (the ops
+            # console lists them and shows the banner on a run) still sees it. Inside each
+            # workflow object — a list response cannot carry a per-item sibling key.
+            listed = next(
+                row for row in request(base_url, "GET", "/api/workflows")["workflows"]
+                if row["id"] == legacy["workflow"]["id"]
+            )
+            assert listed["warnings"] == legacy["warnings"], listed["warnings"]
+            fetched = request(base_url, "GET", f"/api/workflows/{legacy['workflow']['id']}")["workflow"]
+            assert fetched["warnings"] == legacy["warnings"], fetched["warnings"]
+            # A clean definition reports an empty list, never a missing key.
+            clean = request(
+                base_url, "POST", "/api/workflows",
+                {"name": "Clean graph", "graph": {"start": "only", "nodes": [{"id": "only", "type": "worker"}], "edges": []}},
+            )["workflow"]
+            assert request(base_url, "GET", f"/api/workflows/{clean['id']}")["workflow"]["warnings"] == []
+            request(base_url, "DELETE", f"/api/workflows/{clean['id']}")
             request(base_url, "DELETE", f"/api/workflows/{legacy['workflow']['id']}")
 
             workflow = request(

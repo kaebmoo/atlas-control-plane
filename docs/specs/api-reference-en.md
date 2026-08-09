@@ -562,7 +562,10 @@ backward compatibility, `collect_files` on a non-`worker`/`manager` node is stil
 accepted so an older graph can be saved, but it is ignored at runtime; move the field
 to a job node if file collection is intended. `POST /api/packs/import` returns the
 same array so importing is not a quieter way in — its lines are prefixed with the
-workflow name, since one bundle can hold several.
+workflow name, since one bundle can hold several. Read responses carry it too,
+inside each definition (`GET /api/workflows`, `GET /api/workflows/{id}`), computed
+per read and ignored by write paths; the ops console uses that to flag the run of a
+workflow whose declared setting does nothing.
 
 For a visual editor, send the version the client loaded as `expected_version`
 (and do not also send `version`). A matching save increments the definition's
