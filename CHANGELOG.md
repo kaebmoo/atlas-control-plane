@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It reports fields that are accepted but inert — currently `collect_files` on a
   node that is not a `worker`/`manager`, which older graphs may carry and which
   has no runtime effect. Such graphs still save, so no existing definition breaks.
+  `POST /api/packs/import` returns the same array, named per workflow, so importing
+  a bundle is not a quieter way to introduce the field.
 - Added a windowed global artifact listing endpoint, `GET /api/artifacts`, with
   truthful totals and an opt-in metadata-only view with strict selectors.
 - Added `workflow.interface` v1 as an additive input/output contract for

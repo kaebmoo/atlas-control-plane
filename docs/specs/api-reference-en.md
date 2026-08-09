@@ -560,7 +560,9 @@ foreign-key behavior.
 Create, update, and validation responses include a top-level `warnings` array. For
 backward compatibility, `collect_files` on a non-`worker`/`manager` node is still
 accepted so an older graph can be saved, but it is ignored at runtime; move the field
-to a job node if file collection is intended.
+to a job node if file collection is intended. `POST /api/packs/import` returns the
+same array so importing is not a quieter way in — its lines are prefixed with the
+workflow name, since one bundle can hold several.
 
 For a visual editor, send the version the client loaded as `expected_version`
 (and do not also send `version`). A matching save increments the definition's

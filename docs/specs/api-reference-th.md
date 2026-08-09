@@ -535,6 +535,8 @@ inherit มัน — ถ้า allowlist เปลี่ยนจน default �
 response ของการสร้าง, อัปเดต และ validation มี array ระดับบนสุดชื่อ `warnings` เพิ่มเติม
 เพื่อความเข้ากันได้ `collect_files` บน node ที่ไม่ใช่ `worker`/`manager` ยังยอมให้ save
 graph เดิมได้ แต่จะไม่มีผลตอน runtime; หากต้องการเก็บไฟล์ให้ย้าย field ไปไว้ที่ job node
+`POST /api/packs/import` คืน array เดียวกันนี้ด้วย การ import จึงไม่ใช่ทางที่เงียบกว่า
+โดยแต่ละบรรทัดขึ้นต้นด้วยชื่อ workflow เพราะหนึ่ง bundle มีได้หลาย workflow
 
 สำหรับ visual editor ให้ส่ง version ที่ client โหลดมาเป็น `expected_version` (และห้ามส่ง
 `version` พร้อมกัน) save ที่ version ตรงกันจะเพิ่ม version ของ definition แบบ atomic;

@@ -178,6 +178,38 @@ def main() -> None:
             db = Database(Path(tmp) / "atlas.sqlite")
             imported = import_pack(db, bundle)
             assert imported["workflows"], f"{pack_path.name}: imported no workflows"
+            # A shipped pack must be warning-free: warnings mark accepted-but-inert fields, and
+            # our own packs should never ship one.
+            assert imported["warnings"] == [], f"{pack_path.name}: {imported['warnings']}"
+
+    # Importing is not the quiet way in: a pack carrying the legacy collect_files on a node that
+    # never runs a job still imports (old bundles keep working) and reports the same
+    # accepted-but-inert warning the workflow API returns, named per workflow because a bundle
+    # can hold several. (Mutation: drop `warnings` from import_pack's result -> KeyError;
+    # invert the node-type predicate in workflow_graph_warnings -> the list comes back empty.)
+    legacy_bundle = {
+        "schema_version": 1,
+        "name": "legacy_collect",
+        "version": "1.0.0",
+        "workflows": [
+            {
+                "name": "Legacy collection",
+                "graph": {
+                    "start": "gate",
+                    "nodes": [{"id": "gate", "type": "human_gate", "collect_files": ["out.md"]}],
+                    "edges": [],
+                },
+                "policy": {},
+            }
+        ],
+    }
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+        legacy = import_pack(db, validate_pack(legacy_bundle))
+        assert legacy["workflows"], "a legacy bundle must still import"
+        assert len(legacy["warnings"]) == 1, legacy["warnings"]
+        assert "Legacy collection" in legacy["warnings"][0] and "gate" in legacy["warnings"][0], legacy["warnings"]
+        assert "ignored" in legacy["warnings"][0], legacy["warnings"]
     # The file-handoff demo pack ships with the flags its docs promise.
     brief = load_pack_file(PACKS_DIR / "document_brief.json")
     brief_wf = brief["workflows"][0]

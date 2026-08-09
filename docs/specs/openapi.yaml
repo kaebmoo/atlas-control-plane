@@ -825,6 +825,13 @@ paths:
                   triggers:
                     type: array
                     items: {$ref: '#/components/schemas/WorkflowTrigger'}
+                  warnings:
+                    type: array
+                    items: {type: string}
+                    description: >-
+                      Compatibility warnings for accepted legacy fields with no runtime
+                      effect, same report the workflow save/validate responses carry. Each
+                      line names its workflow, since a bundle can hold several.
         default: {$ref: '#/components/responses/Error'}
 
   /api/packs/{workflow_id}/export:

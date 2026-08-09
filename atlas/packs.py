@@ -14,6 +14,7 @@ from .workflows import (
     validate_workflow_policy,
     validate_workflow_references,
     validate_workflow_trigger_payload,
+    workflow_graph_warnings,
 )
 
 # Pack bundle format version (distinct from the DB schema_version). Bump only on a
@@ -184,6 +185,14 @@ def import_pack(
         "pack": {"name": bundle["name"], "version": bundle["version"]},
         "workflows": definitions,
         "triggers": triggers,
+        # Same accepted-but-inert report the workflow API returns, so importing a pack is not
+        # the one way a legacy field slips in silently. A bundle can carry several workflows
+        # and node ids repeat across them, so each line names its workflow.
+        "warnings": [
+            f"workflow {workflow['name']}: {warning}"
+            for workflow in bundle["workflows"]
+            for warning in workflow_graph_warnings(workflow.get("graph") or {})
+        ],
     }
 
 
