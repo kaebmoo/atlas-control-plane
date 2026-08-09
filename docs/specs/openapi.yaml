@@ -1231,6 +1231,9 @@ paths:
             `cancelled`). A file attached then can never be pushed to a worker or
             read by a node, so it is rejected instead of being stored as a
             stranded artifact. Every non-terminal state still accepts uploads.
+            The state is re-checked atomically with the insert, so a run that
+            finishes or is cancelled WHILE the body streams in also returns 409
+            and stores nothing.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}

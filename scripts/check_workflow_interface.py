@@ -417,10 +417,12 @@ class FakeJobService:
         self.worker_id = worker_id
         self.prompts: list[str] = []
 
-    def submit(self, payload: dict) -> dict:
+    def submit(self, payload: dict, *, on_created=None) -> dict:
         prompt = payload["prompt"]
         self.prompts.append(prompt)
         job = self.db.create_job({"worker_id": self.worker_id, "prompt": prompt, "state": "running"})
+        if on_created:
+            on_created(job)
         self.db.append_job_text(job["id"], f"result: {prompt}")
         self.db.update_job(job["id"], state="succeeded", finished_at=now_iso())
         return self.db.get_job(job["id"]) or job

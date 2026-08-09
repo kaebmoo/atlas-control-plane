@@ -148,7 +148,7 @@
         "collect_required": {
           "type": "boolean",
           "default": false,
-          "description": "Strict collection: fail this NODE when the declared collect_files produced no artifact (collection failed or matched nothing). Requires collect_files. The job itself still succeeds."
+          "description": "Strict collection: fail this NODE when the declared collect_files produced no artifact (collection failed or matched nothing). Requires collect_files, and is valid only on worker/manager nodes. The job itself still succeeds."
         }
       }
     },
@@ -182,7 +182,7 @@
         "collect_required": {
           "type": "boolean",
           "default": false,
-          "description": "Strict collection: fail this NODE when the declared collect_files produced no artifact (collection failed or matched nothing). Requires collect_files. The job itself still succeeds."
+          "description": "Strict collection: fail this NODE when the declared collect_files produced no artifact (collection failed or matched nothing). Requires collect_files, and is valid only on worker/manager nodes. The job itself still succeeds."
         }
       }
     },

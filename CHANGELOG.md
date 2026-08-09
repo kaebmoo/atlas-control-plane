@@ -40,10 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that already finished (`succeeded`, `failed`, `cancelled`) with `409` instead
   of a silent `201`: such a file can never be pushed to a worker or read by a
   node, so it only became a stranded artifact that looked like a successful
-  attachment. Every non-terminal run state still accepts uploads.
+  attachment. Every non-terminal run state still accepts uploads. The state is
+  re-checked atomically with the artifact insert, so a run cancelled or finished
+  while the body is still streaming in is also rejected.
 
 ### Fixed
 
+- Fixed a workflow node's job being linked to its runtime node only after dispatch
+  had already started: a fast worker could finish and be collected first, keying
+  that node's files `files.<relpath>` with a null run id — detached from the run,
+  unmatched by `push_files` globs, and read as "no artifacts" by
+  `collect_required`. The link is now written before the job service dispatches.
 - Fixed a workflow node's file collection failing invisibly at run level: the
   collection outcome is now mirrored onto the run timeline as `files.collected`
   (`count`/`requested`) or `files.collection_failed` (redacted `error`/

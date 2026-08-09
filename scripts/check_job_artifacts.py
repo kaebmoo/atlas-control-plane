@@ -231,6 +231,10 @@ def collection_visible_on_run(runtime: AtlasRuntime, worker_id: str) -> None:
     MockArtifactsWorker.snapshots["sess-first"] = [("out/report.txt", b"FROZEN")]
     run = runtime.workflows.run_graph(_collect_graph(worker_id), policy)
     assert run["state"] == "succeeded", run
+    node_row = runtime.db.list_workflow_nodes(run["id"])[0]
+    keys = {row["key"] for row in runtime.db.list_artifacts(job_id=node_row["job_id"], kind="file_ref")}
+    assert keys == {"files.gather.out/report.txt"}, keys
+    assert all(row["run_id"] == run["id"] for row in runtime.db.list_artifacts(run_id=run["id"], kind="file_ref"))
     collected = _run_events(runtime, run["id"], "files.collected")
     assert len(collected) == 1, collected
     assert collected[0]["node_key"] == "gather", collected[0]
@@ -270,6 +274,40 @@ def collection_visible_on_run(runtime: AtlasRuntime, worker_id: str) -> None:
     assert runtime.db.workflow_context_for_job(standalone["id"]) == {}, "standalone job must have no run context"
     assert len(runtime.db.list_workflow_runs(limit=1000)) == runs_before + 1, "a standalone job created a run"
     print("  workflow node collection success/failure mirrored onto the run timeline OK")
+
+
+def node_linked_before_dispatch(runtime: AtlasRuntime, worker_id: str) -> None:
+    """A fast worker must never out-run the node→job link. The link has to be written BEFORE the
+    job service dispatches, or collection resolves no workflow context and keys that node's files
+    `files.<relpath>` with a NULL run_id — off the run, unmatched by push_files globs, and read as
+    "no artifacts" by collect_required (a node/run failure with the file sitting right there).
+
+    The window is forced open deterministically: `budget_reserved` is appended right AFTER submit
+    returns, so stalling that one write parks the runner thread there while the mock worker
+    finishes and collects. (Mutation: link the node after `submit()` returns instead of through
+    its on_created hook -> the keys lose the node prefix and the run_id goes NULL -> red.)"""
+    policy = {"allowed_worker_ids": [worker_id], "max_jobs": 5}
+    MockArtifactsWorker.reset()
+    MockArtifactsWorker.snapshots["sess-first"] = [("out/report.txt", b"FROZEN")]
+    original = runtime.db.append_workflow_event
+
+    def stalled(run_id: str, event_type: str, payload: Any = None, node_key: str | None = None) -> Any:
+        if event_type == "budget_reserved":
+            time.sleep(0.5)  # long enough for the whole dispatch + collection round trip
+        return original(run_id, event_type, payload, node_key)
+
+    runtime.db.append_workflow_event = stalled  # type: ignore[method-assign]
+    try:
+        run = runtime.workflows.run_graph(_collect_graph(worker_id), policy)
+    finally:
+        runtime.db.append_workflow_event = original  # type: ignore[method-assign]
+    assert run["state"] == "succeeded", run
+    node = runtime.db.list_workflow_nodes(run["id"])[0]
+    rows = runtime.db.list_artifacts(job_id=node["job_id"], kind="file_ref")
+    assert [row["key"] for row in rows] == ["files.gather.out/report.txt"], [row["key"] for row in rows]
+    assert all(row["run_id"] == run["id"] for row in rows), rows
+    assert _run_events(runtime, run["id"], "files.collected"), "collection was invisible to the run"
+    print("  node is linked to its job before dispatch, so a fast worker still keys files to the run OK")
 
 
 def collect_required_fails_the_node(runtime: AtlasRuntime, worker_id: str) -> None:
@@ -504,6 +542,7 @@ def main() -> None:
             job_artifacts_route(runtime, api_base, worker_id)
             no_collection_no_artifact_api(runtime, worker_id)
             collection_visible_on_run(runtime, worker_id)
+            node_linked_before_dispatch(runtime, worker_id)
             collect_required_fails_the_node(runtime, worker_id)
             malformed_and_integrity(runtime, worker_id)
             caps_and_old_worker(runtime, worker_id)

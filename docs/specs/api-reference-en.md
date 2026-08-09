@@ -445,9 +445,10 @@ worker/manager node can opt into strict mode instead:
   normal node-failure rules (`stop_on_first_failure`, `failure_summary`).
 - The JOB still reaches `succeeded` — collection never changes a job's outcome.
   Strictness is enforced at the workflow layer, above that guarantee.
-- Boolean only; allowed solely on a node that also declares `collect_files`
-  (otherwise a save-time validation error). Default `false` is exactly the
-  previous behavior.
+- Boolean only; allowed solely on a `worker`/`manager` node that also declares
+  `collect_files` (otherwise a save-time validation error) — no other node type
+  ever runs a job, so none can collect. Default `false` is exactly the previous
+  behavior.
 
 ### Handoff
 
@@ -866,7 +867,9 @@ curl -sS -X POST "$BASE_URL/api/workflow-runs/wfr_xxx/files?key=contract" \
   be pushed to a worker or read by a node, so a `201` there would only leave a
   stranded artifact that looks like a successful attachment. Every non-terminal
   state (including `paused` and `waiting_for_human`) still accepts uploads —
-  attach files while the run is held, then resume.
+  attach files while the run is held, then resume. The check is re-applied
+  atomically with the artifact insert, so cancelling (or finishing) a run while
+  its body is still streaming in also returns `409` and leaves nothing behind.
 
 Download:
 

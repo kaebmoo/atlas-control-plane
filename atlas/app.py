@@ -20,7 +20,16 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from . import __version__
 from .auth import LoginRateLimiter
 from .config import Config
-from .db import ARTIFACT_KINDS, WORKER_SYNC_MODES, Database, WorkflowVersionConflict, new_id, now_iso, resolve_in_store
+from .db import (
+    ARTIFACT_KINDS,
+    RUN_TERMINAL_STATES,
+    WORKER_SYNC_MODES,
+    Database,
+    WorkflowVersionConflict,
+    new_id,
+    now_iso,
+    resolve_in_store,
+)
 from .docmd import render_markdown
 from .jobs import CallbackSessionPending, JobManager, TERMINAL_STATES, verify_callback_token
 from .outbound import OutboundService, OutboundSettings
@@ -49,9 +58,12 @@ class RunNotAcceptingFiles(ValueError):
     """An upload targeted a workflow run that already reached a terminal state (HTTP 409)."""
 
 
-# A finished run can never push or read a newly attached file, so accepting one only creates a
-# stranded artifact that reads like a successful attachment.
-_RUN_TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
+def _run_finished_error(run_id: str, state: str) -> str:
+    return (
+        f"workflow run {run_id} already finished ({state}); a file attached now can never be "
+        "pushed to a worker or read by a node — start a new run instead"
+    )
+
 
 STATIC_DIR = Path(__file__).parent / "static"
 # The one curated operator doc reachable from the running console (not the whole docs/
@@ -1138,11 +1150,11 @@ class AtlasHandler(BaseHTTPRequestHandler):
         run = runtime.db.get_workflow_run(run_id)
         if not run:
             raise ValueError(f"Unknown workflow_run_id: {run_id}")
-        if run.get("state") in _RUN_TERMINAL_STATES:
-            raise RunNotAcceptingFiles(
-                f"workflow run {run_id} already finished ({run['state']}); a file attached now can "
-                "never be pushed to a worker or read by a node — start a new run instead"
-            )
+        if run.get("state") in RUN_TERMINAL_STATES:
+            # Cheap pre-read reject so a finished run never costs a full body read. NOT the
+            # authoritative check — the run can finish while the body streams in, so the insert
+            # below re-checks atomically.
+            raise RunNotAcceptingFiles(_run_finished_error(run_id, str(run["state"])))
         key = query.get("key", [""])[0]
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", key):
             raise ValueError("file artifact key is invalid")
@@ -1181,7 +1193,12 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary, target)
-            artifact = runtime.db.create_artifact(
+            # Reading the body above took unbounded wall-clock time, so the state check that
+            # gated it is stale by now: a cancel (or the runner finishing) can land mid-upload.
+            # Decide and insert in ONE transaction so a file_ref can never appear on a run that
+            # already finished — which would also fire its artifact_created triggers. On rejection
+            # the shared `except` below reclaims the staged blob.
+            artifact = runtime.db.create_artifact_for_live_run(
                 {
                     "run_id": run_id,
                     "key": key,
@@ -1195,6 +1212,9 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     },
                 }
             )
+            if artifact is None:
+                state = (runtime.db.get_workflow_run(run_id) or {}).get("state") or "finished"
+                raise RunNotAcceptingFiles(_run_finished_error(run_id, str(state)))
             return artifact
         except Exception:
             temporary.unlink(missing_ok=True)

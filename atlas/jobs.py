@@ -9,6 +9,7 @@ import math
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -363,7 +364,19 @@ class JobManager:
         self._reaper_stop: threading.Event | None = None
         self._reaper_thread: threading.Thread | None = None
 
-    def submit(self, payload: dict[str, Any], *, explicit_id: str | None = None) -> dict[str, Any]:
+    def submit(
+        self,
+        payload: dict[str, Any],
+        *,
+        explicit_id: str | None = None,
+        on_created: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        # on_created runs with the created job row AFTER it exists but BEFORE dispatch starts, so
+        # a caller can bind its own row to the job while nothing can observe the job yet. The
+        # workflow layer uses it for the node→job link: a worker that finished before that link
+        # landed had no workflow context, so its collected files were keyed `files.<relpath>`
+        # with a NULL run_id instead of `files.<node_key>.<relpath>` on the run. Keyword-only for
+        # the same reason as explicit_id — never taken from the request body.
         # explicit_id is a PRIVATE parameter (keyword-only, never read from `payload`): it lets
         # the handoff path pass a deterministic child id for idempotent recovery. It must NOT
         # come from the request body — POST /api/jobs passes the body straight here, so honoring
@@ -453,6 +466,8 @@ class JobManager:
                     "workspace_id": handoff.get("workspace_id"),
                 },
             )
+        if on_created is not None:
+            on_created(job)
         self._start_thread(job["id"])
         return self.db.get_job(job["id"]) or job
 

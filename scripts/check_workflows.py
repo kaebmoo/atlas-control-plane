@@ -75,6 +75,18 @@ def main() -> None:
         {"start": "gather", "nodes": [{"id": "gather", "type": "worker", "collect_required": True}], "edges": []},
         {},
     )
+    # Only worker/manager nodes ever run a job, so only they can collect: a gate carrying the
+    # flag would have saved fine and been ignored at runtime.
+    assert_raises(
+        "collect_required is only valid on worker or manager nodes",
+        validate_workflow_graph,
+        {
+            "start": "gate",
+            "nodes": [{"id": "gate", "type": "human_gate", "collect_files": ["out.md"], "collect_required": True}],
+            "edges": [],
+        },
+        {},
+    )
 
     bad_artifact_condition = dict(graph, edges=[{"from": "reporter", "to": "anchor", "condition": {"type": "artifact_equals"}}])
     assert_raises("artifact_equals requires artifact", validate_workflow_graph, bad_artifact_condition, {})
@@ -880,7 +892,7 @@ class FakeJobService:
         self.prompts: list[str] = []
         self.payloads: list[dict] = []
 
-    def submit(self, payload: dict) -> dict:
+    def submit(self, payload: dict, *, on_created=None) -> dict:
         prompt = payload["prompt"]
         self.payloads.append(dict(payload))
         self.prompts.append(prompt)
@@ -895,7 +907,7 @@ class SelectiveFailJobService(FakeJobService):
         super().__init__(db, worker_id)
         self.failing_prompts = failing_prompts
 
-    def submit(self, payload: dict) -> dict:
+    def submit(self, payload: dict, *, on_created=None) -> dict:
         prompt = payload["prompt"]
         self.payloads.append(dict(payload))
         self.prompts.append(prompt)
@@ -916,7 +928,7 @@ class BlockingFakeJobService(FakeJobService):
         self.release = threading.Event()
         self.threads: list[threading.Thread] = []
 
-    def submit(self, payload: dict) -> dict:
+    def submit(self, payload: dict, *, on_created=None) -> dict:
         prompt = payload["prompt"]
         self.payloads.append(dict(payload))
         self.prompts.append(prompt)

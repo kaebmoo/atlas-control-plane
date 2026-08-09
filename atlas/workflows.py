@@ -223,6 +223,11 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
             # Opt-in strict collection. Only meaningful next to a collection declaration, so
             # the key without collect_files is a save-time error instead of a setting that
             # silently does nothing. Default (absent) is exactly the legacy behavior.
+            if node["type"] not in {"worker", "manager"}:
+                # Only worker/manager nodes ever run a job, so only they can collect. Without
+                # this, a human_gate carrying collect_files + collect_required saved fine and
+                # the strictness was silently ignored at runtime.
+                raise ValueError(f"workflow node {node_id} collect_required is only valid on worker or manager nodes")
             if not isinstance(node["collect_required"], bool):
                 raise ValueError(f"workflow node {node_id} collect_required must be a boolean")
             if not node.get("collect_files"):
@@ -1166,8 +1171,9 @@ class WorkflowRunner:
                             if (self.db.get_workflow_run(run["id"]) or {}).get("state") == "cancelled":
                                 raise _WorkflowCancelled()
                             _check_deadline(deadline)
-                            job = self._reserve_and_submit_job(run, node, node_submit["payload"], policy, counters)
-                            self.db.update_workflow_node(runtime_node["id"], job_id=job["id"])
+                            job = self._reserve_and_submit_job(
+                                run, node, node_submit["payload"], policy, counters, runtime_node["id"]
+                            )
                     if job:
                         job = self._wait_for_job(job["id"], run["id"], deadline)
                         counters["jobs_started"] += 1
@@ -1524,12 +1530,21 @@ class WorkflowRunner:
         payload: dict[str, Any],
         policy: dict[str, Any],
         counters: dict[str, Any],
+        runtime_node_id: str,
     ) -> dict[str, Any]:
         """Budget-check, submit the job, and record the reservation. Fast (submit only starts a
         thread), so it stays under the run lock; the slow file push happens before this, unlocked."""
         cost = _node_budget_units(node)
         _check_budget(policy, int(counters.get("budget_units_spent") or 0), cost)
-        job = self.job_service.submit(payload)
+        # The node→job link is written by the on_created hook, i.e. BEFORE the job service starts
+        # dispatching. Linking after submit() returned was a race: a fast worker could finish and
+        # collect while workflow_context_for_job still found nothing, keying that node's artifacts
+        # `files.<relpath>` with a NULL run_id — invisible to the run, unmatched by push_files
+        # globs, and read as "no artifacts" by collect_required.
+        job = self.job_service.submit(
+            payload,
+            on_created=lambda created: self.db.update_workflow_node(runtime_node_id, job_id=created["id"]),
+        )
         counters["budget_units_spent"] = int(counters.get("budget_units_spent") or 0) + cost
         self.db.update_workflow_run(run["id"], counters=counters)
         self.db.append_workflow_event(

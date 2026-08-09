@@ -427,8 +427,9 @@ POSIX normalization, relative path ที่ปลอดภัย (รวมถ�
   (`stop_on_first_failure`, `failure_summary`)
 - ตัว JOB ยังเป็น `succeeded` เสมอ — การเก็บไฟล์ไม่เคยเปลี่ยนผลของ job ความเข้มงวดนี้
   บังคับที่ชั้น workflow ซึ่งอยู่เหนือหลักประกันดังกล่าว
-- ต้องเป็น boolean และใส่ได้เฉพาะ node ที่ประกาศ `collect_files` ด้วย (ไม่เช่นนั้นเป็น
-  validation error ตอน save) ค่าเริ่มต้น `false` = พฤติกรรมเดิมเป๊ะ
+- ต้องเป็น boolean และใส่ได้เฉพาะ node ชนิด `worker`/`manager` ที่ประกาศ `collect_files`
+  ด้วย (ไม่เช่นนั้นเป็น validation error ตอน save) เพราะ node ชนิดอื่นไม่เคยรัน job จึงเก็บ
+  ไฟล์ไม่ได้ ค่าเริ่มต้น `false` = พฤติกรรมเดิมเป๊ะ
 
 ### Handoff
 
@@ -820,7 +821,9 @@ curl -sS -X POST "$BASE_URL/api/workflow-runs/wfr_xxx/files?key=contract" \
   `cancelled`) จะได้ `409` และไม่เก็บอะไรเลย เพราะไฟล์นั้นไม่มีทางถูก push ไปยัง worker
   หรือถูก node อ่านอีกแล้ว การตอบ `201` จึงเหลือไว้แค่ artifact ค้างที่ดูเหมือนแนบสำเร็จ
   ส่วนสถานะที่ยังไม่จบทุกสถานะ (รวม `paused` และ `waiting_for_human`) ยังอัปโหลดได้ตามเดิม
-  — แนบไฟล์ตอน run ถูก hold ไว้ แล้วค่อย resume
+  — แนบไฟล์ตอน run ถูก hold ไว้ แล้วค่อย resume การตรวจนี้ทำซ้ำแบบ atomic พร้อมกับตอน
+  insert artifact ดังนั้นถ้า run ถูก cancel (หรือจบเอง) ระหว่างที่ body ยังส่งไม่หมด ก็จะได้
+  `409` และไม่มีอะไรค้างไว้เช่นกัน
 
 Download:
 

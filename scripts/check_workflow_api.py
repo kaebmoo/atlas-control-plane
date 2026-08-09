@@ -197,7 +197,7 @@ def main() -> None:
             assert "non-negative" in request_error(base_url, "GET", f"/api/workflow-runs/{run['id']}/events?after=-1")["error"]
 
             check_run_hold(base_url, workflow_id)
-            check_upload_rejected_after_run_finished(base_url, workflow_id)
+            check_upload_rejected_after_run_finished(runtime, base_url, workflow_id)
 
             paused = runtime.db.create_workflow_run(
                 {
@@ -361,7 +361,7 @@ def check_run_hold(base_url: str, workflow_id: str) -> None:
     assert "hold" in bad["error"], bad
 
 
-def check_upload_rejected_after_run_finished(base_url: str, workflow_id: str) -> None:
+def check_upload_rejected_after_run_finished(runtime: AtlasRuntime, base_url: str, workflow_id: str) -> None:
     """A file attached to a finished run can never be pushed to a worker or read by a node, so
     it is a stranded artifact that reads to the user like a successful attachment: reject it with
     409 instead of 201. Runs that have NOT finished keep accepting uploads.
@@ -394,6 +394,34 @@ def check_upload_rejected_after_run_finished(base_url: str, workflow_id: str) ->
         expect_error=True,
     )
     assert rejected_cancelled["status"] == 409, rejected_cancelled["status"]
+
+    # TOCTOU: the pre-read state check is stale by the time the body finishes streaming. Send the
+    # headers, cancel the run while the body is still open, then finish the body — the insert must
+    # re-check and reject. (Mutation: swap create_artifact_for_live_run back to create_artifact ->
+    # the upload 201s and strands a file_ref on a cancelled run -> red.)
+    gate_graph = {"start": "hold", "nodes": [{"id": "hold", "type": "human_gate", "label": "Hold"}], "edges": []}
+    gated_workflow = request(base_url, "POST", "/api/workflows", {"name": "Upload TOCTOU", "graph": gate_graph})["workflow"]
+    live = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": gated_workflow["id"]})["run"]
+    wait_for_api_run(base_url, live["id"], "waiting_for_human")
+    parsed = urllib.parse.urlparse(base_url)
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+    connection.putrequest("POST", f"/api/workflow-runs/{live['id']}/files?key=racing")
+    connection.putheader("Content-Length", "8")
+    connection.putheader("Content-Type", "application/octet-stream")
+    connection.putheader("X-Filename", "racing.bin")
+    connection.endheaders()
+    connection.send(b"half")
+    request(base_url, "POST", f"/api/workflow-runs/{live['id']}/cancel")
+    connection.send(b"rest")
+    response = connection.getresponse()
+    raced = json.loads(response.read())
+    connection.close()
+    assert response.status == 409, f"expected HTTP 409 after the run was cancelled mid-upload, got {response.status}"
+    assert "already finished" in raced["error"], raced
+    assert not request(base_url, "GET", f"/api/artifacts?run_id={live['id']}&kind=file_ref")["artifacts"], (
+        "a file_ref must not land on a run cancelled mid-upload"
+    )
+    assert not any(path.name.endswith(".tmp") for path in runtime.upload_dir.iterdir()), "staged upload left behind"
 
 
 def check_milestones_3_and_4(base_url: str, workflow_id: str) -> None:
@@ -707,7 +735,7 @@ def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) ->
     response = {"text": ""}
     prompts: list[str] = []
 
-    def submit(payload: dict) -> dict:
+    def submit(payload: dict, *, on_created=None) -> dict:
         prompts.append(payload["prompt"])
         job = runtime.db.create_job(
             {"worker_id": builder["id"], "prompt": payload["prompt"], "state": "running"}
@@ -982,7 +1010,7 @@ def check_milestones_13_and_15(runtime: AtlasRuntime, base_url: str) -> None:
 
     original_submit = runtime.jobs.submit
 
-    def submit(payload: dict) -> dict:
+    def submit(payload: dict, *, on_created=None) -> dict:
         job = runtime.db.create_job({"worker_id": worker["id"], "prompt": payload["prompt"], "state": "running"})
         runtime.db.append_job_text(job["id"], "recovered")
         runtime.db.update_job(job["id"], state="succeeded", finished_at=now_iso())
