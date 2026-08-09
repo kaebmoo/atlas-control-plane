@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the collection produced no artifact, instead of completing silently with no
   files. The job itself still succeeds — collection never changes a job outcome.
   Requires `collect_files`; the `document_brief` pack's analyst node uses it.
+- Added a `warnings` array to the workflow create, update, and validate responses.
+  It reports fields that are accepted but inert — currently `collect_files` on a
+  node that is not a `worker`/`manager`, which older graphs may carry and which
+  has no runtime effect. Such graphs still save, so no existing definition breaks.
 - Added a windowed global artifact listing endpoint, `GET /api/artifacts`, with
   truthful totals and an opt-in metadata-only view with strict selectors.
 - Added `workflow.interface` v1 as an additive input/output contract for

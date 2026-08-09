@@ -712,6 +712,10 @@ paths:
                 type: object
                 properties:
                   workflow: {$ref: '#/components/schemas/WorkflowDefinition'}
+                  warnings:
+                    type: array
+                    items: {type: string}
+                    description: Compatibility warnings for accepted legacy fields with no runtime effect.
         default: {$ref: '#/components/responses/Error'}
 
   /api/workflow-templates:
@@ -952,6 +956,10 @@ paths:
                 type: object
                 properties:
                   workflow: {$ref: '#/components/schemas/WorkflowDefinition'}
+                  warnings:
+                    type: array
+                    items: {type: string}
+                    description: Compatibility warnings for accepted legacy fields with no runtime effect.
         '409': {$ref: '#/components/responses/Error'}
         default: {$ref: '#/components/responses/Error'}
     delete:
@@ -982,6 +990,10 @@ paths:
                 type: object
                 properties:
                   ok: {type: boolean, const: true}
+                  warnings:
+                    type: array
+                    items: {type: string}
+                    description: Compatibility warnings for accepted legacy fields with no runtime effect.
         default: {$ref: '#/components/responses/Error'}
 
   /api/workflows/{workflow_id}/explain:

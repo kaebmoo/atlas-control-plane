@@ -47,6 +47,7 @@ from .workflows import (
     _worker_matches_role,
     next_fire_at_for_trigger,
     validate_workflow_graph,
+    workflow_graph_warnings,
     validate_workflow_default_reply,
     validate_workflow_policy,
     validate_workflow_references,
@@ -729,9 +730,9 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 # name defaults to "Untitled workflow"). Do NOT require it — that would break
                 # the published additive contract. The AI-draft path still requires name via
                 # _validate_workflow_draft, matching the stricter ai-draft schema.
-                _validate_workflow_payload(runtime, payload)
+                warnings = _validate_workflow_payload(runtime, payload)
                 workflow = runtime.db.create_workflow_definition(payload)
-                self._json({"workflow": workflow}, HTTPStatus.CREATED)
+                self._json({"workflow": workflow, "warnings": warnings}, HTTPStatus.CREATED)
                 return
 
         if parts == ["api", "workflow-templates"] and method == "GET":
@@ -781,7 +782,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     validation_payload["default_reply"] = payload["default_reply"]
                 if "interface" in payload:
                     validation_payload["interface"] = payload["interface"]
-                _validate_workflow_payload(runtime, validation_payload)
+                warnings = _validate_workflow_payload(runtime, validation_payload)
                 _validate_workflow_metadata(payload)
                 if "interface" not in payload:
                     # interface omitted: preserves the stored value, but if graph is
@@ -791,7 +792,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     if stored_interface is not None:
                         cross_check_against_graph(stored_interface, graph)
                 updated = runtime.db.update_workflow_definition(workflow_id, payload)
-                self._json({"workflow": updated})
+                self._json({"workflow": updated, "warnings": warnings})
                 return
             if method == "DELETE":
                 if not runtime.db.delete_workflow_definition(workflow_id):
@@ -809,14 +810,14 @@ class AtlasHandler(BaseHTTPRequestHandler):
             # default_reply is deliberately excluded here (matches existing behavior);
             # interface is additive: validate a supplied one, else cross-check the
             # stored one against the candidate graph.
-            _validate_workflow_payload(runtime, {"graph": graph, "policy": policy})
+            warnings = _validate_workflow_payload(runtime, {"graph": graph, "policy": policy})
             if "interface" in payload:
                 validate_interface(payload["interface"], graph)
             else:
                 stored_interface = workflow.get("interface")
                 if stored_interface is not None:
                     cross_check_against_graph(stored_interface, graph)
-            self._json({"ok": True})
+            self._json({"ok": True, "warnings": warnings})
             return
 
         if len(parts) == 4 and parts[:2] == ["api", "workflows"] and parts[3] == "explain" and method == "POST":
@@ -1615,7 +1616,7 @@ def _validate_artifact_payload(runtime: AtlasRuntime, payload: dict[str, Any]) -
         raise ValueError("artifact metadata must be an object")
 
 
-def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any], require_name: bool = False) -> None:
+def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any], require_name: bool = False) -> list[str]:
     if require_name and (not isinstance(payload.get("name"), str) or not payload["name"].strip()):
         # The schema requires name (minLength 1). Without this the server silently persists
         # a missing name as "Untitled workflow", disagreeing with any schema-conformant client.
@@ -1632,6 +1633,7 @@ def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any], r
         validate_workflow_default_reply(payload["default_reply"], runtime.config.outbound_allowlist)
     if "interface" in payload:
         validate_interface(payload["interface"], graph)
+    return workflow_graph_warnings(graph)
 
 
 _WORKFLOW_DRAFT_FIELDS = {"name", "description", "graph", "policy", "triggers", "explanation", "warnings"}

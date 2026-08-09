@@ -532,6 +532,10 @@ inherit มัน — ถ้า allowlist เปลี่ยนจน default �
 `DELETE` ลบ definition และ trigger ที่ผูก; run เก่ายังคงอยู่แต่
 `workflow_definition_id` อาจเป็น null ตาม foreign-key behavior
 
+response ของการสร้าง, อัปเดต และ validation มี array ระดับบนสุดชื่อ `warnings` เพิ่มเติม
+เพื่อความเข้ากันได้ `collect_files` บน node ที่ไม่ใช่ `worker`/`manager` ยังยอมให้ save
+graph เดิมได้ แต่จะไม่มีผลตอน runtime; หากต้องการเก็บไฟล์ให้ย้าย field ไปไว้ที่ job node
+
 สำหรับ visual editor ให้ส่ง version ที่ client โหลดมาเป็น `expected_version` (และห้ามส่ง
 `version` พร้อมกัน) save ที่ version ตรงกันจะเพิ่ม version ของ definition แบบ atomic;
 save ที่มีคนแก้แทรกจะได้ `409` เพื่อให้ editor refresh, เสนอทางเลือก merge และไม่เขียนทับ

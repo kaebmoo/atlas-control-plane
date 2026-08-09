@@ -74,6 +74,18 @@ def main() -> None:
             assert unnamed["name"] == "Untitled workflow", unnamed
             request(base_url, "DELETE", f"/api/workflows/{unnamed['id']}")  # keep the list clean for ordering-sensitive checks below
 
+            # Legacy collect_files on a non-job node remains save-compatible, but the API must
+            # make its no-op runtime meaning visible. (Mutations, both proven red: drop the
+            # `warnings` key from the save/validate responses -> KeyError; invert
+            # workflow_graph_warnings' node-type predicate -> the list comes back empty.)
+            legacy_graph = {"start": "gate", "nodes": [{"id": "gate", "type": "human_gate", "collect_files": ["out.md"]}], "edges": []}
+            legacy = request(base_url, "POST", "/api/workflows", {"name": "Legacy collection", "graph": legacy_graph})
+            assert len(legacy["warnings"]) == 1 and "gate" in legacy["warnings"][0] and "ignored" in legacy["warnings"][0], legacy
+            assert request(base_url, "POST", f"/api/workflows/{legacy['workflow']['id']}/validate")["warnings"] == legacy["warnings"]
+            updated_legacy = request(base_url, "PUT", f"/api/workflows/{legacy['workflow']['id']}", {"description": "still compatible"})
+            assert updated_legacy["warnings"] == legacy["warnings"], updated_legacy
+            request(base_url, "DELETE", f"/api/workflows/{legacy['workflow']['id']}")
+
             workflow = request(
                 base_url,
                 "POST",

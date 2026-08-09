@@ -282,6 +282,22 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
     return graph
 
 
+def workflow_graph_warnings(graph: dict[str, Any]) -> list[str]:
+    """Return compatibility warnings for valid graphs without changing their save behavior.
+
+    ``collect_files`` predates workflow-node collection and remains accepted on non-job nodes so
+    old definitions can still be saved. It has no runtime effect there, so surface that fact to
+    API callers instead of making the accepted legacy field look meaningful.
+    """
+    warnings = []
+    for node in graph.get("nodes", []):
+        if isinstance(node, dict) and "collect_files" in node and node.get("type") not in {"worker", "manager"}:
+            warnings.append(
+                f"workflow node {node.get('id', '<unknown>')} collect_files is ignored because only worker or manager nodes run jobs"
+            )
+    return warnings
+
+
 # Hard safety caps for workflow policy. Shared by the workflow API and pack import so
 # neither path can persist a policy the other would reject. ponytail: one source.
 WORKFLOW_POLICY_LIMITS = {
