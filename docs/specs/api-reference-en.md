@@ -421,6 +421,13 @@ local SHA-256 before it is stored as a `file_ref` artifact:
   without `collect_files` makes no Artifact API request. Callback collection
   runs outside the terminal DB transaction and continued sessions are
   serialized by a durable worker/workspace/session lease.
+- **Visible at run level.** When the job belongs to a workflow node, the same
+  outcome is mirrored onto the run timeline (`GET
+  /api/workflow-runs/{id}/events`) tagged with the node key: `files.collected`
+  with `{count, requested}`, or `files.collection_failed` with `{error,
+  requested}` (the error is the token-redacted one from the job timeline).
+  Counts only, never a file list — the audit rule holds here too. A standalone
+  job is unchanged: job timeline and audit only.
 
 ### Handoff
 

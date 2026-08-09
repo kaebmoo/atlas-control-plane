@@ -404,6 +404,12 @@ POSIX normalization, relative path ที่ปลอดภัย (รวมถ�
 - manifest ว่างโดยไม่มี `skipped[]` ใช้ได้; ไม่ระบุ `collect_files` จะไม่เรียก Artifact API
   เลย; callback collection อยู่นอก terminal transaction และ lease แบบ durable จะ serialize
   continued session เพื่อกัน snapshot ถูกเขียนทับ
+- **เห็นได้ที่ระดับ run** ถ้า job นั้นเป็นของ workflow node ผลลัพธ์เดียวกันจะถูก mirror
+  ไปยัง timeline ของ run (`GET /api/workflow-runs/{id}/events`) พร้อม node key:
+  `files.collected` พร้อม `{count, requested}` หรือ `files.collection_failed` พร้อม
+  `{error, requested}` (error ตัวเดียวกับใน job timeline ที่ redact token แล้ว)
+  เก็บเฉพาะจำนวน ไม่มีรายชื่อไฟล์ — กติกาเดียวกับ audit ส่วน job เดี่ยวที่ไม่ใช่ของ
+  workflow พฤติกรรมเหมือนเดิมทุกประการ (มีแค่ job timeline กับ audit)
 
 ### Handoff
 

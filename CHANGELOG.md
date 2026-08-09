@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed a workflow node's file collection failing invisibly at run level: the
+  collection outcome is now mirrored onto the run timeline as `files.collected`
+  (`count`/`requested`) or `files.collection_failed` (redacted `error`/
+  `requested`) with the node key — counts only, never a file list. Standalone
+  jobs are unchanged.
 - Fixed `push_files` intents being dropped silently on edges taken by the
   human-gate decision path (and lost on restart mid-run): push intents now ride
   the run's persisted counters, so a gate may sit between a collector and the
