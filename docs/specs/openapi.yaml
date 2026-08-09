@@ -1225,6 +1225,15 @@ paths:
                 type: object
                 properties:
                   artifact: {$ref: '#/components/schemas/Artifact'}
+        '409':
+          description: >-
+            The run already reached a terminal state (`succeeded`, `failed`, or
+            `cancelled`). A file attached then can never be pushed to a worker or
+            read by a node, so it is rejected instead of being stored as a
+            stranded artifact. Every non-terminal state still accepts uploads.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
         default: {$ref: '#/components/responses/Error'}
 
   /api/workflow-runs/{run_id}/events:

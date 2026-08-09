@@ -816,6 +816,11 @@ curl -sS -X POST "$BASE_URL/api/workflow-runs/wfr_xxx/files?key=contract" \
 - default limit 10 MiB ปรับด้วย `ATLAS_MAX_UPLOAD_BYTES`
 - response เป็น `file_ref` พร้อม filename, media_type, size, SHA-256
 - upload ผูกไฟล์กับ run แต่ไม่ส่งเข้า worker workspace และ worker ไม่อ่านอัตโนมัติ
+- **run ต้องยังไม่จบ** run ที่อยู่ในสถานะ terminal (`succeeded`, `failed`,
+  `cancelled`) จะได้ `409` และไม่เก็บอะไรเลย เพราะไฟล์นั้นไม่มีทางถูก push ไปยัง worker
+  หรือถูก node อ่านอีกแล้ว การตอบ `201` จึงเหลือไว้แค่ artifact ค้างที่ดูเหมือนแนบสำเร็จ
+  ส่วนสถานะที่ยังไม่จบทุกสถานะ (รวม `paused` และ `waiting_for_human`) ยังอัปโหลดได้ตามเดิม
+  — แนบไฟล์ตอน run ถูก hold ไว้ แล้วค่อย resume
 
 Download:
 

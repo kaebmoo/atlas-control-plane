@@ -95,9 +95,19 @@ def main() -> None:
             )
             assert status == 400 and "classification" in error["error"], error
 
-            # file_ref artifact for byte-purge coverage.
+            # file_ref artifact for byte-purge coverage. Uploads are only accepted while a run is
+            # still live (a finished run 409s), so the bytes land on a run parked at a gate, which
+            # is then cancelled — purge needs its run TERMINAL to consider the artifact at all.
+            upload_definition = runtime.db.create_workflow_definition({"name": "Obs upload gate", "graph": GATE_GRAPH})
+            status, upload_run, _ = request_json(
+                base_url, "POST", "/api/workflow-runs",
+                {"workflow_definition_id": upload_definition["id"]}, tokens["operator"],
+            )
+            assert status == 202, upload_run
+            upload_run_id = upload_run["run"]["id"]
+            wait_for_run(runtime, upload_run_id, "waiting_for_human")
             file_request = urllib.request.Request(
-                f"{base_url}/api/workflow-runs/{run['id']}/files?key=evidence",
+                f"{base_url}/api/workflow-runs/{upload_run_id}/files?key=evidence",
                 data=b"file-bytes",
                 method="POST",
                 headers={
@@ -110,6 +120,7 @@ def main() -> None:
                 file_artifact = json.loads(response.read())["artifact"]
             file_on_disk = runtime.upload_dir / file_artifact["content"]
             assert file_on_disk.is_file()
+            assert runtime.workflows.cancel_run(upload_run_id)["state"] == "cancelled"
 
             # 3) audit export: csv parses and carries the artifact.create rows; bad format -> 400.
             status, body, _ = request(base_url, "GET", "/api/audit?format=csv", token=tokens["auditor"])

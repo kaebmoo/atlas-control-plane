@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clarifying that the full workflow-authoring frontend lives in `flow-designer`.
 - Improved ops-console copy, mobile behavior, accessibility, error states,
   confirmation flows, and audit depth.
+- Changed `POST /api/workflow-runs/{run_id}/files` to reject uploads onto a run
+  that already finished (`succeeded`, `failed`, `cancelled`) with `409` instead
+  of a silent `201`: such a file can never be pushed to a worker or read by a
+  node, so it only became a stranded artifact that looked like a successful
+  attachment. Every non-terminal run state still accepts uploads.
 
 ### Fixed
 

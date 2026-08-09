@@ -197,6 +197,7 @@ def main() -> None:
             assert "non-negative" in request_error(base_url, "GET", f"/api/workflow-runs/{run['id']}/events?after=-1")["error"]
 
             check_run_hold(base_url, workflow_id)
+            check_upload_rejected_after_run_finished(base_url, workflow_id)
 
             paused = runtime.db.create_workflow_run(
                 {
@@ -358,6 +359,41 @@ def check_run_hold(base_url: str, workflow_id: str) -> None:
     # a non-boolean hold is rejected up front.
     bad = request_error(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id, "hold": "yes"})
     assert "hold" in bad["error"], bad
+
+
+def check_upload_rejected_after_run_finished(base_url: str, workflow_id: str) -> None:
+    """A file attached to a finished run can never be pushed to a worker or read by a node, so
+    it is a stranded artifact that reads to the user like a successful attachment: reject it with
+    409 instead of 201. Runs that have NOT finished keep accepting uploads.
+    (Mutation: drop the terminal-state guard in _upload_workflow_file -> the upload 201s -> red.)"""
+    run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id})["run"]
+    finished = wait_for_api_run(base_url, run["id"], "failed")  # no live worker in this harness
+    assert finished["state"] == "failed", finished
+    rejected = request_binary(
+        base_url,
+        "POST",
+        f"/api/workflow-runs/{run['id']}/files?key=too_late",
+        body=b"late",
+        headers={"Content-Type": "application/octet-stream", "X-Filename": "late.bin", "Content-Length": "4"},
+        expect_error=True,
+    )
+    assert rejected["status"] == 409, rejected["status"]
+    assert "already finished" in rejected["json"]["error"] and "failed" in rejected["json"]["error"], rejected["json"]
+    assert not request(base_url, "GET", f"/api/artifacts?run_id={run['id']}&kind=file_ref")["artifacts"], (
+        "the rejected upload must leave no artifact behind"
+    )
+    # A cancelled run is terminal too.
+    cancelled = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id})["run"]
+    request(base_url, "POST", f"/api/workflow-runs/{cancelled['id']}/cancel")
+    rejected_cancelled = request_binary(
+        base_url,
+        "POST",
+        f"/api/workflow-runs/{cancelled['id']}/files?key=too_late",
+        body=b"late",
+        headers={"Content-Type": "application/octet-stream", "X-Filename": "late.bin", "Content-Length": "4"},
+        expect_error=True,
+    )
+    assert rejected_cancelled["status"] == 409, rejected_cancelled["status"]
 
 
 def check_milestones_3_and_4(base_url: str, workflow_id: str) -> None:
@@ -821,10 +857,14 @@ def check_milestone_8(base_url: str) -> None:
 
 def check_milestone_14(runtime: AtlasRuntime, base_url: str) -> None:
     control_graph = {"start": "done", "nodes": [{"id": "done", "type": "join", "mode": "all"}], "edges": []}
-    source = request(base_url, "POST", "/api/workflows", {"name": "Upload source", "graph": control_graph})["workflow"]
+    # The upload host run parks at a human gate: uploads are only accepted while a run is still
+    # live (a finished run 409s — check_upload_rejected_after_run_finished), and this check is
+    # about the upload/trigger/purge behavior, not about the run's state.
+    gate_graph = {"start": "hold", "nodes": [{"id": "hold", "type": "human_gate", "label": "Hold for uploads"}], "edges": []}
+    source = request(base_url, "POST", "/api/workflows", {"name": "Upload source", "graph": gate_graph})["workflow"]
     target = request(base_url, "POST", "/api/workflows", {"name": "Upload target", "graph": control_graph})["workflow"]
     run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": source["id"]})["run"]
-    wait_for_api_run(base_url, run["id"], "succeeded")
+    wait_for_api_run(base_url, run["id"], "waiting_for_human")
     trigger = request(
         base_url,
         "POST",
@@ -984,6 +1024,7 @@ def request_binary(
             raw = response.read()
             content_type = response.headers.get("Content-Type", "")
             return {
+                "status": response.status,
                 "body": raw,
                 "json": json.loads(raw) if raw and "json" in content_type else {},
                 "headers": dict(response.headers),
@@ -992,7 +1033,9 @@ def request_binary(
         raw = exc.read()
         if not expect_error:
             raise
-        return {"body": raw, "json": json.loads(raw), "headers": dict(exc.headers)}
+        # `status` matters as much as the message: a 500 whose str() happens to match would
+        # otherwise satisfy a message-only assertion (same rationale as request_error).
+        return {"status": exc.code, "body": raw, "json": json.loads(raw), "headers": dict(exc.headers)}
 
 
 def request_error(base_url: str, method: str, path: str, payload: dict | None = None, status: int = 400) -> dict:

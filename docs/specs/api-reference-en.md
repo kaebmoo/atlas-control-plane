@@ -861,6 +861,12 @@ curl -sS -X POST "$BASE_URL/api/workflow-runs/wfr_xxx/files?key=contract" \
 - Default limit is 10 MiB, configurable through `ATLAS_MAX_UPLOAD_BYTES`.
 - The response is a `file_ref` with filename, media_type, size, and SHA-256.
 - Upload ties a file to the run; it does not place it in a worker workspace, and workers do not read it automatically.
+- **The run must not have finished.** A run in a terminal state (`succeeded`,
+  `failed`, `cancelled`) returns `409` and stores nothing: the file could never
+  be pushed to a worker or read by a node, so a `201` there would only leave a
+  stranded artifact that looks like a successful attachment. Every non-terminal
+  state (including `paused` and `waiting_for_human`) still accepts uploads —
+  attach files while the run is held, then resume.
 
 Download:
 

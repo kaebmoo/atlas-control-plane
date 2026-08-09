@@ -45,6 +45,14 @@ from .workflows import (
 )
 
 
+class RunNotAcceptingFiles(ValueError):
+    """An upload targeted a workflow run that already reached a terminal state (HTTP 409)."""
+
+
+# A finished run can never push or read a newly attached file, so accepting one only creates a
+# stranded artifact that reads like a successful attachment.
+_RUN_TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
+
 STATIC_DIR = Path(__file__).parent / "static"
 # The one curated operator doc reachable from the running console (not the whole docs/
 # tree — ADRs/specs/plans stay repo-only, for contributors rather than operators).
@@ -354,7 +362,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 return
             self._handle_static(path)
-        except WorkflowVersionConflict as exc:
+        except (WorkflowVersionConflict, RunNotAcceptingFiles) as exc:
             self._close_if_request_body_unread()
             self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
         except ValueError as exc:
@@ -1127,8 +1135,14 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
     def _upload_workflow_file(self, run_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
         runtime = self.server.runtime
-        if not runtime.db.get_workflow_run(run_id):
+        run = runtime.db.get_workflow_run(run_id)
+        if not run:
             raise ValueError(f"Unknown workflow_run_id: {run_id}")
+        if run.get("state") in _RUN_TERMINAL_STATES:
+            raise RunNotAcceptingFiles(
+                f"workflow run {run_id} already finished ({run['state']}); a file attached now can "
+                "never be pushed to a worker or read by a node — start a new run instead"
+            )
         key = query.get("key", [""])[0]
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", key):
             raise ValueError("file artifact key is invalid")
