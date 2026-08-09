@@ -248,7 +248,7 @@ function preserveListFocus(renderFn) {
   const active = document.activeElement;
   let marker = null;
   if (active && active.dataset) {
-    for (const key of ["jobId", "runId", "workerId", "workspaceId", "userId", "tokenId", "approvalId", "jobFilter", "navJob", "navRun"]) {
+    for (const key of ["jobId", "runId", "workerId", "workspaceId", "userId", "tokenId", "approvalId", "navJob", "navRun"]) {
       if (active.dataset[key]) { marker = { key, value: active.dataset[key], className: active.className }; break; }
     }
   }
@@ -582,25 +582,41 @@ function renderSelects() {
   )).join("");
 }
 
-// Filter chips over the job list, one per workflow run that produced jobs (+ Manual for
+// Run filter over the job list: one option per workflow run that produced jobs (+ Manual for
 // non-workflow jobs). Runs are labelled from state.workflowRuns; run_id comes from the API.
+// A <select> keeps this row one line tall however many runs exist — the chip row it replaced
+// grew with every run until it squeezed the job list out of the card entirely. Runs of the
+// same workflow share a name, so the workflow is the <optgroup> and each option carries what
+// actually tells two runs apart: when it started, how it ended, and its id.
 function renderJobFilters() {
   const box = document.getElementById("jobFilters");
-  if (!box) return;
-  const filter = state.jobRunFilter || "all";
+  const select = document.getElementById("jobRunFilter");
+  if (!box || !select) return;
   const runIds = [];
   const seen = new Set();
   for (const job of state.jobs) {
     if (job.run_id && !seen.has(job.run_id)) { seen.add(job.run_id); runIds.push(job.run_id); }
   }
   box.hidden = runIds.length === 0;  // no workflow jobs → no filter row at all
-  if (box.hidden) { box.innerHTML = ""; return; }
-  const runName = (id) => state.workflowRuns.find((run) => run.id === id)?.name || shortId(id);
-  const chip = (value, label) => `<button class="job-filter ${filter === value ? "is-active" : ""}" type="button" data-job-filter="${escapeHtml(value)}">${escapeHtml(label)}</button>`;
-  const chips = [chip("all", "All · ทั้งหมด")];
-  for (const id of runIds) chips.push(chip(id, `${shortId(id)} · ${runName(id)}`));
-  if (state.jobs.some((job) => !job.run_id)) chips.push(chip("manual", "Manual · สั่งตรง"));
-  box.innerHTML = chips.join("");
+  if (box.hidden) { select.innerHTML = ""; return; }
+  // Rebuilding the options under an open dropdown would close it mid-choice — same reasoning
+  // as selectionInside() below: this one control skips the poll and catches up on the next.
+  if (document.activeElement === select && select.options.length) return;
+  const groups = [];  // [{ name, options }] — groups and options both stay newest-run-first
+  for (const id of runIds) {
+    const run = state.workflowRuns.find((item) => item.id === id);
+    const name = run?.name || "Workflow run";
+    let group = groups.find((entry) => entry.name === name);
+    if (!group) { group = { name, options: [] }; groups.push(group); }
+    const label = `${formatTime(run?.created_at)} · ${run?.state || "unknown"} · ${shortId(id)}`;
+    group.options.push(`<option value="${escapeHtml(id)}">${escapeHtml(label)}</option>`);
+  }
+  const options = ['<option value="all">All jobs · ทั้งหมด</option>'];
+  if (state.jobs.some((job) => !job.run_id)) options.push('<option value="manual">Manual — no workflow · สั่งตรง</option>');
+  for (const group of groups) options.push(`<optgroup label="${escapeHtml(group.name)}">${group.options.join("")}</optgroup>`);
+  select.innerHTML = options.join("");
+  select.value = state.jobRunFilter || "all";
+  if (!select.value) select.value = "all";  // filter's run dropped out of the list mid-poll
 }
 
 function renderJobs() {
@@ -1848,11 +1864,9 @@ document.getElementById("auditList")?.addEventListener("click", (event) => {
   showView(row.dataset.navView);
 });
 
-// Jobs filter chips: filter the list by the workflow run that produced each job.
-document.getElementById("jobFilters")?.addEventListener("click", (event) => {
-  const chip = event.target.closest("[data-job-filter]");
-  if (!chip) return;
-  state.jobRunFilter = chip.dataset.jobFilter;
+// Jobs run filter: narrow the list to the workflow run that produced each job.
+document.getElementById("jobRunFilter")?.addEventListener("change", (event) => {
+  state.jobRunFilter = event.target.value;
   renderJobs();
 });
 
