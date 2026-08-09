@@ -196,6 +196,8 @@ def main() -> None:
             assert second_page["events"][0]["seq"] > first_page["next_after"]
             assert "non-negative" in request_error(base_url, "GET", f"/api/workflow-runs/{run['id']}/events?after=-1")["error"]
 
+            check_run_hold(base_url, workflow_id)
+
             paused = runtime.db.create_workflow_run(
                 {
                     "workflow_definition_id": workflow_id,
@@ -302,6 +304,60 @@ def main() -> None:
             thread.join(timeout=2)
 
     print("workflow api check ok")
+
+
+def check_run_hold(base_url: str, workflow_id: str) -> None:
+    """`POST /api/workflow-runs {"hold": true}` creates the run born-paused with NO execution,
+    so input files can be attached race-free before an explicit resume starts it.
+    (Mutations: ignore `hold` in start_workflow → the run executes immediately → the
+    paused/no-nodes asserts go red; skip the isinstance guard → `"hold": "yes"` stops 400ing.)"""
+    held = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id, "hold": True})["run"]
+    assert held["state"] == "paused", held["state"]
+    # A runner wrongly spawned would flip the state and write runtime nodes almost
+    # immediately; the sleep gives that mutation time to go red, not the feature time to work.
+    time.sleep(0.3)
+    detail = request(base_url, "GET", f"/api/workflow-runs/{held['id']}")
+    assert detail["run"]["state"] == "paused", detail["run"]["state"]
+    assert detail["nodes"] == [], f"a held run must not dispatch nodes: {detail['nodes']}"
+    events = request(base_url, "GET", f"/api/workflow-runs/{held['id']}/events")["events"]
+    assert any(event["event_type"] == "run_created_held" for event in events), [e["event_type"] for e in events]
+    # files attach while held (the whole point of the hold window). 8 bytes stays under the
+    # harness's max_upload_bytes=32.
+    uploaded = request_binary(
+        base_url,
+        "POST",
+        f"/api/workflow-runs/{held['id']}/files?key=upload_brief",
+        body=b"brief!!\n",
+        headers={"X-Filename": "brief.txt", "Content-Type": "text/plain", "Content-Length": "8"},
+    )
+    assert uploaded["json"]["artifact"]["kind"] == "file_ref", uploaded["json"]
+    # a plain ASCII X-Filename passes through the RFC 3986 decode unchanged...
+    assert uploaded["json"]["artifact"]["metadata"]["filename"] == "brief.txt", uploaded["json"]
+    # ...and a percent-encoded non-ASCII one (browser fetch cannot send Thai bytes in a header,
+    # so clients MUST encode) is stored as the real decoded name. (Mutation: drop the unquote()
+    # in _upload_workflow_file → the stored name stays percent-encoded → red.)
+    thai_name = "แผนวิสาหกิจ 70-74.pdf"
+    uploaded_thai = request_binary(
+        base_url,
+        "POST",
+        f"/api/workflow-runs/{held['id']}/files?key=upload_plan_pdf",
+        body=b"pdf-like",
+        headers={
+            "X-Filename": urllib.parse.quote(thai_name),
+            "Content-Type": "application/pdf",
+            "Content-Length": "8",
+        },
+    )
+    assert uploaded_thai["json"]["artifact"]["metadata"]["filename"] == thai_name, uploaded_thai["json"]
+    # resume starts execution: the run leaves paused and reaches this graph's usual terminal
+    # state (failed — the harness has no live worker), proving the engine actually ran it.
+    resumed = request(base_url, "POST", f"/api/workflow-runs/{held['id']}/resume", {})["run"]
+    assert resumed["state"] != "paused", resumed["state"]
+    final = wait_for_api_run(base_url, held["id"], "failed")
+    assert final["state"] == "failed"
+    # a non-boolean hold is rejected up front.
+    bad = request_error(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id, "hold": "yes"})
+    assert "hold" in bad["error"], bad
 
 
 def check_milestones_3_and_4(base_url: str, workflow_id: str) -> None:

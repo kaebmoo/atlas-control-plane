@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added held runs: `POST /api/workflow-runs` accepts `"hold": true` to create a
+  born-paused run so input files can be attached race-free before an explicit
+  resume starts it (event `run_created_held`, audit `workflow.run_created_held`).
+- Added the `document_brief` bundled solution pack — a file-in/file-out demo
+  (held run → `upload_*` handoff → analyst writes `executive_brief.md` →
+  human review), plus a packs check that validates and imports every bundled
+  pack on a bare database.
+
 - Added a windowed global artifact listing endpoint, `GET /api/artifacts`, with
   truthful totals and an opt-in metadata-only view with strict selectors.
 - Added `workflow.interface` v1 as an additive input/output contract for
@@ -26,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed `push_files` intents being dropped silently on edges taken by the
+  human-gate decision path (and lost on restart mid-run): push intents now ride
+  the run's persisted counters, so a gate may sit between a collector and the
+  worker that receives its files.
 - Closed a direct `run_workflow` bypass around workflow-interface validation and
   widened coverage for interface edge cases.
 - Fixed finite-number validation to use `math.isfinite`.

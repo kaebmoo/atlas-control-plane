@@ -596,6 +596,10 @@ opt-in ต่อ workflow:
 
 - **ต้องตั้ง `policy.file_handoff`** สำหรับ edge ที่มี `push_files` — ตรวจทั้งตอน
   save (validation error) และเป็น runtime guard ปิดเป็นค่าเริ่มต้น
+- edge ที่มี `push_files` ออกจาก `human_gate` ได้ด้วย: push intent ถูกเก็บใน
+  counters ของ run (persisted) ตั้งแต่ตอน edge ถูก take จึงรอดข้ามการส่งต่อไปยัง
+  runner thread ใหม่หลังการอนุมัติ/เลือกทางที่ gate (และรอด Atlas restart กลางคัน)
+  บิลด์ก่อนหน้านี้ทำ intent ของ edge จาก gate หายเงียบ
 - `push_files` เป็นรายการ glob ของ artifact key จับกับ `file_ref` artifact ที่เก็บไว้
   (คีย์ `files.<node_key>.<relpath>`)
 - **เพิ่มอย่างเดียวและถูกจำกัดขอบเขต (additive + jailed)** Atlas ส่งไฟล์ผ่าน
@@ -667,6 +671,32 @@ node, event, job หรือ audit ใด ๆ `expected_workflow_version` (inte
 ทุกประการ response ของทุก run ที่ผูกกับ definition จะมี `interface_snapshot` และ
 `workflow_version_snapshot` เสมอ — ค่าที่ run ใช้เริ่มต้นจริง ไม่ถูกกระทบแม้ definition
 จะถูกแก้หรือลบภายหลัง
+
+### เริ่มแบบ held run (แนบไฟล์ก่อนค่อยเริ่ม)
+
+```bash
+curl -sS -X POST "$BASE_URL/api/workflow-runs" \
+  -H 'content-type: application/json' \
+  -d '{"workflow_definition_id":"wfd_xxx","input":{},"hold":true}'
+curl -sS -X POST "$BASE_URL/api/workflow-runs/wfr_xxx/files?key=upload_report" \
+  -H 'content-type: application/pdf' -H 'X-Filename: report.pdf' \
+  --data-binary @report.pdf
+curl -sS -X POST "$BASE_URL/api/workflow-runs/wfr_xxx/resume" \
+  -H 'content-type: application/json' -d '{}'
+```
+
+`"hold": true` สร้าง run ในสถานะ `paused` ตั้งแต่เกิด (event `run_created_held`,
+audit `workflow.run_created_held`) และจะไม่มีอะไรถูก execute จนกว่าจะสั่ง resume
+อย่างชัดแจ้ง — การอัปโหลดไฟล์จึงไม่มีทางแข่งกับการ dispatch node แรก ค่า `hold`
+ที่ไม่ใช่ JSON boolean จะได้ `400` การ validate interface/input และ
+`expected_workflow_version` ทำงานเหมือนการเริ่มแบบทันทีทุกประการ วิธีนี้แทนที่
+workaround เดิมที่ต้องอัปโหลดระหว่างที่ intake node ยังรันถ่วงเวลาอยู่
+
+หมายเหตุ `X-Filename`: ค่าใน HTTP header เป็น Latin-1 บนสายส่ง และ `fetch`
+ของเบราว์เซอร์จะปฏิเสธทุกไบต์ที่เกิน U+00FF — ชื่อไฟล์ที่ไม่ใช่ ASCII (เช่น
+ภาษาไทย) จึงต้องส่งแบบ percent-encoded (RFC 3986 เช่น `encodeURIComponent`)
+Atlas จะ decode กลับตอนรับและเก็บชื่อจริงไว้ใน `metadata.filename` ของ artifact
+ส่วนชื่อ ASCII ล้วนที่ไม่มี `%XX` จะผ่านโดยไม่เปลี่ยนแปลง
 
 Filter list:
 

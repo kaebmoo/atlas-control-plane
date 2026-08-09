@@ -15,7 +15,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import __version__
 from .auth import LoginRateLimiter
@@ -839,10 +839,16 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     # creating a run that fails asynchronously once the engine touches it.
                     # Normalize only missing/None — a falsy non-object ([], "", 0) is rejected.
                     raise ValueError("input must be an object")
+                hold = payload.get("hold", False)
+                if not isinstance(hold, bool):
+                    # Additive flag: absent/False keeps the exact legacy start-immediately
+                    # behavior; anything but a JSON boolean is rejected up front.
+                    raise ValueError("hold must be a boolean")
                 run = runtime.workflows.start_workflow(
                     workflow_definition_id,
                     run_input,
                     expected_workflow_version=payload.get("expected_workflow_version"),
+                    hold=hold,
                 )
                 self._json({"run": run}, HTTPStatus.ACCEPTED)
                 return
@@ -1135,7 +1141,13 @@ class AtlasHandler(BaseHTTPRequestHandler):
             raise ValueError("Content-Length must be an integer") from exc
         if length < 0 or length > runtime.config.max_upload_bytes:
             raise ValueError(f"file upload exceeds maximum of {runtime.config.max_upload_bytes} bytes")
-        filename = _safe_download_filename(self.headers.get("X-Filename") or "upload.bin")
+        # HTTP header values are Latin-1 on the wire, and browser fetch()/undici refuse to send
+        # anything above U+00FF at all — so a client with a non-ASCII filename (Thai, emoji, …)
+        # MUST percent-encode it (RFC 3986, e.g. encodeURIComponent) and this side decodes.
+        # unquote() leaves invalid %-sequences untouched, so a plain ASCII name passes through
+        # unchanged; the documented trade-off is that a literal name containing a VALID %XX
+        # escape (rare) is decoded once.
+        filename = _safe_download_filename(unquote(self.headers.get("X-Filename") or "upload.bin"))
         media_type = (self.headers.get("Content-Type") or "application/octet-stream").split(";", 1)[0].strip()
         opaque_id = new_id("file")
         target = runtime.upload_dir / opaque_id

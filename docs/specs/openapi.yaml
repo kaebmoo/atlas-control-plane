@@ -1105,6 +1105,16 @@ paths:
                     same definition row loaded for this run (docs/adr/0002). A boolean is
                     rejected (not an integer). A mismatch returns 409 and creates no run.
                     Direct-start only — trigger fire does not accept this field in v1.
+                hold:
+                  type: boolean
+                  default: false
+                  description: >-
+                    When true the run is created born-paused (state `paused`) and does
+                    not execute until an explicit `POST /api/workflow-runs/{run_id}/resume`.
+                    The hold window lets callers attach input files
+                    (`POST /api/workflow-runs/{run_id}/files`) race-free before the first
+                    node dispatches. Anything but a JSON boolean is a 400. Absent/false
+                    keeps exact legacy start-immediately behavior.
       responses:
         '202':
           description: Run accepted
@@ -1181,6 +1191,12 @@ paths:
         in: header
         required: false
         schema: {type: string}
+        description: >-
+          Display filename stored in the artifact's metadata. Header values are
+          Latin-1 on the wire (and browser fetch refuses anything above U+00FF),
+          so a non-ASCII filename (e.g. Thai) MUST be sent percent-encoded
+          (RFC 3986, e.g. encodeURIComponent); Atlas percent-decodes on receipt.
+          A plain ASCII name without %XX escapes passes through unchanged.
       - name: Content-Length
         in: header
         required: true

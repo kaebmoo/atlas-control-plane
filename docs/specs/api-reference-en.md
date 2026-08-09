@@ -625,6 +625,10 @@ text. Opt-in per workflow:
 
 - **`policy.file_handoff` is required** for any edge `push_files` — enforced at
   save time (validation error) AND as a runtime guard. Off by default.
+- A `push_files` edge may also leave a `human_gate`: the push intent is stored
+  in the run's persisted counters when the edge is taken, so it survives the
+  gate's approve/choice handoff to a fresh runner thread (and an Atlas restart
+  mid-run). Earlier builds dropped gate-edge push intents silently.
 - `push_files` is a list of artifact-key glob patterns, matched against the run's
   collected `file_ref` artifacts (keyed `files.<node_key>.<relpath>`).
 - **Additive and jailed.** Atlas sends the files through the worker's
@@ -705,6 +709,33 @@ A workflow without an interface, or a request that omits
 definition-backed run's response includes `interface_snapshot` and
 `workflow_version_snapshot` — the values the run actually started with,
 immune to a later edit or delete of the definition.
+
+### Start a held run (attach files first)
+
+```bash
+curl -sS -X POST "$BASE_URL/api/workflow-runs" \
+  -H 'content-type: application/json' \
+  -d '{"workflow_definition_id":"wfd_xxx","input":{},"hold":true}'
+curl -sS -X POST "$BASE_URL/api/workflow-runs/wfr_xxx/files?key=upload_report" \
+  -H 'content-type: application/pdf' -H 'X-Filename: report.pdf' \
+  --data-binary @report.pdf
+curl -sS -X POST "$BASE_URL/api/workflow-runs/wfr_xxx/resume" \
+  -H 'content-type: application/json' -d '{}'
+```
+
+`"hold": true` creates the run born-paused (state `paused`, event
+`run_created_held`, audit `workflow.run_created_held`) and nothing executes
+until the explicit resume — so file uploads can never race the first node's
+dispatch. Anything but a JSON boolean for `hold` is a `400`. Interface/input
+validation and `expected_workflow_version` behave exactly as for an immediate
+start. This replaces the earlier workaround of uploading while a long-running
+intake node buys time.
+
+`X-Filename` note: header values are Latin-1 on the wire, and browser `fetch`
+refuses any header byte above U+00FF — so a non-ASCII filename (Thai, emoji)
+must be sent percent-encoded (RFC 3986, e.g. `encodeURIComponent`). Atlas
+percent-decodes on receipt and stores the real name in the artifact's
+`metadata.filename`; a plain ASCII name without `%XX` escapes is unchanged.
 
 Filter the list:
 

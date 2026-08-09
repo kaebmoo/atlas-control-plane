@@ -165,6 +165,24 @@ def main() -> None:
     gov = next(entry for entry in list_available_packs() if entry.get("name") == "gov_complaint")
     assert gov["signed"] is False, gov
 
+    # EVERY bundled pack must validate AND import cleanly on a bare database — a shipped pack
+    # that only fails at customer-import time is exactly the regression this guards against.
+    # (Mutation: break a bundled pack's graph/policy → validate/import raises → red.)
+    bundled = sorted(PACKS_DIR.glob("*.json"))
+    assert bundled, "no bundled packs found"
+    for pack_path in bundled:
+        bundle = validate_pack(load_pack_file(pack_path))
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "atlas.sqlite")
+            imported = import_pack(db, bundle)
+            assert imported["workflows"], f"{pack_path.name}: imported no workflows"
+    # The file-handoff demo pack ships with the flags its docs promise.
+    brief = load_pack_file(PACKS_DIR / "document_brief.json")
+    brief_wf = brief["workflows"][0]
+    assert brief_wf["policy"]["file_handoff"] is True, brief_wf["policy"]
+    assert any(edge.get("push_files") == ["upload_*"] for edge in brief_wf["graph"]["edges"]), brief_wf["graph"]["edges"]
+    assert any(node.get("collect_files") for node in brief_wf["graph"]["nodes"]), brief_wf["graph"]["nodes"]
+
     # 5. Invalid packs are rejected with clear errors.
     assert_rejected({"name": "x", "version": "1", "workflows": []}, "schema_version must be 1")
     assert_rejected({"schema_version": 1, "version": "1", "workflows": [{"name": "n", "graph": {}}]}, "non-empty name")

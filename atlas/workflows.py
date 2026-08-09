@@ -438,6 +438,7 @@ class WorkflowRunner:
         workflow_definition_id: str,
         input: dict[str, Any] | None = None,
         expected_workflow_version: int | None = None,
+        hold: bool = False,
     ) -> dict[str, Any]:
         # expected_workflow_version is a DIRECT-START-ONLY guard (never passed by trigger
         # fire — v1 does not add a trigger-side version pin, docs/adr/0002). Loaded and
@@ -475,8 +476,18 @@ class WorkflowRunner:
             definition.get("name") or "Workflow run",
             interface=interface,
             workflow_version=definition.get("version"),
+            # A held run is born paused and NEVER executes until an explicit resume — the
+            # window exists so callers can attach input files (POST /api/workflow-runs/{id}/files)
+            # race-free before the first node dispatches. Born-paused (not running-then-paused)
+            # so no runner thread can win a race with the state flip, and reconcile_runs
+            # (which skips paused) never adopts it after a restart.
+            state="paused" if hold else "running",
         )
         _audit_input_provenance(self.db, run["id"], input)
+        if hold:
+            self.db.append_workflow_event(run["id"], "run_created_held")
+            self.db.audit("workflow.run_created_held", "workflow_run", run["id"], {})
+            return self.db.get_workflow_run(run["id"]) or run
         self._start_background(run["id"], graph, policy, input)
         return self.db.get_workflow_run(run["id"]) or run
 
@@ -770,6 +781,15 @@ class WorkflowRunner:
             )
             if result["matched"]:
                 self.db.append_workflow_edge(run["id"], edge["from"], edge["to"], result)
+                if edge.get("push_files"):
+                    # T9b: carry the push intent across the gate. This path schedules downstream
+                    # nodes on the API thread and resumes execution on a fresh runner thread, so
+                    # the intent must ride the persisted counters (written below via
+                    # update_workflow_run) — an in-memory stash would be dropped silently and the
+                    # downstream node would start without its files.
+                    counters.setdefault("pending_pushes", {}).setdefault(edge["to"], []).append(
+                        {"from": approval["node_key"], "push_files": edge["push_files"]}
+                    )
                 _schedule_node(edge, ready, completed, completed_nodes, node_map, join_states, cycle_edges)
         self.db.update_workflow_node(runtime_node["id"], state="succeeded", finished_at=now_iso())
         self.db.append_workflow_event(
@@ -842,12 +862,13 @@ class WorkflowRunner:
         name: str,
         interface: dict[str, Any] | None = None,
         workflow_version: int | None = None,
+        state: str = "running",
     ) -> dict[str, Any]:
         return self.db.create_workflow_run(
             {
                 "workflow_definition_id": workflow_definition_id,
                 "name": name,
-                "state": "running",
+                "state": state,
                 "input": input,
                 "current_nodes": [graph["start"]],
                 # Snapshot the graph+policy+interface+version this run starts on, so
@@ -929,13 +950,17 @@ class WorkflowRunner:
         if not run:
             raise ValueError(f"Unknown workflow_run_id: {run_id}")
         ready = list(run.get("current_nodes") or [])
-        # T6 file handoff: when an edge carrying push_files is TAKEN, stash its intent keyed by
-        # the target node; the target consumes it just before its job is created. In-memory for
-        # this execution pass (edge-taken and node-run happen in the same pass); a restart mid-run
-        # follows the standard explicit-recovery rule (re-running re-takes the edge and re-pushes).
-        pending_pushes: dict[str, list[dict[str, Any]]] = {}
         artifacts = self._load_artifacts(run_id)
         counters = run.get("counters") or {"jobs_started": 0, "node_counts": {}}
+        # T6/T9b file handoff: when an edge carrying push_files is TAKEN, stash its intent keyed
+        # by the target node; the target consumes it just before its job is created. The stash
+        # lives in the run's persisted counters (flushed with every counters write, e.g.
+        # _wait_for_human and _reserve_and_submit_job), NOT in a per-thread local: the human-gate
+        # decision path takes edges on the API thread and resumes on a FRESH runner thread, and a
+        # restart mid-run re-loads counters — an in-memory-only stash was dropped silently in
+        # both cases. Consumption (`pop` at dispatch) mutates this same dict, so the next
+        # counters write persists the intent as consumed.
+        pending_pushes: dict[str, list[dict[str, Any]]] = counters.setdefault("pending_pushes", {})
         counters.setdefault("jobs_started", 0)
         counters.setdefault("budget_units_spent", 0)
         counters.setdefault("node_counts", {})

@@ -192,6 +192,57 @@ def _graph(a_id: str, b_id: str, push_files=("files.collector.*",)) -> dict:
     }
 
 
+def _gate_graph(a_id: str, b_id: str) -> dict:
+    return {
+        "start": "collector",
+        "nodes": [
+            {"id": "collector", "type": "worker", "worker_id": a_id, "prompt": "produce", "collect_files": ["out.md"]},
+            {"id": "gate", "type": "human_gate", "reason": "review the collected file"},
+            {"id": "consumer", "type": "worker", "worker_id": b_id, "prompt": "consume files at {files_dir}"},
+        ],
+        "edges": [
+            {"from": "collector", "to": "gate"},
+            {"from": "gate", "to": "consumer", "push_files": ["files.collector.*"]},
+        ],
+    }
+
+
+def check_gate_edge_preserves_push_intent(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
+    # A push_files edge LEAVING a human_gate must still deliver files. The gate decision path
+    # takes edges on the API thread and resumes on a FRESH runner thread, so the intent must
+    # ride the persisted counters. (Mutation: drop the pending_pushes stash in
+    # _continue_human_gate_decision, or revert _execute_run's pending_pushes to a plain `{}`
+    # local -> the consumer starts with no push -> red.)
+    _reset_b()
+    policy = {"file_handoff": True, "allowed_worker_ids": [a_id, b_id], "max_jobs": 10}
+    run = runtime.workflows.run_graph(_gate_graph(a_id, b_id), policy)
+    assert run["state"] == "waiting_for_human", run["state"]
+    assert WorkerB.push_calls == 0, "no push may happen before the human decision"
+    approvals = [row for row in runtime.db.list_approvals(run_id=run["id"]) if row["state"] == "pending"]
+    assert len(approvals) == 1, approvals
+    runtime.workflows.approve_approval(approvals[0]["id"])
+    deadline = time.monotonic() + 20
+    row = None
+    while time.monotonic() < deadline:
+        row = runtime.db.get_workflow_run(run["id"])
+        if row and row["state"] in {"succeeded", "failed", "cancelled"}:
+            break
+        time.sleep(0.05)
+    assert row and row["state"] == "succeeded", (row or {}).get("error") or (row or {}).get("state")
+    assert WorkerB.push_calls == 1, WorkerB.push_calls
+    dest = f"inputs/incoming/{run['id']}/consumer/out.md"
+    assert dest in WorkerB.received, list(WorkerB.received)
+    assert WorkerB.received[dest] == A_FILE, "bytes pushed across the gate must be byte-identical"
+    # the consumer job's prompt carries {files_dir} substituted to the inputs prefix.
+    consumer_node = next(n for n in runtime.db.list_workflow_nodes(run["id"]) if n["node_key"] == "consumer")
+    consumer_job = runtime.db.get_job(consumer_node["job_id"])
+    assert f"inputs/incoming/{run['id']}/consumer" in consumer_job["prompt"], consumer_job["prompt"]
+    # the consumed intent must not linger in the persisted counters (pop persists as consumed).
+    lingering = ((row.get("counters") or {}).get("pending_pushes") or {}).get("consumer")
+    assert not lingering, f"consumed push intent still persisted: {lingering}"
+    print("  human-gate edge preserves push intent across the runner handoff OK")
+
+
 def check_end_to_end(runtime: AtlasRuntime, a_id: str, b_id: str) -> None:
     _reset_b()
     policy = {"file_handoff": True, "allowed_worker_ids": [a_id, b_id], "max_jobs": 10}
@@ -595,6 +646,7 @@ def main() -> None:
 
         try:
             check_end_to_end(runtime, worker_a["id"], worker_b["id"])
+            check_gate_edge_preserves_push_intent(runtime, worker_a["id"], worker_b["id"])
             check_validation_no_policy(worker_a["id"], worker_b["id"])
             check_runtime_guard(runtime, worker_a["id"], worker_b["id"])
             check_push_failure_fails_edge(runtime, worker_a["id"], worker_b["id"])
