@@ -429,6 +429,26 @@ local SHA-256 before it is stored as a `file_ref` artifact:
   Counts only, never a file list — the audit rule holds here too. A standalone
   job is unchanged: job timeline and audit only.
 
+#### Strict collection (`collect_required`)
+
+Collection is failure-isolated, so by default a node whose collection fails
+still completes and the run can close green with no files. A workflow
+worker/manager node can opt into strict mode instead:
+
+```json
+{"id": "analyst", "type": "worker", "collect_files": ["executive_brief.md"], "collect_required": true}
+```
+
+- If the job finishes and **no** `file_ref` artifact keyed `files.<node_key>.*`
+  exists for it, the NODE fails with `declared collect_files produced no
+  artifacts (collection failed or matched nothing)` and the run follows the
+  normal node-failure rules (`stop_on_first_failure`, `failure_summary`).
+- The JOB still reaches `succeeded` — collection never changes a job's outcome.
+  Strictness is enforced at the workflow layer, above that guarantee.
+- Boolean only; allowed solely on a node that also declares `collect_files`
+  (otherwise a save-time validation error). Default `false` is exactly the
+  previous behavior.
+
 ### Handoff
 
 ```json

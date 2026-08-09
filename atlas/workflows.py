@@ -219,6 +219,14 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
                 _validate_collect_files(node["collect_files"], artifact_max_files_cap())
             except ValueError as exc:
                 raise ValueError(f"workflow node {node_id} {exc}") from exc
+        if "collect_required" in node:
+            # Opt-in strict collection. Only meaningful next to a collection declaration, so
+            # the key without collect_files is a save-time error instead of a setting that
+            # silently does nothing. Default (absent) is exactly the legacy behavior.
+            if not isinstance(node["collect_required"], bool):
+                raise ValueError(f"workflow node {node_id} collect_required must be a boolean")
+            if not node.get("collect_files"):
+                raise ValueError(f"workflow node {node_id} collect_required requires collect_files")
 
     start = graph.get("start")
     if not isinstance(start, str) or not start.strip():
@@ -1165,6 +1173,8 @@ class WorkflowRunner:
                         counters["jobs_started"] += 1
                         if job["state"] != "succeeded":
                             raise ValueError(f"workflow node {node_key} job {job['id']} ended as {job['state']}")
+                        if node.get("collect_required"):
+                            self._require_collected_files(job["id"], node_key)
                         if node_type == "manager":
                             manager_decision = self._validate_manager_decision(
                                 run,
@@ -1529,6 +1539,24 @@ class WorkflowRunner:
             node_key=node["id"],
         )
         return job
+
+    def _require_collected_files(self, job_id: str, node_key: str) -> None:
+        """Enforce a node's opt-in `collect_required`. Deliberately at the WORKFLOW layer: jobs.py
+        keeps its guarantee that collection never changes the JOB outcome (threat model, T9a), so
+        the job stays `succeeded` and only the NODE fails — the run then follows the ordinary
+        node-failure rules (stop_on_first_failure / failure_summary). 256 is the T9a per-job
+        artifact cap; this is an existence probe, not a listing."""
+        prefix = f"files.{node_key}."
+        collected = [
+            artifact
+            for artifact in self.db.list_artifacts(job_id=job_id, kind="file_ref", limit=256)
+            if str(artifact.get("key") or "").startswith(prefix)
+        ]
+        if not collected:
+            raise ValueError(
+                f"workflow node {node_key} declared collect_files produced no artifacts "
+                "(collection failed or matched nothing)"
+            )
 
     def _push_files_to_worker(
         self,

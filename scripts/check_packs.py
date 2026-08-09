@@ -182,6 +182,9 @@ def main() -> None:
     assert brief_wf["policy"]["file_handoff"] is True, brief_wf["policy"]
     assert any(edge.get("push_files") == ["upload_*"] for edge in brief_wf["graph"]["edges"]), brief_wf["graph"]["edges"]
     assert any(node.get("collect_files") for node in brief_wf["graph"]["nodes"]), brief_wf["graph"]["nodes"]
+    # The demo must fail loudly, not close green with no brief: the collecting node is strict.
+    analyst = next(node for node in brief_wf["graph"]["nodes"] if node["id"] == "analyst")
+    assert analyst.get("collect_required") is True, analyst
 
     # 5. Invalid packs are rejected with clear errors.
     assert_rejected({"name": "x", "version": "1", "workflows": []}, "schema_version must be 1")

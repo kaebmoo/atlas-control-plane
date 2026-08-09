@@ -272,6 +272,38 @@ def collection_visible_on_run(runtime: AtlasRuntime, worker_id: str) -> None:
     print("  workflow node collection success/failure mirrored onto the run timeline OK")
 
 
+def collect_required_fails_the_node(runtime: AtlasRuntime, worker_id: str) -> None:
+    """`collect_required` is the opt-in strict mode: a declared collection that produces no
+    artifact fails the NODE with a clear error, while the JOB still succeeds — jobs.py keeps its
+    "collection never changes the job outcome" guarantee (threat model, T9a). (Mutation: drop the
+    _require_collected_files call in workflows.py -> the run goes back to succeeded -> red.)"""
+    policy = {"allowed_worker_ids": [worker_id], "max_jobs": 5}
+    cases: dict[str, Any] = {
+        # collection FAILED (integrity mismatch): nothing published.
+        "collection failed": {"snapshot": [("out/report.txt", b"FROZEN")], "body": (b"CHANGED", hashlib.sha256(b"FROZEN").hexdigest())},
+        # collection SUCCEEDED but matched nothing: a valid empty manifest, count 0.
+        "matched nothing": {"snapshot": [], "body": None},
+    }
+    for label, case in cases.items():
+        MockArtifactsWorker.reset()
+        MockArtifactsWorker.snapshots["sess-first"] = case["snapshot"]
+        MockArtifactsWorker.body_override = case["body"]
+        run = runtime.workflows.run_graph(_collect_graph(worker_id, required=True), policy)
+        assert run["state"] == "failed", (label, run["state"])
+        assert "produced no artifacts" in (run.get("error") or ""), (label, run.get("error"))
+        node = runtime.db.list_workflow_nodes(run["id"])[0]
+        assert node["state"] == "failed", (label, node["state"])
+        assert "declared collect_files produced no artifacts" in (node.get("error") or ""), (label, node.get("error"))
+        assert runtime.db.get_job(node["job_id"])["state"] == "succeeded", f"{label}: collection changed the JOB outcome"
+        assert _run_events(runtime, run["id"], "node_failed"), label
+    # Positive control: the same strict node passes when the file really comes back.
+    MockArtifactsWorker.reset()
+    MockArtifactsWorker.snapshots["sess-first"] = [("out/report.txt", b"FROZEN")]
+    ok = runtime.workflows.run_graph(_collect_graph(worker_id, required=True), policy)
+    assert ok["state"] == "succeeded", ok
+    print("  collect_required fails the node (job still succeeded) on failed/empty collection OK")
+
+
 def no_collection_no_artifact_api(runtime: AtlasRuntime, worker_id: str) -> None:
     MockArtifactsWorker.reset()
     job = submit(runtime, worker_id)
@@ -472,6 +504,7 @@ def main() -> None:
             job_artifacts_route(runtime, api_base, worker_id)
             no_collection_no_artifact_api(runtime, worker_id)
             collection_visible_on_run(runtime, worker_id)
+            collect_required_fails_the_node(runtime, worker_id)
             malformed_and_integrity(runtime, worker_id)
             caps_and_old_worker(runtime, worker_id)
             callback_contract(runtime, worker_id)

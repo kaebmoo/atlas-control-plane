@@ -411,6 +411,25 @@ POSIX normalization, relative path ที่ปลอดภัย (รวมถ�
   เก็บเฉพาะจำนวน ไม่มีรายชื่อไฟล์ — กติกาเดียวกับ audit ส่วน job เดี่ยวที่ไม่ใช่ของ
   workflow พฤติกรรมเหมือนเดิมทุกประการ (มีแค่ job timeline กับ audit)
 
+#### Strict collection (`collect_required`)
+
+เนื่องจากการเก็บไฟล์แยกความล้มเหลวออกจากผลของ job ค่าเริ่มต้นคือ node ที่เก็บไฟล์ไม่สำเร็จ
+ก็ยังผ่าน และ run ปิดเขียวได้ทั้งที่ไม่มีไฟล์เลย workflow node แบบ worker/manager
+เลือกโหมดเข้มได้:
+
+```json
+{"id": "analyst", "type": "worker", "collect_files": ["executive_brief.md"], "collect_required": true}
+```
+
+- ถ้า job จบแล้วแต่**ไม่มี** `file_ref` artifact ที่คีย์ `files.<node_key>.*` ของ job นั้น
+  NODE จะ fail ด้วยข้อความ `declared collect_files produced no artifacts (collection
+  failed or matched nothing)` แล้ว run เดินตามกติกา node ล้มเหลวปกติ
+  (`stop_on_first_failure`, `failure_summary`)
+- ตัว JOB ยังเป็น `succeeded` เสมอ — การเก็บไฟล์ไม่เคยเปลี่ยนผลของ job ความเข้มงวดนี้
+  บังคับที่ชั้น workflow ซึ่งอยู่เหนือหลักประกันดังกล่าว
+- ต้องเป็น boolean และใส่ได้เฉพาะ node ที่ประกาศ `collect_files` ด้วย (ไม่เช่นนั้นเป็น
+  validation error ตอน save) ค่าเริ่มต้น `false` = พฤติกรรมเดิมเป๊ะ
+
 ### Handoff
 
 ```json

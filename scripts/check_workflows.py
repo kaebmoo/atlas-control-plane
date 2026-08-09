@@ -56,6 +56,26 @@ def main() -> None:
         {},
     )
 
+    # collect_required: opt-in strict collection, additive and only meaningful with collect_files.
+    # (Mutation: drop either guard in validate_workflow_graph -> a bad graph saves clean -> red.)
+    collector = {"id": "gather", "type": "worker", "collect_files": ["out.md"]}
+    strict = {"start": "gather", "nodes": [dict(collector, collect_required=True)], "edges": []}
+    assert validate_workflow_graph(strict, {}) is strict
+    lenient = {"start": "gather", "nodes": [dict(collector)], "edges": []}
+    assert validate_workflow_graph(lenient, {}) is lenient
+    assert_raises(
+        "collect_required must be a boolean",
+        validate_workflow_graph,
+        {"start": "gather", "nodes": [dict(collector, collect_required="yes")], "edges": []},
+        {},
+    )
+    assert_raises(
+        "collect_required requires collect_files",
+        validate_workflow_graph,
+        {"start": "gather", "nodes": [{"id": "gather", "type": "worker", "collect_required": True}], "edges": []},
+        {},
+    )
+
     bad_artifact_condition = dict(graph, edges=[{"from": "reporter", "to": "anchor", "condition": {"type": "artifact_equals"}}])
     assert_raises("artifact_equals requires artifact", validate_workflow_graph, bad_artifact_condition, {})
 

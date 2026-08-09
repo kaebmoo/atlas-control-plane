@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   human review), plus a packs check that validates and imports every bundled
   pack on a bare database.
 
+- Added the node field `collect_required` (boolean, default `false`): a workflow
+  worker/manager node that declares `collect_files` can now fail the NODE when
+  the collection produced no artifact, instead of completing silently with no
+  files. The job itself still succeeds — collection never changes a job outcome.
+  Requires `collect_files`; the `document_brief` pack's analyst node uses it.
 - Added a windowed global artifact listing endpoint, `GET /api/artifacts`, with
   truthful totals and an opt-in metadata-only view with strict selectors.
 - Added `workflow.interface` v1 as an additive input/output contract for
