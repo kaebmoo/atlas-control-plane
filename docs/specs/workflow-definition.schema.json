@@ -144,6 +144,11 @@
           "type": "array",
           "items": {"type": "string"},
           "description": "T9a: bounded relative glob patterns forwarded to thClaws Job Artifacts"
+        },
+        "collect_required": {
+          "type": "boolean",
+          "default": false,
+          "description": "Strict collection: fail this NODE when the declared collect_files produced no artifact (collection failed or matched nothing). Requires collect_files, and is valid only on worker/manager nodes. The job itself still succeeds."
         }
       }
     },
@@ -173,6 +178,11 @@
           "type": "array",
           "items": {"type": "string"},
           "description": "T9a: bounded relative glob patterns forwarded to thClaws Job Artifacts"
+        },
+        "collect_required": {
+          "type": "boolean",
+          "default": false,
+          "description": "Strict collection: fail this NODE when the declared collect_files produced no artifact (collection failed or matched nothing). Requires collect_files, and is valid only on worker/manager nodes. The job itself still succeeds."
         }
       }
     },

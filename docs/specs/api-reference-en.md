@@ -421,6 +421,34 @@ local SHA-256 before it is stored as a `file_ref` artifact:
   without `collect_files` makes no Artifact API request. Callback collection
   runs outside the terminal DB transaction and continued sessions are
   serialized by a durable worker/workspace/session lease.
+- **Visible at run level.** When the job belongs to a workflow node, the same
+  outcome is mirrored onto the run timeline (`GET
+  /api/workflow-runs/{id}/events`) tagged with the node key: `files.collected`
+  with `{count, requested}`, or `files.collection_failed` with `{error,
+  requested}` (the error is the token-redacted one from the job timeline).
+  Counts only, never a file list — the audit rule holds here too. A standalone
+  job is unchanged: job timeline and audit only.
+
+#### Strict collection (`collect_required`)
+
+Collection is failure-isolated, so by default a node whose collection fails
+still completes and the run can close green with no files. A workflow
+worker/manager node can opt into strict mode instead:
+
+```json
+{"id": "analyst", "type": "worker", "collect_files": ["executive_brief.md"], "collect_required": true}
+```
+
+- If the job finishes and **no** `file_ref` artifact keyed `files.<node_key>.*`
+  exists for it, the NODE fails with `declared collect_files produced no
+  artifacts (collection failed or matched nothing)` and the run follows the
+  normal node-failure rules (`stop_on_first_failure`, `failure_summary`).
+- The JOB still reaches `succeeded` — collection never changes a job's outcome.
+  Strictness is enforced at the workflow layer, above that guarantee.
+- Boolean only; allowed solely on a `worker`/`manager` node that also declares
+  `collect_files` (otherwise a save-time validation error) — no other node type
+  ever runs a job, so none can collect. Default `false` is exactly the previous
+  behavior.
 
 ### Handoff
 
@@ -529,6 +557,16 @@ treated as `{}`). `DELETE` removes the definition and its triggers. Historical r
 remain, while their `workflow_definition_id` may become null according to the
 foreign-key behavior.
 
+Create, update, and validation responses include a top-level `warnings` array. For
+backward compatibility, `collect_files` on a non-`worker`/`manager` node is still
+accepted so an older graph can be saved, but it is ignored at runtime; move the field
+to a job node if file collection is intended. `POST /api/packs/import` returns the
+same array so importing is not a quieter way in — its lines are prefixed with the
+workflow name, since one bundle can hold several. Read responses carry it too,
+inside each definition (`GET /api/workflows`, `GET /api/workflows/{id}`), computed
+per read and ignored by write paths; the ops console uses that to flag the run of a
+workflow whose declared setting does nothing.
+
 For a visual editor, send the version the client loaded as `expected_version`
 (and do not also send `version`). A matching save increments the definition's
 version atomically; a stale concurrent save returns `409`, so the editor can
@@ -625,6 +663,10 @@ text. Opt-in per workflow:
 
 - **`policy.file_handoff` is required** for any edge `push_files` — enforced at
   save time (validation error) AND as a runtime guard. Off by default.
+- A `push_files` edge may also leave a `human_gate`: the push intent is stored
+  in the run's persisted counters when the edge is taken, so it survives the
+  gate's approve/choice handoff to a fresh runner thread (and an Atlas restart
+  mid-run). Earlier builds dropped gate-edge push intents silently.
 - `push_files` is a list of artifact-key glob patterns, matched against the run's
   collected `file_ref` artifacts (keyed `files.<node_key>.<relpath>`).
 - **Additive and jailed.** Atlas sends the files through the worker's
@@ -705,6 +747,33 @@ A workflow without an interface, or a request that omits
 definition-backed run's response includes `interface_snapshot` and
 `workflow_version_snapshot` — the values the run actually started with,
 immune to a later edit or delete of the definition.
+
+### Start a held run (attach files first)
+
+```bash
+curl -sS -X POST "$BASE_URL/api/workflow-runs" \
+  -H 'content-type: application/json' \
+  -d '{"workflow_definition_id":"wfd_xxx","input":{},"hold":true}'
+curl -sS -X POST "$BASE_URL/api/workflow-runs/wfr_xxx/files?key=upload_report" \
+  -H 'content-type: application/pdf' -H 'X-Filename: report.pdf' \
+  --data-binary @report.pdf
+curl -sS -X POST "$BASE_URL/api/workflow-runs/wfr_xxx/resume" \
+  -H 'content-type: application/json' -d '{}'
+```
+
+`"hold": true` creates the run born-paused (state `paused`, event
+`run_created_held`, audit `workflow.run_created_held`) and nothing executes
+until the explicit resume — so file uploads can never race the first node's
+dispatch. Anything but a JSON boolean for `hold` is a `400`. Interface/input
+validation and `expected_workflow_version` behave exactly as for an immediate
+start. This replaces the earlier workaround of uploading while a long-running
+intake node buys time.
+
+`X-Filename` note: header values are Latin-1 on the wire, and browser `fetch`
+refuses any header byte above U+00FF — so a non-ASCII filename (Thai, emoji)
+must be sent percent-encoded (RFC 3986, e.g. `encodeURIComponent`). Atlas
+percent-decodes on receipt and stores the real name in the artifact's
+`metadata.filename`; a plain ASCII name without `%XX` escapes is unchanged.
 
 Filter the list:
 
@@ -803,6 +872,14 @@ curl -sS -X POST "$BASE_URL/api/workflow-runs/wfr_xxx/files?key=contract" \
 - Default limit is 10 MiB, configurable through `ATLAS_MAX_UPLOAD_BYTES`.
 - The response is a `file_ref` with filename, media_type, size, and SHA-256.
 - Upload ties a file to the run; it does not place it in a worker workspace, and workers do not read it automatically.
+- **The run must not have finished.** A run in a terminal state (`succeeded`,
+  `failed`, `cancelled`) returns `409` and stores nothing: the file could never
+  be pushed to a worker or read by a node, so a `201` there would only leave a
+  stranded artifact that looks like a successful attachment. Every non-terminal
+  state (including `paused` and `waiting_for_human`) still accepts uploads —
+  attach files while the run is held, then resume. The check is re-applied
+  atomically with the artifact insert, so cancelling (or finishing) a run while
+  its body is still streaming in also returns `409` and leaves nothing behind.
 
 Download:
 

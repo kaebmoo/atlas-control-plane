@@ -9,6 +9,7 @@ import math
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -363,7 +364,19 @@ class JobManager:
         self._reaper_stop: threading.Event | None = None
         self._reaper_thread: threading.Thread | None = None
 
-    def submit(self, payload: dict[str, Any], *, explicit_id: str | None = None) -> dict[str, Any]:
+    def submit(
+        self,
+        payload: dict[str, Any],
+        *,
+        explicit_id: str | None = None,
+        on_created: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        # on_created runs with the created job row AFTER it exists but BEFORE dispatch starts, so
+        # a caller can bind its own row to the job while nothing can observe the job yet. The
+        # workflow layer uses it for the node→job link: a worker that finished before that link
+        # landed had no workflow context, so its collected files were keyed `files.<relpath>`
+        # with a NULL run_id instead of `files.<node_key>.<relpath>` on the run. Keyword-only for
+        # the same reason as explicit_id — never taken from the request body.
         # explicit_id is a PRIVATE parameter (keyword-only, never read from `payload`): it lets
         # the handoff path pass a deterministic child id for idempotent recovery. It must NOT
         # come from the request body — POST /api/jobs passes the body straight here, so honoring
@@ -453,6 +466,8 @@ class JobManager:
                     "workspace_id": handoff.get("workspace_id"),
                 },
             )
+        if on_created is not None:
+            on_created(job)
         self._start_thread(job["id"])
         return self.db.get_job(job["id"]) or job
 
@@ -735,6 +750,10 @@ class JobManager:
                 collection_complete=bool(job.get("collect_files")),
             )
             if final == "succeeded":
+                # Mirror only once the rows are actually published — the loser of a terminal
+                # race publishes nothing and must not announce files on the run timeline.
+                if collected:
+                    self._mirror_collection_to_run(job_id, "files.collected", collected.event)
                 self._maybe_start_handoff(job_id)
             elif final is None:
                 # Lost the terminal race: apply's early return cleared neither our
@@ -1092,6 +1111,8 @@ class JobManager:
                 self._maybe_start_handoff(job_id)
             return {"applied": False, "state": current.get("state")}
         if final_state == "succeeded":
+            if collected:
+                self._mirror_collection_to_run(job_id, "files.collected", collected.event)
             self._maybe_start_handoff(job_id)
         return {"applied": True, "state": final_state}
 
@@ -1403,6 +1424,27 @@ class JobManager:
         self.db.append_job_event(job_id, event_type, payload)
         audit_details = {key: value for key, value in payload.items() if key != "files"}
         self.db.audit(event_type, "job", job_id, audit_details)
+        self._mirror_collection_to_run(job_id, event_type, payload)
+
+    def _mirror_collection_to_run(self, job_id: str, event_type: str, payload: dict[str, Any]) -> None:
+        """Raise a collection outcome onto the RUN timeline when the job belongs to a workflow
+        node. A job-timeline-only event is invisible to anyone watching the run: a live E2E run
+        showed a node's collection failing while the run reported nothing but success. Same
+        projection as the audit row (counts only, never the file list), and best-effort by
+        design — mirroring must never change the job outcome (T9a failure isolation)."""
+        try:
+            context = self.db.workflow_context_for_job(job_id)
+            run_id = context.get("run_id")
+            if not run_id:
+                return
+            self.db.append_workflow_event(
+                run_id,
+                event_type,
+                {key: value for key, value in payload.items() if key != "files"},
+                node_key=context.get("node_key"),
+            )
+        except Exception:
+            LOGGER.exception("failed to mirror %s onto the run timeline for job %s", event_type, job_id)
 
     def _maybe_start_handoff(self, source_job_id: str) -> None:
         # Serialize the check-then-submit under the manager lock with a re-read INSIDE it: two

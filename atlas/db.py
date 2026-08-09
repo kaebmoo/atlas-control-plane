@@ -24,6 +24,9 @@ ARTIFACT_KINDS = frozenset({"text", "json", "markdown", "file_ref", "summary", "
 # validated at the single create path so every creator gets the same rule.
 ARTIFACT_CLASSIFICATIONS = frozenset({"public", "internal", "confidential", "secret"})
 ROLES = frozenset({"admin", "operator", "viewer", "auditor"})
+# A finished run never steps again: nothing it holds can still be pushed to a worker or read
+# by a node. One definition, shared by the writers that must not act on such a run.
+RUN_TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 USER_STATUSES = frozenset({"active", "disabled"})
 _WORKER_TOKEN_MARKER = "atlasenc:v1:"
 _AUDIT_ACTOR = contextvars.ContextVar("atlas_audit_actor", default="local")
@@ -1927,6 +1930,26 @@ class Database:
         with self._lock, self.connect() as conn:
             conn.execute(self._ARTIFACT_INSERT, row)
         self.audit("artifact.create", "artifact", row[0], {"run_id": payload.get("run_id"), "key": row[3]})
+        return self.get_artifact(row[0]) or {}
+
+    def create_artifact_for_live_run(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Insert a run-scoped artifact ONLY while its run is still non-terminal, deciding and
+        writing in ONE transaction under the writer lock (the same lock finalize_workflow_run
+        takes, so the states cannot interleave). The upload path reads the request body between
+        its cheap pre-read state check and this insert; a cancel or a finishing runner landing in
+        that window would otherwise strand a file_ref on a finished run — and still fire its
+        artifact_created triggers. Returns None when the run finished first; the caller reclaims
+        the staged bytes."""
+        row = self._artifact_row(payload)
+        with self._lock, self.connect() as conn:
+            current = conn.execute("SELECT state FROM workflow_runs WHERE id = ?", (row[1],)).fetchone()
+            if current is None or current["state"] in RUN_TERMINAL_STATES:
+                return None
+            conn.execute(self._ARTIFACT_INSERT, row)
+            conn.execute(
+                self._AUDIT_INSERT,
+                self._audit_values("artifact.create", "artifact", row[0], {"run_id": row[1], "key": row[3]}),
+            )
         return self.get_artifact(row[0]) or {}
 
     def create_artifacts(self, payloads: list[dict[str, Any]]) -> list[str]:

@@ -712,6 +712,10 @@ paths:
                 type: object
                 properties:
                   workflow: {$ref: '#/components/schemas/WorkflowDefinition'}
+                  warnings:
+                    type: array
+                    items: {type: string}
+                    description: Compatibility warnings for accepted legacy fields with no runtime effect.
         default: {$ref: '#/components/responses/Error'}
 
   /api/workflow-templates:
@@ -821,6 +825,13 @@ paths:
                   triggers:
                     type: array
                     items: {$ref: '#/components/schemas/WorkflowTrigger'}
+                  warnings:
+                    type: array
+                    items: {type: string}
+                    description: >-
+                      Compatibility warnings for accepted legacy fields with no runtime
+                      effect, same report the workflow save/validate responses carry. Each
+                      line names its workflow, since a bundle can hold several.
         default: {$ref: '#/components/responses/Error'}
 
   /api/packs/{workflow_id}/export:
@@ -952,6 +963,10 @@ paths:
                 type: object
                 properties:
                   workflow: {$ref: '#/components/schemas/WorkflowDefinition'}
+                  warnings:
+                    type: array
+                    items: {type: string}
+                    description: Compatibility warnings for accepted legacy fields with no runtime effect.
         '409': {$ref: '#/components/responses/Error'}
         default: {$ref: '#/components/responses/Error'}
     delete:
@@ -982,6 +997,10 @@ paths:
                 type: object
                 properties:
                   ok: {type: boolean, const: true}
+                  warnings:
+                    type: array
+                    items: {type: string}
+                    description: Compatibility warnings for accepted legacy fields with no runtime effect.
         default: {$ref: '#/components/responses/Error'}
 
   /api/workflows/{workflow_id}/explain:
@@ -1105,6 +1124,16 @@ paths:
                     same definition row loaded for this run (docs/adr/0002). A boolean is
                     rejected (not an integer). A mismatch returns 409 and creates no run.
                     Direct-start only — trigger fire does not accept this field in v1.
+                hold:
+                  type: boolean
+                  default: false
+                  description: >-
+                    When true the run is created born-paused (state `paused`) and does
+                    not execute until an explicit `POST /api/workflow-runs/{run_id}/resume`.
+                    The hold window lets callers attach input files
+                    (`POST /api/workflow-runs/{run_id}/files`) race-free before the first
+                    node dispatches. Anything but a JSON boolean is a 400. Absent/false
+                    keeps exact legacy start-immediately behavior.
       responses:
         '202':
           description: Run accepted
@@ -1181,6 +1210,12 @@ paths:
         in: header
         required: false
         schema: {type: string}
+        description: >-
+          Display filename stored in the artifact's metadata. Header values are
+          Latin-1 on the wire (and browser fetch refuses anything above U+00FF),
+          so a non-ASCII filename (e.g. Thai) MUST be sent percent-encoded
+          (RFC 3986, e.g. encodeURIComponent); Atlas percent-decodes on receipt.
+          A plain ASCII name without %XX escapes passes through unchanged.
       - name: Content-Length
         in: header
         required: true
@@ -1209,6 +1244,18 @@ paths:
                 type: object
                 properties:
                   artifact: {$ref: '#/components/schemas/Artifact'}
+        '409':
+          description: >-
+            The run already reached a terminal state (`succeeded`, `failed`, or
+            `cancelled`). A file attached then can never be pushed to a worker or
+            read by a node, so it is rejected instead of being stored as a
+            stranded artifact. Every non-terminal state still accepts uploads.
+            The state is re-checked atomically with the insert, so a run that
+            finishes or is cancelled WHILE the body streams in also returns 409
+            and stores nothing.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
         default: {$ref: '#/components/responses/Error'}
 
   /api/workflow-runs/{run_id}/events:
@@ -2177,6 +2224,14 @@ components:
           $ref: '#/components/schemas/WorkflowDefaultReply'
         interface:
           $ref: '#/components/schemas/WorkflowInterface'
+        warnings:
+          type: array
+          items: {type: string}
+          description: >-
+            Present on read responses (GET /api/workflows and
+            GET /api/workflows/{workflow_id}). Computed per read, never stored:
+            accepted legacy fields in this graph that have no runtime effect. Write
+            paths ignore it, so a GET → edit → PUT round trip is safe.
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
       additionalProperties: true

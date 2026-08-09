@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added held runs: `POST /api/workflow-runs` accepts `"hold": true` to create a
+  born-paused run so input files can be attached race-free before an explicit
+  resume starts it (event `run_created_held`, audit `workflow.run_created_held`).
+- Added the `document_brief` bundled solution pack — a file-in/file-out demo
+  (held run → `upload_*` handoff → analyst writes `executive_brief.md` →
+  human review), plus a packs check that validates and imports every bundled
+  pack on a bare database.
+
+- Added the node field `collect_required` (boolean, default `false`): a workflow
+  worker/manager node that declares `collect_files` can now fail the NODE when
+  the collection produced no artifact, instead of completing silently with no
+  files. The job itself still succeeds — collection never changes a job outcome.
+  Requires `collect_files`; the `document_brief` pack's analyst node uses it.
+- Added a `warnings` array to the workflow create, update, and validate responses.
+  It reports fields that are accepted but inert — currently `collect_files` on a
+  node that is not a `worker`/`manager`, which older graphs may carry and which
+  has no runtime effect. Such graphs still save, so no existing definition breaks.
+  `POST /api/packs/import` returns the same array, named per workflow, so importing
+  a bundle is not a quieter way to introduce the field. Workflow read responses
+  carry it too (inside each definition), and the ops console shows it as a banner
+  on the run detail so an operator sees why a declared setting had no effect.
 - Added a windowed global artifact listing endpoint, `GET /api/artifacts`, with
   truthful totals and an opt-in metadata-only view with strict selectors.
 - Added `workflow.interface` v1 as an additive input/output contract for
@@ -23,9 +44,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clarifying that the full workflow-authoring frontend lives in `flow-designer`.
 - Improved ops-console copy, mobile behavior, accessibility, error states,
   confirmation flows, and audit depth.
+- Changed `POST /api/workflow-runs/{run_id}/files` to reject uploads onto a run
+  that already finished (`succeeded`, `failed`, `cancelled`) with `409` instead
+  of a silent `201`: such a file can never be pushed to a worker or read by a
+  node, so it only became a stranded artifact that looked like a successful
+  attachment. Every non-terminal run state still accepts uploads. The state is
+  re-checked atomically with the artifact insert, so a run cancelled or finished
+  while the body is still streaming in is also rejected.
 
 ### Fixed
 
+- Fixed a workflow node's job being linked to its runtime node only after dispatch
+  had already started: a fast worker could finish and be collected first, keying
+  that node's files `files.<relpath>` with a null run id — detached from the run,
+  unmatched by `push_files` globs, and read as "no artifacts" by
+  `collect_required`. The link is now written before the job service dispatches.
+- Fixed a workflow node's file collection failing invisibly at run level: the
+  collection outcome is now mirrored onto the run timeline as `files.collected`
+  (`count`/`requested`) or `files.collection_failed` (redacted `error`/
+  `requested`) with the node key — counts only, never a file list. Standalone
+  jobs are unchanged.
+- Fixed `push_files` intents being dropped silently on edges taken by the
+  human-gate decision path (and lost on restart mid-run): push intents now ride
+  the run's persisted counters, so a gate may sit between a collector and the
+  worker that receives its files.
 - Closed a direct `run_workflow` bypass around workflow-interface validation and
   widened coverage for interface edge cases.
 - Fixed finite-number validation to use `math.isfinite`.

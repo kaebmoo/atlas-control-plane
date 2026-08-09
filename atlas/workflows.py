@@ -219,6 +219,19 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
                 _validate_collect_files(node["collect_files"], artifact_max_files_cap())
             except ValueError as exc:
                 raise ValueError(f"workflow node {node_id} {exc}") from exc
+        if "collect_required" in node:
+            # Opt-in strict collection. Only meaningful next to a collection declaration, so
+            # the key without collect_files is a save-time error instead of a setting that
+            # silently does nothing. Default (absent) is exactly the legacy behavior.
+            if node["type"] not in {"worker", "manager"}:
+                # Only worker/manager nodes ever run a job, so only they can collect. Without
+                # this, a human_gate carrying collect_files + collect_required saved fine and
+                # the strictness was silently ignored at runtime.
+                raise ValueError(f"workflow node {node_id} collect_required is only valid on worker or manager nodes")
+            if not isinstance(node["collect_required"], bool):
+                raise ValueError(f"workflow node {node_id} collect_required must be a boolean")
+            if not node.get("collect_files"):
+                raise ValueError(f"workflow node {node_id} collect_required requires collect_files")
 
     start = graph.get("start")
     if not isinstance(start, str) or not start.strip():
@@ -267,6 +280,22 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
         raise ValueError("workflow graph has a cycle; policy.max_iterations or max_iterations_below is required")
 
     return graph
+
+
+def workflow_graph_warnings(graph: dict[str, Any]) -> list[str]:
+    """Return compatibility warnings for valid graphs without changing their save behavior.
+
+    ``collect_files`` predates workflow-node collection and remains accepted on non-job nodes so
+    old definitions can still be saved. It has no runtime effect there, so surface that fact to
+    API callers instead of making the accepted legacy field look meaningful.
+    """
+    warnings = []
+    for node in graph.get("nodes", []):
+        if isinstance(node, dict) and "collect_files" in node and node.get("type") not in {"worker", "manager"}:
+            warnings.append(
+                f"workflow node {node.get('id', '<unknown>')} collect_files is ignored because only worker or manager nodes run jobs"
+            )
+    return warnings
 
 
 # Hard safety caps for workflow policy. Shared by the workflow API and pack import so
@@ -438,6 +467,7 @@ class WorkflowRunner:
         workflow_definition_id: str,
         input: dict[str, Any] | None = None,
         expected_workflow_version: int | None = None,
+        hold: bool = False,
     ) -> dict[str, Any]:
         # expected_workflow_version is a DIRECT-START-ONLY guard (never passed by trigger
         # fire — v1 does not add a trigger-side version pin, docs/adr/0002). Loaded and
@@ -475,8 +505,18 @@ class WorkflowRunner:
             definition.get("name") or "Workflow run",
             interface=interface,
             workflow_version=definition.get("version"),
+            # A held run is born paused and NEVER executes until an explicit resume — the
+            # window exists so callers can attach input files (POST /api/workflow-runs/{id}/files)
+            # race-free before the first node dispatches. Born-paused (not running-then-paused)
+            # so no runner thread can win a race with the state flip, and reconcile_runs
+            # (which skips paused) never adopts it after a restart.
+            state="paused" if hold else "running",
         )
         _audit_input_provenance(self.db, run["id"], input)
+        if hold:
+            self.db.append_workflow_event(run["id"], "run_created_held")
+            self.db.audit("workflow.run_created_held", "workflow_run", run["id"], {})
+            return self.db.get_workflow_run(run["id"]) or run
         self._start_background(run["id"], graph, policy, input)
         return self.db.get_workflow_run(run["id"]) or run
 
@@ -770,6 +810,15 @@ class WorkflowRunner:
             )
             if result["matched"]:
                 self.db.append_workflow_edge(run["id"], edge["from"], edge["to"], result)
+                if edge.get("push_files"):
+                    # T9b: carry the push intent across the gate. This path schedules downstream
+                    # nodes on the API thread and resumes execution on a fresh runner thread, so
+                    # the intent must ride the persisted counters (written below via
+                    # update_workflow_run) — an in-memory stash would be dropped silently and the
+                    # downstream node would start without its files.
+                    counters.setdefault("pending_pushes", {}).setdefault(edge["to"], []).append(
+                        {"from": approval["node_key"], "push_files": edge["push_files"]}
+                    )
                 _schedule_node(edge, ready, completed, completed_nodes, node_map, join_states, cycle_edges)
         self.db.update_workflow_node(runtime_node["id"], state="succeeded", finished_at=now_iso())
         self.db.append_workflow_event(
@@ -842,12 +891,13 @@ class WorkflowRunner:
         name: str,
         interface: dict[str, Any] | None = None,
         workflow_version: int | None = None,
+        state: str = "running",
     ) -> dict[str, Any]:
         return self.db.create_workflow_run(
             {
                 "workflow_definition_id": workflow_definition_id,
                 "name": name,
-                "state": "running",
+                "state": state,
                 "input": input,
                 "current_nodes": [graph["start"]],
                 # Snapshot the graph+policy+interface+version this run starts on, so
@@ -929,13 +979,17 @@ class WorkflowRunner:
         if not run:
             raise ValueError(f"Unknown workflow_run_id: {run_id}")
         ready = list(run.get("current_nodes") or [])
-        # T6 file handoff: when an edge carrying push_files is TAKEN, stash its intent keyed by
-        # the target node; the target consumes it just before its job is created. In-memory for
-        # this execution pass (edge-taken and node-run happen in the same pass); a restart mid-run
-        # follows the standard explicit-recovery rule (re-running re-takes the edge and re-pushes).
-        pending_pushes: dict[str, list[dict[str, Any]]] = {}
         artifacts = self._load_artifacts(run_id)
         counters = run.get("counters") or {"jobs_started": 0, "node_counts": {}}
+        # T6/T9b file handoff: when an edge carrying push_files is TAKEN, stash its intent keyed
+        # by the target node; the target consumes it just before its job is created. The stash
+        # lives in the run's persisted counters (flushed with every counters write, e.g.
+        # _wait_for_human and _reserve_and_submit_job), NOT in a per-thread local: the human-gate
+        # decision path takes edges on the API thread and resumes on a FRESH runner thread, and a
+        # restart mid-run re-loads counters — an in-memory-only stash was dropped silently in
+        # both cases. Consumption (`pop` at dispatch) mutates this same dict, so the next
+        # counters write persists the intent as consumed.
+        pending_pushes: dict[str, list[dict[str, Any]]] = counters.setdefault("pending_pushes", {})
         counters.setdefault("jobs_started", 0)
         counters.setdefault("budget_units_spent", 0)
         counters.setdefault("node_counts", {})
@@ -1133,13 +1187,16 @@ class WorkflowRunner:
                             if (self.db.get_workflow_run(run["id"]) or {}).get("state") == "cancelled":
                                 raise _WorkflowCancelled()
                             _check_deadline(deadline)
-                            job = self._reserve_and_submit_job(run, node, node_submit["payload"], policy, counters)
-                            self.db.update_workflow_node(runtime_node["id"], job_id=job["id"])
+                            job = self._reserve_and_submit_job(
+                                run, node, node_submit["payload"], policy, counters, runtime_node["id"]
+                            )
                     if job:
                         job = self._wait_for_job(job["id"], run["id"], deadline)
                         counters["jobs_started"] += 1
                         if job["state"] != "succeeded":
                             raise ValueError(f"workflow node {node_key} job {job['id']} ended as {job['state']}")
+                        if node.get("collect_required"):
+                            self._require_collected_files(job["id"], node_key)
                         if node_type == "manager":
                             manager_decision = self._validate_manager_decision(
                                 run,
@@ -1489,12 +1546,21 @@ class WorkflowRunner:
         payload: dict[str, Any],
         policy: dict[str, Any],
         counters: dict[str, Any],
+        runtime_node_id: str,
     ) -> dict[str, Any]:
         """Budget-check, submit the job, and record the reservation. Fast (submit only starts a
         thread), so it stays under the run lock; the slow file push happens before this, unlocked."""
         cost = _node_budget_units(node)
         _check_budget(policy, int(counters.get("budget_units_spent") or 0), cost)
-        job = self.job_service.submit(payload)
+        # The node→job link is written by the on_created hook, i.e. BEFORE the job service starts
+        # dispatching. Linking after submit() returned was a race: a fast worker could finish and
+        # collect while workflow_context_for_job still found nothing, keying that node's artifacts
+        # `files.<relpath>` with a NULL run_id — invisible to the run, unmatched by push_files
+        # globs, and read as "no artifacts" by collect_required.
+        job = self.job_service.submit(
+            payload,
+            on_created=lambda created: self.db.update_workflow_node(runtime_node_id, job_id=created["id"]),
+        )
         counters["budget_units_spent"] = int(counters.get("budget_units_spent") or 0) + cost
         self.db.update_workflow_run(run["id"], counters=counters)
         self.db.append_workflow_event(
@@ -1504,6 +1570,24 @@ class WorkflowRunner:
             node_key=node["id"],
         )
         return job
+
+    def _require_collected_files(self, job_id: str, node_key: str) -> None:
+        """Enforce a node's opt-in `collect_required`. Deliberately at the WORKFLOW layer: jobs.py
+        keeps its guarantee that collection never changes the JOB outcome (threat model, T9a), so
+        the job stays `succeeded` and only the NODE fails — the run then follows the ordinary
+        node-failure rules (stop_on_first_failure / failure_summary). 256 is the T9a per-job
+        artifact cap; this is an existence probe, not a listing."""
+        prefix = f"files.{node_key}."
+        collected = [
+            artifact
+            for artifact in self.db.list_artifacts(job_id=job_id, kind="file_ref", limit=256)
+            if str(artifact.get("key") or "").startswith(prefix)
+        ]
+        if not collected:
+            raise ValueError(
+                f"workflow node {node_key} declared collect_files produced no artifacts "
+                "(collection failed or matched nothing)"
+            )
 
     def _push_files_to_worker(
         self,

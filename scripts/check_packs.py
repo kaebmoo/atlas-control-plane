@@ -33,10 +33,12 @@ class FakeJobService:
         self.worker_id = worker_id
         self.prompts: list[str] = []
 
-    def submit(self, payload: dict) -> dict:
+    def submit(self, payload: dict, *, on_created=None) -> dict:
         prompt = payload["prompt"]
         self.prompts.append(prompt)
         job = self.db.create_job({"worker_id": self.worker_id, "prompt": prompt, "state": "running"})
+        if on_created:
+            on_created(job)
         self.db.append_job_text(job["id"], f"result: {prompt}")
         self.db.update_job(job["id"], state="succeeded", finished_at=now_iso())
         return self.db.get_job(job["id"]) or job
@@ -164,6 +166,59 @@ def main() -> None:
     # The local registry listing reports the signed flag (shipped gov pack is unsigned).
     gov = next(entry for entry in list_available_packs() if entry.get("name") == "gov_complaint")
     assert gov["signed"] is False, gov
+
+    # EVERY bundled pack must validate AND import cleanly on a bare database — a shipped pack
+    # that only fails at customer-import time is exactly the regression this guards against.
+    # (Mutation: break a bundled pack's graph/policy → validate/import raises → red.)
+    bundled = sorted(PACKS_DIR.glob("*.json"))
+    assert bundled, "no bundled packs found"
+    for pack_path in bundled:
+        bundle = validate_pack(load_pack_file(pack_path))
+        with TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "atlas.sqlite")
+            imported = import_pack(db, bundle)
+            assert imported["workflows"], f"{pack_path.name}: imported no workflows"
+            # A shipped pack must be warning-free: warnings mark accepted-but-inert fields, and
+            # our own packs should never ship one.
+            assert imported["warnings"] == [], f"{pack_path.name}: {imported['warnings']}"
+
+    # Importing is not the quiet way in: a pack carrying the legacy collect_files on a node that
+    # never runs a job still imports (old bundles keep working) and reports the same
+    # accepted-but-inert warning the workflow API returns, named per workflow because a bundle
+    # can hold several. (Mutation: drop `warnings` from import_pack's result -> KeyError;
+    # invert the node-type predicate in workflow_graph_warnings -> the list comes back empty.)
+    legacy_bundle = {
+        "schema_version": 1,
+        "name": "legacy_collect",
+        "version": "1.0.0",
+        "workflows": [
+            {
+                "name": "Legacy collection",
+                "graph": {
+                    "start": "gate",
+                    "nodes": [{"id": "gate", "type": "human_gate", "collect_files": ["out.md"]}],
+                    "edges": [],
+                },
+                "policy": {},
+            }
+        ],
+    }
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+        legacy = import_pack(db, validate_pack(legacy_bundle))
+        assert legacy["workflows"], "a legacy bundle must still import"
+        assert len(legacy["warnings"]) == 1, legacy["warnings"]
+        assert "Legacy collection" in legacy["warnings"][0] and "gate" in legacy["warnings"][0], legacy["warnings"]
+        assert "ignored" in legacy["warnings"][0], legacy["warnings"]
+    # The file-handoff demo pack ships with the flags its docs promise.
+    brief = load_pack_file(PACKS_DIR / "document_brief.json")
+    brief_wf = brief["workflows"][0]
+    assert brief_wf["policy"]["file_handoff"] is True, brief_wf["policy"]
+    assert any(edge.get("push_files") == ["upload_*"] for edge in brief_wf["graph"]["edges"]), brief_wf["graph"]["edges"]
+    assert any(node.get("collect_files") for node in brief_wf["graph"]["nodes"]), brief_wf["graph"]["nodes"]
+    # The demo must fail loudly, not close green with no brief: the collecting node is strict.
+    analyst = next(node for node in brief_wf["graph"]["nodes"] if node["id"] == "analyst")
+    assert analyst.get("collect_required") is True, analyst
 
     # 5. Invalid packs are rejected with clear errors.
     assert_rejected({"name": "x", "version": "1", "workflows": []}, "schema_version must be 1")

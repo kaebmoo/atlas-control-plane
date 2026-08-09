@@ -74,6 +74,35 @@ def main() -> None:
             assert unnamed["name"] == "Untitled workflow", unnamed
             request(base_url, "DELETE", f"/api/workflows/{unnamed['id']}")  # keep the list clean for ordering-sensitive checks below
 
+            # Legacy collect_files on a non-job node remains save-compatible, but the API must
+            # make its no-op runtime meaning visible. (Mutations, both proven red: drop the
+            # `warnings` key from the save/validate responses -> KeyError; invert
+            # workflow_graph_warnings' node-type predicate -> the list comes back empty.)
+            legacy_graph = {"start": "gate", "nodes": [{"id": "gate", "type": "human_gate", "collect_files": ["out.md"]}], "edges": []}
+            legacy = request(base_url, "POST", "/api/workflows", {"name": "Legacy collection", "graph": legacy_graph})
+            assert len(legacy["warnings"]) == 1 and "gate" in legacy["warnings"][0] and "ignored" in legacy["warnings"][0], legacy
+            assert request(base_url, "POST", f"/api/workflows/{legacy['workflow']['id']}/validate")["warnings"] == legacy["warnings"]
+            updated_legacy = request(base_url, "PUT", f"/api/workflows/{legacy['workflow']['id']}", {"description": "still compatible"})
+            assert updated_legacy["warnings"] == legacy["warnings"], updated_legacy
+            # Reads carry the same report, so a client that never saves the definition (the ops
+            # console lists them and shows the banner on a run) still sees it. Inside each
+            # workflow object — a list response cannot carry a per-item sibling key.
+            listed = next(
+                row for row in request(base_url, "GET", "/api/workflows")["workflows"]
+                if row["id"] == legacy["workflow"]["id"]
+            )
+            assert listed["warnings"] == legacy["warnings"], listed["warnings"]
+            fetched = request(base_url, "GET", f"/api/workflows/{legacy['workflow']['id']}")["workflow"]
+            assert fetched["warnings"] == legacy["warnings"], fetched["warnings"]
+            # A clean definition reports an empty list, never a missing key.
+            clean = request(
+                base_url, "POST", "/api/workflows",
+                {"name": "Clean graph", "graph": {"start": "only", "nodes": [{"id": "only", "type": "worker"}], "edges": []}},
+            )["workflow"]
+            assert request(base_url, "GET", f"/api/workflows/{clean['id']}")["workflow"]["warnings"] == []
+            request(base_url, "DELETE", f"/api/workflows/{clean['id']}")
+            request(base_url, "DELETE", f"/api/workflows/{legacy['workflow']['id']}")
+
             workflow = request(
                 base_url,
                 "POST",
@@ -196,6 +225,9 @@ def main() -> None:
             assert second_page["events"][0]["seq"] > first_page["next_after"]
             assert "non-negative" in request_error(base_url, "GET", f"/api/workflow-runs/{run['id']}/events?after=-1")["error"]
 
+            check_run_hold(base_url, workflow_id)
+            check_upload_rejected_after_run_finished(runtime, base_url, workflow_id)
+
             paused = runtime.db.create_workflow_run(
                 {
                     "workflow_definition_id": workflow_id,
@@ -302,6 +334,123 @@ def main() -> None:
             thread.join(timeout=2)
 
     print("workflow api check ok")
+
+
+def check_run_hold(base_url: str, workflow_id: str) -> None:
+    """`POST /api/workflow-runs {"hold": true}` creates the run born-paused with NO execution,
+    so input files can be attached race-free before an explicit resume starts it.
+    (Mutations: ignore `hold` in start_workflow → the run executes immediately → the
+    paused/no-nodes asserts go red; skip the isinstance guard → `"hold": "yes"` stops 400ing.)"""
+    held = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id, "hold": True})["run"]
+    assert held["state"] == "paused", held["state"]
+    # A runner wrongly spawned would flip the state and write runtime nodes almost
+    # immediately; the sleep gives that mutation time to go red, not the feature time to work.
+    time.sleep(0.3)
+    detail = request(base_url, "GET", f"/api/workflow-runs/{held['id']}")
+    assert detail["run"]["state"] == "paused", detail["run"]["state"]
+    assert detail["nodes"] == [], f"a held run must not dispatch nodes: {detail['nodes']}"
+    events = request(base_url, "GET", f"/api/workflow-runs/{held['id']}/events")["events"]
+    assert any(event["event_type"] == "run_created_held" for event in events), [e["event_type"] for e in events]
+    # files attach while held (the whole point of the hold window). 8 bytes stays under the
+    # harness's max_upload_bytes=32.
+    uploaded = request_binary(
+        base_url,
+        "POST",
+        f"/api/workflow-runs/{held['id']}/files?key=upload_brief",
+        body=b"brief!!\n",
+        headers={"X-Filename": "brief.txt", "Content-Type": "text/plain", "Content-Length": "8"},
+    )
+    assert uploaded["json"]["artifact"]["kind"] == "file_ref", uploaded["json"]
+    # a plain ASCII X-Filename passes through the RFC 3986 decode unchanged...
+    assert uploaded["json"]["artifact"]["metadata"]["filename"] == "brief.txt", uploaded["json"]
+    # ...and a percent-encoded non-ASCII one (browser fetch cannot send Thai bytes in a header,
+    # so clients MUST encode) is stored as the real decoded name. (Mutation: drop the unquote()
+    # in _upload_workflow_file → the stored name stays percent-encoded → red.)
+    thai_name = "แผนวิสาหกิจ 70-74.pdf"
+    uploaded_thai = request_binary(
+        base_url,
+        "POST",
+        f"/api/workflow-runs/{held['id']}/files?key=upload_plan_pdf",
+        body=b"pdf-like",
+        headers={
+            "X-Filename": urllib.parse.quote(thai_name),
+            "Content-Type": "application/pdf",
+            "Content-Length": "8",
+        },
+    )
+    assert uploaded_thai["json"]["artifact"]["metadata"]["filename"] == thai_name, uploaded_thai["json"]
+    # resume starts execution: the run leaves paused and reaches this graph's usual terminal
+    # state (failed — the harness has no live worker), proving the engine actually ran it.
+    resumed = request(base_url, "POST", f"/api/workflow-runs/{held['id']}/resume", {})["run"]
+    assert resumed["state"] != "paused", resumed["state"]
+    final = wait_for_api_run(base_url, held["id"], "failed")
+    assert final["state"] == "failed"
+    # a non-boolean hold is rejected up front.
+    bad = request_error(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id, "hold": "yes"})
+    assert "hold" in bad["error"], bad
+
+
+def check_upload_rejected_after_run_finished(runtime: AtlasRuntime, base_url: str, workflow_id: str) -> None:
+    """A file attached to a finished run can never be pushed to a worker or read by a node, so
+    it is a stranded artifact that reads to the user like a successful attachment: reject it with
+    409 instead of 201. Runs that have NOT finished keep accepting uploads.
+    (Mutation: drop the terminal-state guard in _upload_workflow_file -> the upload 201s -> red.)"""
+    run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id})["run"]
+    finished = wait_for_api_run(base_url, run["id"], "failed")  # no live worker in this harness
+    assert finished["state"] == "failed", finished
+    rejected = request_binary(
+        base_url,
+        "POST",
+        f"/api/workflow-runs/{run['id']}/files?key=too_late",
+        body=b"late",
+        headers={"Content-Type": "application/octet-stream", "X-Filename": "late.bin", "Content-Length": "4"},
+        expect_error=True,
+    )
+    assert rejected["status"] == 409, rejected["status"]
+    assert "already finished" in rejected["json"]["error"] and "failed" in rejected["json"]["error"], rejected["json"]
+    assert not request(base_url, "GET", f"/api/artifacts?run_id={run['id']}&kind=file_ref")["artifacts"], (
+        "the rejected upload must leave no artifact behind"
+    )
+    # A cancelled run is terminal too.
+    cancelled = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow_id})["run"]
+    request(base_url, "POST", f"/api/workflow-runs/{cancelled['id']}/cancel")
+    rejected_cancelled = request_binary(
+        base_url,
+        "POST",
+        f"/api/workflow-runs/{cancelled['id']}/files?key=too_late",
+        body=b"late",
+        headers={"Content-Type": "application/octet-stream", "X-Filename": "late.bin", "Content-Length": "4"},
+        expect_error=True,
+    )
+    assert rejected_cancelled["status"] == 409, rejected_cancelled["status"]
+
+    # TOCTOU: the pre-read state check is stale by the time the body finishes streaming. Send the
+    # headers, cancel the run while the body is still open, then finish the body — the insert must
+    # re-check and reject. (Mutation: swap create_artifact_for_live_run back to create_artifact ->
+    # the upload 201s and strands a file_ref on a cancelled run -> red.)
+    gate_graph = {"start": "hold", "nodes": [{"id": "hold", "type": "human_gate", "label": "Hold"}], "edges": []}
+    gated_workflow = request(base_url, "POST", "/api/workflows", {"name": "Upload TOCTOU", "graph": gate_graph})["workflow"]
+    live = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": gated_workflow["id"]})["run"]
+    wait_for_api_run(base_url, live["id"], "waiting_for_human")
+    parsed = urllib.parse.urlparse(base_url)
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+    connection.putrequest("POST", f"/api/workflow-runs/{live['id']}/files?key=racing")
+    connection.putheader("Content-Length", "8")
+    connection.putheader("Content-Type", "application/octet-stream")
+    connection.putheader("X-Filename", "racing.bin")
+    connection.endheaders()
+    connection.send(b"half")
+    request(base_url, "POST", f"/api/workflow-runs/{live['id']}/cancel")
+    connection.send(b"rest")
+    response = connection.getresponse()
+    raced = json.loads(response.read())
+    connection.close()
+    assert response.status == 409, f"expected HTTP 409 after the run was cancelled mid-upload, got {response.status}"
+    assert "already finished" in raced["error"], raced
+    assert not request(base_url, "GET", f"/api/artifacts?run_id={live['id']}&kind=file_ref")["artifacts"], (
+        "a file_ref must not land on a run cancelled mid-upload"
+    )
+    assert not any(path.name.endswith(".tmp") for path in runtime.upload_dir.iterdir()), "staged upload left behind"
 
 
 def check_milestones_3_and_4(base_url: str, workflow_id: str) -> None:
@@ -615,7 +764,7 @@ def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) ->
     response = {"text": ""}
     prompts: list[str] = []
 
-    def submit(payload: dict) -> dict:
+    def submit(payload: dict, *, on_created=None) -> dict:
         prompts.append(payload["prompt"])
         job = runtime.db.create_job(
             {"worker_id": builder["id"], "prompt": payload["prompt"], "state": "running"}
@@ -765,10 +914,14 @@ def check_milestone_8(base_url: str) -> None:
 
 def check_milestone_14(runtime: AtlasRuntime, base_url: str) -> None:
     control_graph = {"start": "done", "nodes": [{"id": "done", "type": "join", "mode": "all"}], "edges": []}
-    source = request(base_url, "POST", "/api/workflows", {"name": "Upload source", "graph": control_graph})["workflow"]
+    # The upload host run parks at a human gate: uploads are only accepted while a run is still
+    # live (a finished run 409s — check_upload_rejected_after_run_finished), and this check is
+    # about the upload/trigger/purge behavior, not about the run's state.
+    gate_graph = {"start": "hold", "nodes": [{"id": "hold", "type": "human_gate", "label": "Hold for uploads"}], "edges": []}
+    source = request(base_url, "POST", "/api/workflows", {"name": "Upload source", "graph": gate_graph})["workflow"]
     target = request(base_url, "POST", "/api/workflows", {"name": "Upload target", "graph": control_graph})["workflow"]
     run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": source["id"]})["run"]
-    wait_for_api_run(base_url, run["id"], "succeeded")
+    wait_for_api_run(base_url, run["id"], "waiting_for_human")
     trigger = request(
         base_url,
         "POST",
@@ -886,7 +1039,7 @@ def check_milestones_13_and_15(runtime: AtlasRuntime, base_url: str) -> None:
 
     original_submit = runtime.jobs.submit
 
-    def submit(payload: dict) -> dict:
+    def submit(payload: dict, *, on_created=None) -> dict:
         job = runtime.db.create_job({"worker_id": worker["id"], "prompt": payload["prompt"], "state": "running"})
         runtime.db.append_job_text(job["id"], "recovered")
         runtime.db.update_job(job["id"], state="succeeded", finished_at=now_iso())
@@ -928,6 +1081,7 @@ def request_binary(
             raw = response.read()
             content_type = response.headers.get("Content-Type", "")
             return {
+                "status": response.status,
                 "body": raw,
                 "json": json.loads(raw) if raw and "json" in content_type else {},
                 "headers": dict(response.headers),
@@ -936,7 +1090,9 @@ def request_binary(
         raw = exc.read()
         if not expect_error:
             raise
-        return {"body": raw, "json": json.loads(raw), "headers": dict(exc.headers)}
+        # `status` matters as much as the message: a 500 whose str() happens to match would
+        # otherwise satisfy a message-only assertion (same rationale as request_error).
+        return {"status": exc.code, "body": raw, "json": json.loads(raw), "headers": dict(exc.headers)}
 
 
 def request_error(base_url: str, method: str, path: str, payload: dict | None = None, status: int = 400) -> dict:

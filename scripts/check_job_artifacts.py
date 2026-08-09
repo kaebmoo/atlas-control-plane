@@ -203,6 +203,145 @@ def job_artifacts_route(runtime: AtlasRuntime, api_base_url: str, worker_id: str
     print("  GET /api/jobs/{id}/artifacts returns all collected files over real HTTP (no 100-limit truncation) OK")
 
 
+def _collect_graph(worker_id: str, required: bool = False) -> dict[str, Any]:
+    node: dict[str, Any] = {
+        "id": "gather",
+        "type": "worker",
+        "worker_id": worker_id,
+        "prompt": "work",
+        "collect_files": ["out/*.txt"],
+    }
+    if required:
+        node["collect_required"] = True
+    return {"start": "gather", "nodes": [node], "edges": []}
+
+
+def _run_events(runtime: AtlasRuntime, run_id: str, event_type: str) -> list[dict[str, Any]]:
+    page, _ = runtime.db.list_workflow_events_after(run_id, 0, 500)
+    return [event for event in page if event["event_type"] == event_type]
+
+
+def collection_visible_on_run(runtime: AtlasRuntime, worker_id: str) -> None:
+    """A workflow node's collection outcome must reach the RUN timeline, not only the job's.
+    A live E2E run failed collection on a node while the run reported nothing but success.
+    (Mutation: drop either _mirror_collection_to_run call in jobs.py -> the run timeline loses
+    the event -> red.)"""
+    policy = {"allowed_worker_ids": [worker_id], "max_jobs": 5}
+    MockArtifactsWorker.reset()
+    MockArtifactsWorker.snapshots["sess-first"] = [("out/report.txt", b"FROZEN")]
+    run = runtime.workflows.run_graph(_collect_graph(worker_id), policy)
+    assert run["state"] == "succeeded", run
+    node_row = runtime.db.list_workflow_nodes(run["id"])[0]
+    keys = {row["key"] for row in runtime.db.list_artifacts(job_id=node_row["job_id"], kind="file_ref")}
+    assert keys == {"files.gather.out/report.txt"}, keys
+    assert all(row["run_id"] == run["id"] for row in runtime.db.list_artifacts(run_id=run["id"], kind="file_ref"))
+    collected = _run_events(runtime, run["id"], "files.collected")
+    assert len(collected) == 1, collected
+    assert collected[0]["node_key"] == "gather", collected[0]
+    # counts only — the audit rule (no per-file listing) holds for the run timeline too.
+    assert collected[0]["payload"] == {"count": 1, "requested": 1}, collected[0]["payload"]
+
+    MockArtifactsWorker.reset()
+    MockArtifactsWorker.snapshots["sess-first"] = [("out/report.txt", b"FROZEN")]
+    MockArtifactsWorker.manifest_override = {
+        "session_id": "sess-first",
+        "collected_at": "2099-01-01T00:00:00Z",
+        "patterns": ["out/*.txt"],
+        "artifacts": [{"id": "a1", "path": "../escape.txt", "size": 1, "sha256": "0" * 64}],
+    }
+    runs_before = len(runtime.db.list_workflow_runs(limit=1000))
+    failed_run = runtime.workflows.run_graph(_collect_graph(worker_id), policy)
+    # collect_required is OFF here: legacy behavior is preserved exactly — the run still succeeds.
+    assert failed_run["state"] == "succeeded", failed_run
+    failures = _run_events(runtime, failed_run["id"], "files.collection_failed")
+    assert len(failures) == 1 and failures[0]["node_key"] == "gather", failures
+    assert failures[0]["payload"]["requested"] == 1, failures[0]["payload"]
+    assert "files" not in failures[0]["payload"], failures[0]["payload"]
+    node = runtime.db.list_workflow_nodes(failed_run["id"])[0]
+    job_failure = next(
+        event for event in events(runtime, node["job_id"]) if event["event_type"] == "files.collection_failed"
+    )
+    # Identical string as the job event, so the run copy inherits its token redaction.
+    assert failures[0]["payload"]["error"] == job_failure["payload"]["error"], failures[0]["payload"]
+
+    # A standalone (non-workflow) job is untouched: job event only, no run invented for it.
+    MockArtifactsWorker.reset()
+    MockArtifactsWorker.snapshots["sess-first"] = [("out/report.txt", b"FROZEN")]
+    MockArtifactsWorker.manifest_override = {"session_id": "sess-first", "artifacts": [{"id": "a1", "path": "../bad", "size": 1, "sha256": "0" * 64}]}
+    standalone = submit(runtime, worker_id, collect=["out/*.txt"])
+    assert wait_terminal(runtime, standalone["id"])["state"] == "succeeded"
+    assert "files.collection_failed" in [event["event_type"] for event in events(runtime, standalone["id"])]
+    assert runtime.db.workflow_context_for_job(standalone["id"]) == {}, "standalone job must have no run context"
+    assert len(runtime.db.list_workflow_runs(limit=1000)) == runs_before + 1, "a standalone job created a run"
+    print("  workflow node collection success/failure mirrored onto the run timeline OK")
+
+
+def node_linked_before_dispatch(runtime: AtlasRuntime, worker_id: str) -> None:
+    """A fast worker must never out-run the node→job link. The link has to be written BEFORE the
+    job service dispatches, or collection resolves no workflow context and keys that node's files
+    `files.<relpath>` with a NULL run_id — off the run, unmatched by push_files globs, and read as
+    "no artifacts" by collect_required (a node/run failure with the file sitting right there).
+
+    The window is forced open deterministically: `budget_reserved` is appended right AFTER submit
+    returns, so stalling that one write parks the runner thread there while the mock worker
+    finishes and collects. (Mutation: link the node after `submit()` returns instead of through
+    its on_created hook -> the keys lose the node prefix and the run_id goes NULL -> red.)"""
+    policy = {"allowed_worker_ids": [worker_id], "max_jobs": 5}
+    MockArtifactsWorker.reset()
+    MockArtifactsWorker.snapshots["sess-first"] = [("out/report.txt", b"FROZEN")]
+    original = runtime.db.append_workflow_event
+
+    def stalled(run_id: str, event_type: str, payload: Any = None, node_key: str | None = None) -> Any:
+        if event_type == "budget_reserved":
+            time.sleep(0.5)  # long enough for the whole dispatch + collection round trip
+        return original(run_id, event_type, payload, node_key)
+
+    runtime.db.append_workflow_event = stalled  # type: ignore[method-assign]
+    try:
+        run = runtime.workflows.run_graph(_collect_graph(worker_id), policy)
+    finally:
+        runtime.db.append_workflow_event = original  # type: ignore[method-assign]
+    assert run["state"] == "succeeded", run
+    node = runtime.db.list_workflow_nodes(run["id"])[0]
+    rows = runtime.db.list_artifacts(job_id=node["job_id"], kind="file_ref")
+    assert [row["key"] for row in rows] == ["files.gather.out/report.txt"], [row["key"] for row in rows]
+    assert all(row["run_id"] == run["id"] for row in rows), rows
+    assert _run_events(runtime, run["id"], "files.collected"), "collection was invisible to the run"
+    print("  node is linked to its job before dispatch, so a fast worker still keys files to the run OK")
+
+
+def collect_required_fails_the_node(runtime: AtlasRuntime, worker_id: str) -> None:
+    """`collect_required` is the opt-in strict mode: a declared collection that produces no
+    artifact fails the NODE with a clear error, while the JOB still succeeds — jobs.py keeps its
+    "collection never changes the job outcome" guarantee (threat model, T9a). (Mutation: drop the
+    _require_collected_files call in workflows.py -> the run goes back to succeeded -> red.)"""
+    policy = {"allowed_worker_ids": [worker_id], "max_jobs": 5}
+    cases: dict[str, Any] = {
+        # collection FAILED (integrity mismatch): nothing published.
+        "collection failed": {"snapshot": [("out/report.txt", b"FROZEN")], "body": (b"CHANGED", hashlib.sha256(b"FROZEN").hexdigest())},
+        # collection SUCCEEDED but matched nothing: a valid empty manifest, count 0.
+        "matched nothing": {"snapshot": [], "body": None},
+    }
+    for label, case in cases.items():
+        MockArtifactsWorker.reset()
+        MockArtifactsWorker.snapshots["sess-first"] = case["snapshot"]
+        MockArtifactsWorker.body_override = case["body"]
+        run = runtime.workflows.run_graph(_collect_graph(worker_id, required=True), policy)
+        assert run["state"] == "failed", (label, run["state"])
+        assert "produced no artifacts" in (run.get("error") or ""), (label, run.get("error"))
+        node = runtime.db.list_workflow_nodes(run["id"])[0]
+        assert node["state"] == "failed", (label, node["state"])
+        assert "declared collect_files produced no artifacts" in (node.get("error") or ""), (label, node.get("error"))
+        assert runtime.db.get_job(node["job_id"])["state"] == "succeeded", f"{label}: collection changed the JOB outcome"
+        assert _run_events(runtime, run["id"], "node_failed"), label
+    # Positive control: the same strict node passes when the file really comes back.
+    MockArtifactsWorker.reset()
+    MockArtifactsWorker.snapshots["sess-first"] = [("out/report.txt", b"FROZEN")]
+    ok = runtime.workflows.run_graph(_collect_graph(worker_id, required=True), policy)
+    assert ok["state"] == "succeeded", ok
+    print("  collect_required fails the node (job still succeeded) on failed/empty collection OK")
+
+
 def no_collection_no_artifact_api(runtime: AtlasRuntime, worker_id: str) -> None:
     MockArtifactsWorker.reset()
     job = submit(runtime, worker_id)
@@ -402,6 +541,9 @@ def main() -> None:
             stream_contract(runtime, worker_id)
             job_artifacts_route(runtime, api_base, worker_id)
             no_collection_no_artifact_api(runtime, worker_id)
+            collection_visible_on_run(runtime, worker_id)
+            node_linked_before_dispatch(runtime, worker_id)
+            collect_required_fails_the_node(runtime, worker_id)
             malformed_and_integrity(runtime, worker_id)
             caps_and_old_worker(runtime, worker_id)
             callback_contract(runtime, worker_id)

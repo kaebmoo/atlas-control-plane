@@ -101,7 +101,7 @@ behind.
 | Method | Path | Permission | Purpose |
 |---|---|---|---|
 | `GET` | `/api/packs` | `read` | List available packs (summaries; invalid bundles carry an `error`). |
-| `POST` | `/api/packs/import` | `workflows.manage` | Validate a bundle, then create its definitions + triggers. Returns the created `workflows` and `triggers`. |
+| `POST` | `/api/packs/import` | `workflows.manage` | Validate a bundle, then create its definitions + triggers. Returns the created `workflows` and `triggers`, plus `warnings` for accepted-but-inert fields (each line named per workflow). |
 | `GET` | `/api/packs/{workflow_id}/export` | `read` | Serialize one workflow definition (and its triggers) back into a bundle. |
 
 Import reuses the existing writers `create_workflow_definition` and

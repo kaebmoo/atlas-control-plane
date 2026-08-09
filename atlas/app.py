@@ -15,12 +15,21 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import __version__
 from .auth import LoginRateLimiter
 from .config import Config
-from .db import ARTIFACT_KINDS, WORKER_SYNC_MODES, Database, WorkflowVersionConflict, new_id, now_iso, resolve_in_store
+from .db import (
+    ARTIFACT_KINDS,
+    RUN_TERMINAL_STATES,
+    WORKER_SYNC_MODES,
+    Database,
+    WorkflowVersionConflict,
+    new_id,
+    now_iso,
+    resolve_in_store,
+)
 from .docmd import render_markdown
 from .jobs import CallbackSessionPending, JobManager, TERMINAL_STATES, verify_callback_token
 from .outbound import OutboundService, OutboundSettings
@@ -38,11 +47,23 @@ from .workflows import (
     _worker_matches_role,
     next_fire_at_for_trigger,
     validate_workflow_graph,
+    workflow_graph_warnings,
     validate_workflow_default_reply,
     validate_workflow_policy,
     validate_workflow_references,
     validate_workflow_trigger_payload,
 )
+
+
+class RunNotAcceptingFiles(ValueError):
+    """An upload targeted a workflow run that already reached a terminal state (HTTP 409)."""
+
+
+def _run_finished_error(run_id: str, state: str) -> str:
+    return (
+        f"workflow run {run_id} already finished ({state}); a file attached now can never be "
+        "pushed to a worker or read by a node — start a new run instead"
+    )
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -354,7 +375,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 return
             self._handle_static(path)
-        except WorkflowVersionConflict as exc:
+        except (WorkflowVersionConflict, RunNotAcceptingFiles) as exc:
             self._close_if_request_body_unread()
             self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
         except ValueError as exc:
@@ -701,7 +722,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
         if parts == ["api", "workflows"]:
             if method == "GET":
                 limit = _parse_limit(query)
-                self._json({"workflows": runtime.db.list_workflow_definitions(limit)})
+                self._json({"workflows": [_with_graph_warnings(row) for row in runtime.db.list_workflow_definitions(limit)]})
                 return
             if method == "POST":
                 payload = self._read_json()
@@ -709,9 +730,9 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 # name defaults to "Untitled workflow"). Do NOT require it — that would break
                 # the published additive contract. The AI-draft path still requires name via
                 # _validate_workflow_draft, matching the stricter ai-draft schema.
-                _validate_workflow_payload(runtime, payload)
+                warnings = _validate_workflow_payload(runtime, payload)
                 workflow = runtime.db.create_workflow_definition(payload)
-                self._json({"workflow": workflow}, HTTPStatus.CREATED)
+                self._json({"workflow": workflow, "warnings": warnings}, HTTPStatus.CREATED)
                 return
 
         if parts == ["api", "workflow-templates"] and method == "GET":
@@ -750,7 +771,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
             if not workflow:
                 raise FileNotFoundError()
             if method == "GET":
-                self._json({"workflow": workflow})
+                self._json({"workflow": _with_graph_warnings(workflow)})
                 return
             if method == "PUT":
                 payload = self._read_json()
@@ -761,7 +782,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     validation_payload["default_reply"] = payload["default_reply"]
                 if "interface" in payload:
                     validation_payload["interface"] = payload["interface"]
-                _validate_workflow_payload(runtime, validation_payload)
+                warnings = _validate_workflow_payload(runtime, validation_payload)
                 _validate_workflow_metadata(payload)
                 if "interface" not in payload:
                     # interface omitted: preserves the stored value, but if graph is
@@ -771,7 +792,7 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     if stored_interface is not None:
                         cross_check_against_graph(stored_interface, graph)
                 updated = runtime.db.update_workflow_definition(workflow_id, payload)
-                self._json({"workflow": updated})
+                self._json({"workflow": updated, "warnings": warnings})
                 return
             if method == "DELETE":
                 if not runtime.db.delete_workflow_definition(workflow_id):
@@ -789,14 +810,14 @@ class AtlasHandler(BaseHTTPRequestHandler):
             # default_reply is deliberately excluded here (matches existing behavior);
             # interface is additive: validate a supplied one, else cross-check the
             # stored one against the candidate graph.
-            _validate_workflow_payload(runtime, {"graph": graph, "policy": policy})
+            warnings = _validate_workflow_payload(runtime, {"graph": graph, "policy": policy})
             if "interface" in payload:
                 validate_interface(payload["interface"], graph)
             else:
                 stored_interface = workflow.get("interface")
                 if stored_interface is not None:
                     cross_check_against_graph(stored_interface, graph)
-            self._json({"ok": True})
+            self._json({"ok": True, "warnings": warnings})
             return
 
         if len(parts) == 4 and parts[:2] == ["api", "workflows"] and parts[3] == "explain" and method == "POST":
@@ -839,10 +860,16 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     # creating a run that fails asynchronously once the engine touches it.
                     # Normalize only missing/None — a falsy non-object ([], "", 0) is rejected.
                     raise ValueError("input must be an object")
+                hold = payload.get("hold", False)
+                if not isinstance(hold, bool):
+                    # Additive flag: absent/False keeps the exact legacy start-immediately
+                    # behavior; anything but a JSON boolean is rejected up front.
+                    raise ValueError("hold must be a boolean")
                 run = runtime.workflows.start_workflow(
                     workflow_definition_id,
                     run_input,
                     expected_workflow_version=payload.get("expected_workflow_version"),
+                    hold=hold,
                 )
                 self._json({"run": run}, HTTPStatus.ACCEPTED)
                 return
@@ -1121,8 +1148,14 @@ class AtlasHandler(BaseHTTPRequestHandler):
 
     def _upload_workflow_file(self, run_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
         runtime = self.server.runtime
-        if not runtime.db.get_workflow_run(run_id):
+        run = runtime.db.get_workflow_run(run_id)
+        if not run:
             raise ValueError(f"Unknown workflow_run_id: {run_id}")
+        if run.get("state") in RUN_TERMINAL_STATES:
+            # Cheap pre-read reject so a finished run never costs a full body read. NOT the
+            # authoritative check — the run can finish while the body streams in, so the insert
+            # below re-checks atomically.
+            raise RunNotAcceptingFiles(_run_finished_error(run_id, str(run["state"])))
         key = query.get("key", [""])[0]
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", key):
             raise ValueError("file artifact key is invalid")
@@ -1135,7 +1168,13 @@ class AtlasHandler(BaseHTTPRequestHandler):
             raise ValueError("Content-Length must be an integer") from exc
         if length < 0 or length > runtime.config.max_upload_bytes:
             raise ValueError(f"file upload exceeds maximum of {runtime.config.max_upload_bytes} bytes")
-        filename = _safe_download_filename(self.headers.get("X-Filename") or "upload.bin")
+        # HTTP header values are Latin-1 on the wire, and browser fetch()/undici refuse to send
+        # anything above U+00FF at all — so a client with a non-ASCII filename (Thai, emoji, …)
+        # MUST percent-encode it (RFC 3986, e.g. encodeURIComponent) and this side decodes.
+        # unquote() leaves invalid %-sequences untouched, so a plain ASCII name passes through
+        # unchanged; the documented trade-off is that a literal name containing a VALID %XX
+        # escape (rare) is decoded once.
+        filename = _safe_download_filename(unquote(self.headers.get("X-Filename") or "upload.bin"))
         media_type = (self.headers.get("Content-Type") or "application/octet-stream").split(";", 1)[0].strip()
         opaque_id = new_id("file")
         target = runtime.upload_dir / opaque_id
@@ -1155,7 +1194,12 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary, target)
-            artifact = runtime.db.create_artifact(
+            # Reading the body above took unbounded wall-clock time, so the state check that
+            # gated it is stale by now: a cancel (or the runner finishing) can land mid-upload.
+            # Decide and insert in ONE transaction so a file_ref can never appear on a run that
+            # already finished — which would also fire its artifact_created triggers. On rejection
+            # the shared `except` below reclaims the staged blob.
+            artifact = runtime.db.create_artifact_for_live_run(
                 {
                     "run_id": run_id,
                     "key": key,
@@ -1169,6 +1213,9 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     },
                 }
             )
+            if artifact is None:
+                state = (runtime.db.get_workflow_run(run_id) or {}).get("state") or "finished"
+                raise RunNotAcceptingFiles(_run_finished_error(run_id, str(state)))
             return artifact
         except Exception:
             temporary.unlink(missing_ok=True)
@@ -1569,7 +1616,15 @@ def _validate_artifact_payload(runtime: AtlasRuntime, payload: dict[str, Any]) -
         raise ValueError("artifact metadata must be an object")
 
 
-def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any], require_name: bool = False) -> None:
+def _with_graph_warnings(workflow: dict[str, Any]) -> dict[str, Any]:
+    """Attach the accepted-but-inert report to a definition being READ. Computed per read, never
+    stored: the rule lives in workflow_graph_warnings alone, so a reader (the ops console) can
+    show it without re-implementing it and drifting when the rule grows. Writers allowlist their
+    columns, so a GET → edit → PUT round trip drops this key."""
+    return {**workflow, "warnings": workflow_graph_warnings(workflow.get("graph") or {})}
+
+
+def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any], require_name: bool = False) -> list[str]:
     if require_name and (not isinstance(payload.get("name"), str) or not payload["name"].strip()):
         # The schema requires name (minLength 1). Without this the server silently persists
         # a missing name as "Untitled workflow", disagreeing with any schema-conformant client.
@@ -1586,6 +1641,7 @@ def _validate_workflow_payload(runtime: AtlasRuntime, payload: dict[str, Any], r
         validate_workflow_default_reply(payload["default_reply"], runtime.config.outbound_allowlist)
     if "interface" in payload:
         validate_interface(payload["interface"], graph)
+    return workflow_graph_warnings(graph)
 
 
 _WORKFLOW_DRAFT_FIELDS = {"name", "description", "graph", "policy", "triggers", "explanation", "warnings"}

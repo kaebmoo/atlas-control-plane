@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "atlas" / "static"
 HTML = (STATIC / "index.html").read_text(encoding="utf-8")
 JS = (STATIC / "app.js").read_text(encoding="utf-8")
+CSS = (STATIC / "styles.css").read_text(encoding="utf-8")
 
 problems: list[str] = []
 
@@ -79,8 +80,26 @@ need('event.target.closest(".job-row, .dash-job")' in JS,
 need('state.jobRunFilter = "all"' in JS and 'showView("jobs")' in JS,
      "Overview recent jobs must open the Jobs detail view without a stale run filter")
 
+# --- accepted-but-inert definition settings are visible on the run ------------------------
+# (Mutations: drop the #workflowDefinitionWarning render in the run detail, or stop sending
+# `warnings` on GET /api/workflows, and these go red.)
+need('id="workflowDefinitionWarning"' in HTML, "run detail missing the #workflowDefinitionWarning banner")
+need('$("#workflowDefinitionWarning")' in JS, "run detail does not render #workflowDefinitionWarning")
+need("?.warnings" in JS, "the banner must use the server-computed warnings, not a local rule")
+need("definitionEl.hidden = !definitionWarnings.length" in JS, "the banner must stay hidden when there is nothing to say")
+# Anti-drift: the rule lives in atlas/workflows.workflow_graph_warnings. A console that builds
+# the message itself silently goes stale the day the rule grows a case.
+need("is ignored because" not in JS, "the console must not re-derive warning text; render what the API returns")
+# Each banner labels itself. The label used to sit on the shared .alert-warn class, so the
+# second banner silently announced itself as "Recovery required".
+# (Mutation: move the content: rule back onto .alert-warn -> red.)
+need(".alert-warn::before" not in CSS, "the shared .alert-warn class must not hard-code one banner's label")
+need("#workflowRecoveryWarning::before" in CSS, "the recovery banner lost its own label")
+need("#workflowDefinitionWarning::before" in CSS, "the ignored-settings banner has no label of its own")
+
 # --- existing anchors must not regress (careless rewrite guard) ---------------------------
 need('id="usageBudgetUnits"' in HTML, "existing Usage marker regressed")
+need('id="workflowRecoveryWarning"' in HTML, "existing run-detail alert marker regressed")
 
 if problems:
     print("check_dashboard_surfaces FAILED:")

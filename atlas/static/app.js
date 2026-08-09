@@ -756,6 +756,16 @@ function renderWorkflowRuns() {
   const recoveryEl = $("#workflowRecoveryWarning");
   recoveryEl.textContent = recovery ? `${recovery.warning} Interrupted: ${(recovery.interrupted || []).map((item) => `${item.node_key}${item.job_id ? ` (${item.job_id})` : ""}`).join(", ")}` : "";
   recoveryEl.hidden = !recovery;
+  // Fields this run's definition declares that Atlas accepts but never acts on (e.g. a
+  // collect_files on a node that runs no job). The server computes them — never re-derive the
+  // rule here, or the console goes stale the day the rule grows. Shown on the run because that
+  // is where the confusion lands: "the graph says collect these files, so where are they?"
+  const definitionWarnings = state.workflows.find((item) => item.id === run?.workflow_definition_id)?.warnings || [];
+  const definitionEl = $("#workflowDefinitionWarning");
+  definitionEl.textContent = definitionWarnings.length
+    ? `This workflow declares settings Atlas never acts on · ตั้งค่าที่ระบบไม่ได้ใช้: ${definitionWarnings.join(" · ")}`
+    : "";
+  definitionEl.hidden = !definitionWarnings.length;
   renderRunApprovals(run);
 
   const progress = run ? wfRunProgress(run) : { done: 0, total: 0, pct: 0 };
