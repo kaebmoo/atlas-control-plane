@@ -1737,11 +1737,49 @@ def _build_workflow_draft(runtime: AtlasRuntime, payload: dict[str, Any]) -> dic
     plain_prompt = str(payload.get("plain_language_prompt") or "").strip()
     if not plain_prompt:
         raise ValueError("plain_language_prompt is required")
-    draft = _run_workflow_builder(runtime, _builder_prompt(runtime, plain_prompt))
+    draft, failure = _attempt_workflow_draft(runtime, _builder_prompt(runtime, plain_prompt))
+    if failure is None:
+        return cast("dict[str, Any]", draft)
+    # ONE bounded self-repair round: feed the deterministic rejection back so the model can fix
+    # its own output. Only model-output failures reach this point (see _attempt_workflow_draft);
+    # a missing builder or a failed worker job raised there instead — a second model call cannot
+    # change those outcomes, and the retry cap keeps the endpoint at most two builder jobs.
+    retry_request = (
+        f"{plain_prompt}\n\n"
+        f"Your previous draft was rejected by deterministic validation with this error:\n{failure['error']}\n\n"
+    )
+    if failure.get("draft") is not None:
+        retry_request += f"Previous draft JSON:\n{json.dumps(failure['draft'], ensure_ascii=True)}\n\n"
+    retry_request += "Fix the error and return the corrected complete draft object."
+    draft = _run_workflow_builder(runtime, _builder_prompt(runtime, retry_request))
     draft.setdefault("triggers", [])
     draft.setdefault("warnings", [])
     _validate_workflow_draft(runtime, draft)
+    # Surface the retry in the draft's own warnings channel so a caller (and later the UI) can
+    # see the draft needed a correction round — useful signal about builder/model quality.
+    draft["warnings"] = [*draft["warnings"], f"Draft needed one self-repair retry; first attempt was rejected: {failure['error']}"]
     return draft
+
+
+def _attempt_workflow_draft(
+    runtime: AtlasRuntime, prompt: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """First draft attempt. Returns (draft, None) on success, or (None, failure) when a bounded
+    retry is worth spending a second model call on: the model replied with something that is not
+    one JSON object (_BuilderReplyError), or the draft failed deterministic validation. Failures
+    a retry cannot fix — no workflow_builder configured, or the builder job itself failed —
+    propagate immediately."""
+    try:
+        draft = _run_workflow_builder(runtime, prompt)
+    except _BuilderReplyError as exc:
+        return None, {"error": str(exc), "draft": None}
+    draft.setdefault("triggers", [])
+    draft.setdefault("warnings", [])
+    try:
+        _validate_workflow_draft(runtime, draft)
+    except ValueError as exc:
+        return None, {"error": str(exc), "draft": draft}
+    return draft, None
 
 
 def _repair_workflow(runtime: AtlasRuntime, workflow: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -1946,10 +1984,45 @@ def _builder_context(runtime: AtlasRuntime) -> dict[str, Any]:
         "node_types": {
             "worker": {"fields": ["id", "prompt", "worker_id", "workspace_id", "role", "outputs", "output_format", "budget_units"]},
             "manager": {"fields": ["id", "prompt", "worker_id", "workspace_id", "role", "schema", "budget_units"], "schema": "manager_decision_v1"},
-            "join": {"fields": ["id", "mode", "quorum"], "modes": ["all", "any", "quorum"]},
-            "human_gate": {"fields": ["id", "label", "reason", "choices"]},
+            "join": {
+                "fields": ["id", "mode", "quorum"],
+                "modes": ["all", "any", "quorum"],
+                "rules": ["quorum mode requires quorum: a positive integer"],
+            },
+            "human_gate": {
+                "fields": ["id", "label", "reason", "choices"],
+                # The nested shapes below exist because listing bare field names proved not
+                # enough: real builder models guessed choices as plain strings and were
+                # rejected by deterministic validation ("choice requires id").
+                "choices_item": {"id": "approve", "label": "Approve"},
+                "rules": [
+                    "choices is a non-empty list of objects; every choice needs a non-empty unique id and a non-empty label",
+                    "every edge leaving a human_gate that declares choices must use a human_selected condition whose choice is one of the declared choice ids",
+                ],
+            },
         },
-        "condition_types": ["always", "artifact_equals", "artifact_in", "manager_selected", "human_selected", "max_iterations_below"],
+        # One entry per supported edge-condition type with its exact field contract; a bare name
+        # list made models invent field shapes for the non-trivial conditions.
+        "condition_types": {
+            "always": {"fields": {}},
+            "artifact_equals": {
+                "fields": {"artifact": "required artifact name", "path": "optional dotted path into json artifact content", "value": "required expected value"},
+            },
+            "artifact_in": {
+                "fields": {"artifact": "required artifact name", "path": "optional dotted path into json artifact content", "values": "required list of accepted values"},
+            },
+            "manager_selected": {
+                "fields": {"target": "required node id; must equal the edge's to node"},
+                "rules": ["only valid on edges leaving a manager node; every manager edge must use manager_selected"],
+            },
+            "human_selected": {
+                "fields": {"choice": "required choice id declared by the source human_gate"},
+                "rules": ["only valid on edges leaving a human_gate node"],
+            },
+            "max_iterations_below": {
+                "fields": {"node": "required node id whose completed iterations are counted", "max": "required positive integer"},
+            },
+        },
         "trigger_types": ["manual", "schedule", "webhook", "workflow_run_completed", "artifact_created", "worker_status_changed"],
         "schedule_configs": [{"interval_minutes": 15}, {"daily_time": "09:30"}],
         "artifact_kinds": sorted(ARTIFACT_KINDS),
@@ -1967,14 +2040,20 @@ def _workflow_builder_worker(workers: list[dict[str, Any]]) -> dict[str, Any] | 
     return None
 
 
+class _BuilderReplyError(ValueError):
+    """The workflow_builder model's reply was not a single JSON object. Kept as a distinct
+    ValueError subclass so the draft path can tell this retry-worthy model-output failure apart
+    from infrastructure failures (missing builder, failed job) without matching message text."""
+
+
 def _json_from_text(text: str) -> dict[str, Any]:
     stripped = text.strip()
     try:
         data = json.loads(stripped)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"workflow_builder response must be one JSON object: {exc.msg}") from exc
+        raise _BuilderReplyError(f"workflow_builder response must be one JSON object: {exc.msg}") from exc
     if not isinstance(data, dict):
-        raise ValueError("workflow_builder response must be a JSON object")
+        raise _BuilderReplyError("workflow_builder response must be a JSON object")
     return data
 
 

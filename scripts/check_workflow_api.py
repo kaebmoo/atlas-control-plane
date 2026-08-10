@@ -769,6 +769,10 @@ def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) ->
     )
     original_submit = runtime.jobs.submit
     response = {"text": ""}
+    # A queue for multi-call scenarios (draft self-repair retry): each submit pops the next
+    # reply; when empty it falls back to response["text"] so single-reply cases stay unchanged.
+    response_queue: list[str] = []
+    fail_job = {"flag": False}
     prompts: list[str] = []
 
     def submit(payload: dict, *, on_created=None) -> dict:
@@ -776,7 +780,10 @@ def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) ->
         job = runtime.db.create_job(
             {"worker_id": builder["id"], "prompt": payload["prompt"], "state": "running"}
         )
-        runtime.db.append_job_text(job["id"], response["text"])
+        if fail_job["flag"]:
+            runtime.db.update_job(job["id"], state="failed", error="builder worker exploded", finished_at=now_iso())
+            return runtime.db.get_job(job["id"]) or job
+        runtime.db.append_job_text(job["id"], response_queue.pop(0) if response_queue else response["text"])
         runtime.db.update_job(job["id"], state="succeeded", finished_at=now_iso())
         return runtime.db.get_job(job["id"]) or job
 
@@ -807,6 +814,18 @@ def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) ->
         )["draft"]
         assert draft["triggers"][0]["config"]["interval_minutes"] == 15
         assert all(value in prompts[-1] for value in ["human_gate", "manager", "join", "artifact_kinds", "policy_defaults"])
+        # The context must spell out nested field contracts, not just field names: a real
+        # builder model guessed human_gate choices as plain strings ("choice requires id")
+        # because nothing in the context showed the object shape or per-condition fields.
+        assert all(
+            fragment in prompts[-1]
+            for fragment in (
+                "choices_item",
+                "declared choice ids",
+                "must equal the edge's to node",
+                "required positive integer",
+            )
+        ), "builder context must include the nested choices/condition contracts"
 
         invalid_schedule = dict(valid_draft, triggers=[{"type": "schedule", "config": {"interval_minutes": 0}}])
         response["text"] = json.dumps(invalid_schedule)
@@ -835,6 +854,62 @@ def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) ->
             assert fragment in request_error(
                 base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "bad draft"}
             )["error"], fragment
+
+        # Bounded self-repair: a first draft with the classic wrong choices shape (plain strings)
+        # is fed back to the builder exactly once; the corrected second reply comes out with a
+        # retry note appended to warnings.
+        gate_draft_bad = json.loads(json.dumps(valid_draft))
+        gate_draft_bad["graph"]["nodes"][0] = {"id": "gate", "type": "human_gate", "label": "Approve", "choices": ["approve", "revise"]}
+        gate_draft_good = json.loads(json.dumps(valid_draft))
+        gate_draft_good["graph"]["nodes"][0] = {
+            "id": "gate",
+            "type": "human_gate",
+            "label": "Approve",
+            "choices": [{"id": "approve", "label": "Approve"}, {"id": "revise", "label": "Revise"}],
+        }
+        gate_draft_good["graph"]["edges"] = [
+            {"from": "gate", "to": "join", "condition": {"type": "human_selected", "choice": "approve"}}
+        ]
+        calls_before = len(prompts)
+        response_queue[:] = [json.dumps(gate_draft_bad), json.dumps(gate_draft_good)]
+        repaired = request(
+            base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "gate with approve/revise choices"}
+        )["draft"]
+        assert len(prompts) == calls_before + 2, "self-repair must spend exactly one extra builder call"
+        assert "choice requires id" in prompts[-1], "retry prompt must carry the deterministic validation error"
+        assert "Previous draft JSON" in prompts[-1], "retry prompt must carry the rejected draft"
+        assert repaired["graph"]["nodes"][0]["choices"][0] == {"id": "approve", "label": "Approve"}
+        assert any("self-repair" in warning for warning in repaired["warnings"]), "retry must be surfaced in warnings"
+
+        # A reply that is not one JSON object is the same retry-worthy class as a validation
+        # failure — one bounded retry, then success.
+        calls_before = len(prompts)
+        response_queue[:] = ["```json\n{\"name\": \"fenced\"}\n```", json.dumps(valid_draft)]
+        retried = request(
+            base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "fenced reply"}
+        )["draft"]
+        assert len(prompts) == calls_before + 2
+        assert any("self-repair" in warning for warning in retried["warnings"])
+
+        # Persistently invalid output still fails closed after exactly two calls, and the error
+        # is the deterministic validation message, not retry mechanics.
+        calls_before = len(prompts)
+        response_queue[:] = [json.dumps(gate_draft_bad), json.dumps(gate_draft_bad)]
+        persistent = request_error(
+            base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "still bad"}
+        )
+        assert "choice requires id" in persistent["error"]
+        assert len(prompts) == calls_before + 2, "retry is bounded to exactly one extra call"
+
+        # Infrastructure failures (the builder job itself fails) must NOT spend a second model
+        # call — a retry cannot fix an offline worker or a dead key.
+        calls_before = len(prompts)
+        fail_job["flag"] = True
+        infra = request_error(base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "job dies"})
+        fail_job["flag"] = False
+        assert "workflow_builder job failed" in infra["error"]
+        assert len(prompts) == calls_before + 1, "a failed builder job must not trigger a retry"
+        assert not response_queue, "all queued replies must have been consumed"
 
         response["text"] = json.dumps({"explanation": "Builder explanation."})
         assert request(base_url, "POST", f"/api/workflows/{workflow_id}/explain")["explanation"] == "Builder explanation."
