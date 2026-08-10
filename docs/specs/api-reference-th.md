@@ -534,8 +534,9 @@ inherit มัน — ถ้า allowlist เปลี่ยนจน default �
 
 ### Workflow status คือ execution policy
 
-`status` รับได้เฉพาะ `draft`, `active`, `disabled` (สร้างใหม่ default เป็น `draft`;
-ค่าอื่นได้ `400`) และถูกบังคับใช้ที่ทุกทางเริ่ม run — ทั้ง `POST /api/workflow-runs`
+`status` รับได้เฉพาะ `draft`, `active`, `disabled` (ตอนสร้าง ถ้าไม่ส่งหรือส่ง `null`
+จะ default เป็น `draft`; ค่าอื่นทั้งหมดรวมถึง `""`, `false`, `0` ได้ `400`)
+และถูกบังคับใช้ที่ทุกทางเริ่ม run — ทั้ง `POST /api/workflow-runs`
 โดยตรง, trigger fire และการเริ่มภายในที่อ้าง definition:
 
 | Status | Test run | Production run | Trigger run |

@@ -559,8 +559,9 @@ foreign-key behavior.
 
 ### Workflow status is execution policy
 
-`status` accepts exactly `draft`, `active`, or `disabled` (create defaults to
-`draft`; anything else is a `400`). It is enforced at every start path — direct
+`status` accepts exactly `draft`, `active`, or `disabled` (on create, omitted or
+`null` defaults to `draft`; every other value, including `""`, `false`, and `0`,
+is a `400`). It is enforced at every start path — direct
 `POST /api/workflow-runs`, trigger fire, and internal definition-backed starts:
 
 | Status | Test run | Production run | Trigger run |
