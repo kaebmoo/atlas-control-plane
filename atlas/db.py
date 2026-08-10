@@ -2347,6 +2347,10 @@ class Database:
         tags = payload.get("tags") or []
         if isinstance(tags, str):
             tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
+        # Stored stripped like tags: every reader (router, workflow role matching, the AI-draft
+        # builder context) compares roles stripped+lowercased, so a padded role would be
+        # advertised as available and then never match.
+        role = str(payload.get("role") or "").strip()
         if not payload.get("base_url"):
             raise ValueError("base_url is required")
         base_url = str(payload["base_url"]).rstrip("/")
@@ -2382,7 +2386,7 @@ class Database:
                     payload.get("name") or base_url,
                     base_url,
                     token,
-                    payload.get("role") or "",
+                    role,
                     encode_json(tags),
                     payload.get("status") or "unknown",
                     payload.get("last_seen_at"),
