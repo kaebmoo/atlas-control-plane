@@ -130,6 +130,10 @@
   unblock ชัดเจน: T5–T6 file collect/push (sync-gated), T7 worker deploy,
   T8 chat-completions (benchmark-gated); risk register + review deltas + DoD
   ต่อ milestone
+- [AI Draft Authoring Plan](plans/ai-draft-authoring-plan.md) — พา "ภาษาคน → AI ร่าง
+  workflow → คนรีวิว" จาก API-only ไปเป็นฟีเจอร์จริง: D1 commit hardening → D2 role
+  grounding → D3 ปุ่ม Draft with AI ใน flow-designer → D4 editor assists; D5 `/revise`
+  + D6 chat refine เป็น backlog; บันทึกผล field test 3 รอบ + DoD ต่อ stage
 
 ## Prompt files
 
@@ -146,6 +150,9 @@
   review (feature-dev:code-reviewer subagent) → แก้ findings → commit → review HEAD
 - [Input Adapter & Return Path — Spin Prompts](prompts/input-adapter-return-path-spin-prompts.md)
   — driver สำหรับ IA-1 → OB-1 (ทำต่อเนื่อง, commit เมื่อ check เขียว)
+- [AI Draft Authoring — Spin Prompts](prompts/ai-draft-authoring-spin-prompts.md) —
+  prompt ต่อ stage สำหรับ D1→D4 (สอง repo: Atlas + flow-designer) พร้อม driver;
+  D5/D6 ต้องให้คนยืนยันก่อนรัน
 
 ## โครงสร้าง
 
@@ -171,12 +178,14 @@ docs/
 │   ├── usage-metering-billing-plan.md   (internal, not committed)
 │   ├── nt-aiaas-business-plan.md        (internal, not committed)
 │   ├── ga-completion-plan.md
-│   └── input-adapter-return-path-plan.md
+│   ├── input-adapter-return-path-plan.md
+│   └── ai-draft-authoring-plan.md
 ├── prompts/
 │   ├── workflow-engine-spin-prompts.md
 │   ├── sovereign-platform-spin-prompts.md
 │   ├── ga-completion-spin-prompts.md
-│   └── input-adapter-return-path-spin-prompts.md
+│   ├── input-adapter-return-path-spin-prompts.md
+│   └── ai-draft-authoring-spin-prompts.md
 ├── specs/
 │   ├── api-reference-th.md
 │   ├── api-reference-en.md
