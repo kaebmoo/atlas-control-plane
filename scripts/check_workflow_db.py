@@ -34,6 +34,7 @@ def main() -> None:
 
         definition = db.create_workflow_definition(
             {
+                "status": "active",
                 "name": "Smoke",
                 "graph": {"start": "a", "nodes": [], "edges": []},
                 "policy": {"max_jobs": 1},

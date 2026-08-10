@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Workflow status is now execution policy, enforced at every start path by one
+  shared guard (`ensure_workflow_runnable`): `draft` allows explicit test runs
+  only, `active` allows test and production, `disabled` blocks every run.
+  `POST /api/workflow-runs` accepts `execution_mode` (`test` | `production`,
+  omitted = `production` so legacy callers fail closed against drafts). A status
+  refusal is `409` with the stable body
+  `{"error": "workflow_not_runnable", "reason": …, "status": …}` and creates no
+  run; trigger fire always uses production mode and records the refusal as a
+  `failed` trigger event. `status` is validated against the closed vocabulary
+  `draft`/`active`/`disabled` on create and update (create still defaults to
+  `draft`), status changes are audited as `workflow_definition.status_change`
+  with the old/new pair, and migration 016 backfills pre-enforcement rows to
+  `active` (preserving explicit `disabled`, audited as
+  `workflow_definition.status_backfill`) so no existing workflow stops running.
+  Hermetic coverage: `scripts/check_workflow_status.py` in the gate.
 - Added held runs: `POST /api/workflow-runs` accepts `"hold": true` to create a
   born-paused run so input files can be attached race-free before an explicit
   resume starts it (event `run_created_held`, audit `workflow.run_created_held`).

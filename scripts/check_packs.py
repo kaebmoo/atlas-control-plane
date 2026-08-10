@@ -146,7 +146,7 @@ def main() -> None:
 
         # Export preserves the definition version (no silent downgrade on round-trip).
         versioned = db.create_workflow_definition(
-            {"name": "V2", "version": 2, "graph": bundle["workflows"][0]["graph"], "policy": {}}
+            {"status": "active", "name": "V2", "version": 2, "graph": bundle["workflows"][0]["graph"], "policy": {}}
         )
         exported_v2 = export_pack(db, versioned["id"])
         assert exported_v2["workflows"][0]["version"] == 2, exported_v2["workflows"][0]

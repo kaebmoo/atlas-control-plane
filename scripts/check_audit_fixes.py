@@ -54,7 +54,7 @@ def check_finalize_is_conditional(db: Database) -> None:
 def check_run_snapshot(db: Database) -> None:
     """A run executes the graph/policy it started on, even after the live definition is edited
     or deleted: the snapshot is persisted and the resolver prefers it."""
-    definition = db.create_workflow_definition({"name": "S", "graph": GRAPH, "policy": {"max_jobs": 3}})
+    definition = db.create_workflow_definition({"status": "active", "name": "S", "graph": GRAPH, "policy": {"max_jobs": 3}})
     runner = WorkflowRunner(db, JobManager(db))
     run = runner._create_run(GRAPH, {"max_jobs": 3}, {"topic": "x"}, definition["id"], "run")
     stored = db.get_workflow_run(run["id"])
@@ -131,7 +131,7 @@ def check_workflow_input_type(db: Database) -> None:
     fired and library runs, not just the HTTP handler) before any run is created. Only None is
     normalized to {}; falsy non-objects ([], "", 0, False) must NOT slip through as {}."""
     runner = WorkflowRunner(db, JobManager(db))
-    definition = db.create_workflow_definition({"name": "I", "graph": GRAPH, "policy": {}})
+    definition = db.create_workflow_definition({"status": "active", "name": "I", "graph": GRAPH, "policy": {}})
     before = len(db.list_workflow_runs(limit=10))
     for bad in (["not", "an", "object"], [], "", 0, False):
         try:
@@ -148,7 +148,7 @@ def check_trigger_payload_type(db: Database) -> None:
     must be rejected, not coerced to {} and persisted as a run's input."""
     runner = WorkflowRunner(db, JobManager(db))
     triggers = WorkflowTriggerService(db, runner)
-    definition = db.create_workflow_definition({"name": "T", "graph": GRAPH, "policy": {}})
+    definition = db.create_workflow_definition({"status": "active", "name": "T", "graph": GRAPH, "policy": {}})
     trigger = db.create_workflow_trigger(
         {"workflow_definition_id": definition["id"], "name": "m", "type": "manual", "enabled": True}
     )
@@ -169,7 +169,7 @@ def check_schedule_advances_past_stuck_claim(db: Database) -> None:
     no duplicate run."""
     runner = WorkflowRunner(db, JobManager(db))
     triggers = WorkflowTriggerService(db, runner)
-    definition = db.create_workflow_definition({"name": "Sched", "graph": GRAPH, "policy": {}})
+    definition = db.create_workflow_definition({"status": "active", "name": "Sched", "graph": GRAPH, "policy": {}})
     past = "2000-01-01T00:00:00Z"
     trigger = db.create_workflow_trigger(
         {

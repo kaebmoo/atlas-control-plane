@@ -775,7 +775,7 @@ def check_workflow_recovery_marks_callback_pending(tmp: Path) -> None:
         "nodes": [{"id": "a", "type": "worker", "prompt": "p", "worker_id": worker["id"], "execution": "callback"}],
         "edges": [],
     }
-    definition = db.create_workflow_definition({"name": "Callback recovery", "graph": graph})
+    definition = db.create_workflow_definition({"status": "active", "name": "Callback recovery", "graph": graph})
     run = db.create_workflow_run(
         {
             "workflow_definition_id": definition["id"],
@@ -1003,7 +1003,7 @@ def check_usage_context_backfill(tmp: Path) -> None:
     db = Database(tmp / "backfill.sqlite")
     worker = db.upsert_worker({"base_url": "http://127.0.0.1:9", "name": "backfill"})
     definition = db.create_workflow_definition(
-        {"name": "Backfill", "graph": {"start": "a", "nodes": [{"id": "a", "type": "worker", "prompt": "p", "worker_id": worker["id"]}], "edges": []}}
+        {"status": "active", "name": "Backfill", "graph": {"start": "a", "nodes": [{"id": "a", "type": "worker", "prompt": "p", "worker_id": worker["id"]}], "edges": []}}
     )
     run = db.create_workflow_run({"workflow_definition_id": definition["id"], "state": "running", "started_at": "2026-01-01T00:00:00Z"})
     node = db.create_workflow_node({"run_id": run["id"], "node_key": "a", "state": "running", "attempt": 1})
@@ -1060,6 +1060,7 @@ def check_workflow_wait_extends_for_callback(tmp: Path) -> None:
         worker = db.upsert_worker({"base_url": worker_base, "name": "wf-wait"})
         definition = db.create_workflow_definition(
             {
+                "status": "active",
                 "name": "Callback wait",
                 "graph": {
                     "start": "a",
@@ -1329,7 +1330,7 @@ def check_attribution_inside_terminal_transaction(tmp: Path) -> None:
     db = Database(tmp / "attrtxn.sqlite")
     worker = db.upsert_worker({"base_url": "http://127.0.0.1:9", "name": "attr"})
     definition = db.create_workflow_definition(
-        {"name": "Attr", "graph": {"start": "a", "nodes": [{"id": "a", "type": "worker", "prompt": "p", "worker_id": worker["id"]}], "edges": []}}
+        {"status": "active", "name": "Attr", "graph": {"start": "a", "nodes": [{"id": "a", "type": "worker", "prompt": "p", "worker_id": worker["id"]}], "edges": []}}
     )
     run = db.create_workflow_run({"workflow_definition_id": definition["id"], "state": "running", "started_at": "2026-01-01T00:00:00Z"})
     job = db.create_job({"worker_id": worker["id"], "prompt": "p", "state": "queued", "execution": "callback"})
@@ -1477,7 +1478,7 @@ def check_workflow_run_rejects_unconfigured_callback(tmp: Path) -> None:
         "nodes": [{"id": "a", "type": "worker", "prompt": "p", "worker_id": worker["id"], "execution": "callback"}],
         "edges": [],
     }
-    definition = db.create_workflow_definition({"name": "Unconfigured callback", "graph": graph})
+    definition = db.create_workflow_definition({"status": "active", "name": "Unconfigured callback", "graph": graph})
 
     unconfigured = WorkflowRunner(db, JobManager(db))  # no public_base_url / secret_key
     before = len(db.list_workflow_runs(limit=100))

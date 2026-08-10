@@ -557,6 +557,26 @@ treated as `{}`). `DELETE` removes the definition and its triggers. Historical r
 remain, while their `workflow_definition_id` may become null according to the
 foreign-key behavior.
 
+### Workflow status is execution policy
+
+`status` accepts exactly `draft`, `active`, or `disabled` (create defaults to
+`draft`; anything else is a `400`). It is enforced at every start path — direct
+`POST /api/workflow-runs`, trigger fire, and internal definition-backed starts:
+
+| Status | Test run | Production run | Trigger run |
+| --- | --- | --- | --- |
+| `draft` | allowed | blocked | blocked |
+| `active` | allowed | allowed | allowed |
+| `disabled` | blocked | blocked | blocked |
+
+A status change is audited as `workflow_definition.status_change` with the
+old/new pair. Workflow `status` and trigger `enabled` are independent switches:
+disabling a trigger silences that trigger only, while a non-`active` workflow
+status blocks production starts from every entry point. Rows that existed
+before this rule were backfilled to `active` (migration 016, audited as
+`workflow_definition.status_backfill`) so nothing stopped running; explicit
+`disabled` rows were preserved.
+
 Create, update, and validation responses include a top-level `warnings` array. For
 backward compatibility, `collect_files` on a non-`worker`/`manager` node is still
 accepted so an older graph can be saved, but it is ignored at runtime; move the field
@@ -730,6 +750,22 @@ curl -sS -X POST "$BASE_URL/api/workflow-runs" \
 
 The API returns `202`. Run states are `running`, `paused`, `waiting_for_human`,
 `recovery_required`, `succeeded`, `failed`, and `cancelled`.
+
+`execution_mode` is optional and accepts `test` or `production` (anything else
+is a `400`). Omitted means `production`, so legacy callers fail closed against
+a `draft` workflow. The workflow's status gates the start: `draft` allows only
+`"execution_mode":"test"`, `active` allows both modes, `disabled` allows
+neither. A refusal is `409` with a stable machine-readable body and creates no
+run:
+
+```json
+{"error":"workflow_not_runnable","reason":"draft_requires_test_mode","status":"draft"}
+```
+
+`reason` is one of `draft_requires_test_mode`, `workflow_disabled`, or
+`status_not_runnable`. Trigger-created runs always start in production mode, so
+a draft or disabled workflow never runs from a trigger; the refusal is recorded
+on the trigger as a `failed` event whose error names `workflow_not_runnable`.
 
 When the target workflow has an [interface](#7-workflow-definitions-and-ai-builder),
 this same call validates `input` before creating any run: the reserved-key

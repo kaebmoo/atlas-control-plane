@@ -28,6 +28,10 @@ ROLES = frozenset({"admin", "operator", "viewer", "auditor"})
 # by a node. One definition, shared by the writers that must not act on such a run.
 RUN_TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 USER_STATUSES = frozenset({"active", "disabled"})
+# Workflow status IS execution policy (draft = test-only, active = runnable, disabled =
+# blocked). Closed vocabulary, validated at the single create/update choke points below so
+# every writer (API, packs import) gets the same rule.
+WORKFLOW_STATUSES = frozenset({"draft", "active", "disabled"})
 _WORKER_TOKEN_MARKER = "atlasenc:v1:"
 _AUDIT_ACTOR = contextvars.ContextVar("atlas_audit_actor", default="local")
 
@@ -725,6 +729,36 @@ def _migration_015_workflow_interface(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_016_workflow_status_backfill(conn: sqlite3.Connection) -> None:
+    """Status becomes execution policy (draft = test-only, active = runnable, disabled =
+    blocked). Before this release every workflow was runnable regardless of its status
+    label, so existing rows must keep running: backfill everything except an explicit
+    'disabled' (operator intent, preserved) to 'active'. This also folds legacy free-form
+    statuses into the closed vocabulary. Idempotent: a re-run matches no rows. New
+    workflows created after this release still default to 'draft'."""
+    migrated_at = now_iso()
+    rows = conn.execute(
+        "SELECT id, status FROM workflow_definitions WHERE status NOT IN ('active', 'disabled')"
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "UPDATE workflow_definitions SET status = 'active' WHERE id = ?",
+            (row["id"],),
+        )
+        conn.execute(
+            "INSERT INTO audit_log(action, actor, resource_type, resource_id, details, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "workflow_definition.status_backfill",
+                "system:migration",
+                "workflow_definition",
+                row["id"],
+                encode_json({"old_status": row["status"], "new_status": "active"}),
+                migrated_at,
+            ),
+        )
+
+
 # Ordered, append-only migration steps. A step is either a SQL string (run via
 # executescript) or a callable(conn). The 1-based index is the schema version.
 # Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
@@ -748,6 +782,7 @@ MIGRATIONS: list[str | Any] = [
     _migration_013_workflow_default_reply,
     _migration_014_token_lifecycle,
     _migration_015_workflow_interface,
+    _migration_016_workflow_status_backfill,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -1265,8 +1300,15 @@ class Database:
         if status not in USER_STATUSES:
             raise ValueError(f"status must be one of: {', '.join(sorted(USER_STATUSES))}")
 
+    @staticmethod
+    def _validate_workflow_status(status: Any) -> str:
+        if status not in WORKFLOW_STATUSES:
+            raise ValueError(f"workflow status must be one of: {', '.join(sorted(WORKFLOW_STATUSES))}")
+        return status
+
     def create_workflow_definition(self, payload: dict[str, Any]) -> dict[str, Any]:
         definition_id = payload.get("id") or new_id("wfd")
+        status = self._validate_workflow_status(payload.get("status") or "draft")
         now = now_iso()
         with self._lock, self.connect() as conn:
             conn.execute(
@@ -1281,7 +1323,7 @@ class Database:
                     payload.get("name") or "Untitled workflow",
                     payload.get("description") or "",
                     int(payload.get("version") or 1),
-                    payload.get("status") or "draft",
+                    status,
                     encode_json(payload.get("graph") or {}),
                     encode_json(payload.get("policy") or {}),
                     encode_json(payload["default_reply"]) if payload.get("default_reply") is not None else None,
@@ -1290,7 +1332,7 @@ class Database:
                     now,
                 ),
             )
-        self.audit("workflow_definition.create", "workflow_definition", definition_id)
+        self.audit("workflow_definition.create", "workflow_definition", definition_id, {"status": status})
         return self.get_workflow_definition(definition_id) or {}
 
     def get_workflow_definition(self, definition_id: str) -> dict[str, Any] | None:
@@ -1323,6 +1365,8 @@ class Database:
             "default_reply": "default_reply",
             "interface": "interface",
         }
+        if "status" in payload:
+            self._validate_workflow_status(payload["status"])
         fields: dict[str, Any] = {}
         for key, column in allowed.items():
             if key in payload:
@@ -1344,6 +1388,14 @@ class Database:
         fields["updated_at"] = now_iso()
         assignments = _set_clause(fields)
         with self._lock, self.connect() as conn:
+            old_status = None
+            if "status" in fields:
+                # Read under the same lock as the write so the audited old→new pair is the
+                # transition that actually happened, not one interleaved with another writer.
+                row = conn.execute(
+                    "SELECT status FROM workflow_definitions WHERE id = ?", (definition_id,)
+                ).fetchone()
+                old_status = row["status"] if row else None
             sql = f"UPDATE workflow_definitions SET {assignments} WHERE id = ?"  # nosec B608
             params: list[Any] = [*fields.values(), definition_id]
             if expected_version is not None:
@@ -1357,6 +1409,15 @@ class Database:
             raise WorkflowVersionConflict("workflow version conflict; refresh and merge before saving")
         if cursor.rowcount:
             self.audit("workflow_definition.update", "workflow_definition", definition_id)
+            if "status" in fields and old_status != fields["status"]:
+                # Status is execution policy, so its transitions get their own audit trail
+                # (actor comes from the ambient as_actor context, like every audit row).
+                self.audit(
+                    "workflow_definition.status_change",
+                    "workflow_definition",
+                    definition_id,
+                    {"old_status": old_status, "new_status": fields["status"]},
+                )
         return self.get_workflow_definition(definition_id)
 
     def delete_workflow_definition(self, definition_id: str) -> bool:

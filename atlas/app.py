@@ -24,6 +24,7 @@ from .db import (
     ARTIFACT_KINDS,
     RUN_TERMINAL_STATES,
     WORKER_SYNC_MODES,
+    WORKFLOW_STATUSES,
     Database,
     WorkflowVersionConflict,
     new_id,
@@ -40,7 +41,9 @@ from .usage import audit_csv, normalize_usage_range, summarize_usage, usage_csv
 from .workflow_interface import cross_check_against_graph, validate_interface
 from .workflow_templates import workflow_templates
 from .workflows import (
+    WORKFLOW_EXECUTION_MODES,
     WORKFLOW_POLICY_LIMITS,
+    WorkflowNotRunnable,
     WorkflowRunner,
     WorkflowTriggerService,
     _string_list,
@@ -375,6 +378,11 @@ class AtlasHandler(BaseHTTPRequestHandler):
                 self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 return
             self._handle_static(path)
+        except WorkflowNotRunnable as exc:
+            # Stable contract (before the generic ValueError catch — this IS a ValueError):
+            # 409 with {"error": "workflow_not_runnable", "reason": ..., "status": ...}.
+            self._close_if_request_body_unread()
+            self._json(exc.payload, HTTPStatus.CONFLICT)
         except (WorkflowVersionConflict, RunNotAcceptingFiles) as exc:
             self._close_if_request_body_unread()
             self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
@@ -865,11 +873,17 @@ class AtlasHandler(BaseHTTPRequestHandler):
                     # Additive flag: absent/False keeps the exact legacy start-immediately
                     # behavior; anything but a JSON boolean is rejected up front.
                     raise ValueError("hold must be a boolean")
+                execution_mode = payload.get("execution_mode", "production")
+                if execution_mode not in WORKFLOW_EXECUTION_MODES:
+                    # Omitted means production, so a legacy caller fails closed against a
+                    # draft workflow; only an explicit "test" opts into the draft exception.
+                    raise ValueError(f"execution_mode must be one of {sorted(WORKFLOW_EXECUTION_MODES)}")
                 run = runtime.workflows.start_workflow(
                     workflow_definition_id,
                     run_input,
                     expected_workflow_version=payload.get("expected_workflow_version"),
                     hold=hold,
+                    execution_mode=execution_mode,
                 )
                 self._json({"run": run}, HTTPStatus.ACCEPTED)
                 return
@@ -1681,8 +1695,9 @@ def _validate_workflow_draft(runtime: AtlasRuntime, draft: dict[str, Any]) -> No
 def _validate_workflow_metadata(payload: dict[str, Any]) -> None:
     """Validate the additive metadata fields a PUT can persist. OpenAPI types `version` as
     an integer; reject a non-integer (a string version is stored as-is and later breaks pack
-    export). `status` feeds a dashboard class attribute, so restrict it to a safe token
-    (defense in depth with the client-side sanitizer). Normalizes a digit-string version."""
+    export). `status` is execution policy (draft = test-only, active = runnable, disabled =
+    blocked), a closed vocabulary shared with the db-layer validator. Normalizes a
+    digit-string version."""
     if "version" in payload:
         version = payload["version"]
         if isinstance(version, str) and version.isdigit():
@@ -1690,10 +1705,8 @@ def _validate_workflow_metadata(payload: dict[str, Any]) -> None:
         if isinstance(version, bool) or not isinstance(version, int) or version < 1:
             raise ValueError("workflow version must be an integer >= 1")
         payload["version"] = version
-    if "status" in payload:
-        status = payload["status"]
-        if not isinstance(status, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", status):
-            raise ValueError("workflow status must match [A-Za-z0-9_-]+")
+    if "status" in payload and payload["status"] not in WORKFLOW_STATUSES:
+        raise ValueError(f"workflow status must be one of: {', '.join(sorted(WORKFLOW_STATUSES))}")
 
 
 def _validate_workflow_policy(policy: dict[str, Any]) -> None:

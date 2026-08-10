@@ -73,6 +73,7 @@ def main() -> None:
         )
         definition = runtime.db.create_workflow_definition(
             {
+                "status": "active",
                 "name": "Complaint intake",
                 "graph": {
                     "start": "work",
