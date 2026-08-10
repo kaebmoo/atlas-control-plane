@@ -1302,13 +1302,14 @@ class Database:
 
     @staticmethod
     def _validate_workflow_status(status: Any) -> str:
-        if status not in WORKFLOW_STATUSES:
+        if not isinstance(status, str) or status not in WORKFLOW_STATUSES:
             raise ValueError(f"workflow status must be one of: {', '.join(sorted(WORKFLOW_STATUSES))}")
         return status
 
     def create_workflow_definition(self, payload: dict[str, Any]) -> dict[str, Any]:
         definition_id = payload.get("id") or new_id("wfd")
-        status = self._validate_workflow_status(payload.get("status") or "draft")
+        requested_status = payload.get("status")
+        status = self._validate_workflow_status("draft" if requested_status is None else requested_status)
         now = now_iso()
         with self._lock, self.connect() as conn:
             conn.execute(

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .db import ROLES, Database
+from .db import ROLES, WORKFLOW_STATUSES, Database
 from .workflow_interface import validate_interface
 from .workflows import (
     next_fire_at_for_trigger,
@@ -80,6 +80,11 @@ def validate_pack(bundle: Any) -> dict[str, Any]:
             int(workflow.get("version") or 1)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"pack workflow at index {index} has a non-integer version: {workflow.get('version')!r}") from exc
+        status = workflow.get("status")
+        if status is not None and (not isinstance(status, str) or status not in WORKFLOW_STATUSES):
+            raise ValueError(
+                f"pack workflow at index {index} status must be one of: {', '.join(sorted(WORKFLOW_STATUSES))}"
+            )
         # Run the real engine validators — never a bypass. Policy caps too, so an
         # imported pack cannot exceed limits the workflow API would reject.
         validate_workflow_graph(workflow.get("graph") or {}, workflow.get("policy"))
@@ -151,7 +156,7 @@ def import_pack(
                         "name": workflow["name"],
                         "description": workflow.get("description") or "",
                         "version": int(workflow.get("version") or 1),
-                        "status": workflow.get("status") or "active",
+                        "status": "active" if workflow.get("status") is None else workflow["status"],
                         "graph": workflow.get("graph") or {},
                         "policy": workflow.get("policy") or {},
                         "interface": workflow.get("interface"),

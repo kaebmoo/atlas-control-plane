@@ -30,7 +30,7 @@ Packs ship under `atlas/packs/*.json`. The reference pack is
       "name": "…",                // required
       "description": "…",         // optional
       "version": 1,               // optional int, default 1; must be integer-convertible
-      "status": "active",         // optional (default active)
+      "status": "active",         // optional; omitted/null defaults active
       "graph": { … },             // required; validated by the workflow graph validator
       "policy": { … },            // optional; same shape as a workflow definition policy
       "interface": { … }          // optional; same shape as a workflow definition interface (see ADR 0002)
@@ -61,6 +61,8 @@ A bundle is rejected (`400`, clear error message) unless **all** hold:
 - `workflows` is a non-empty list; every workflow has a `name` and a `graph` that
   passes the engine's `validate_workflow_graph` (node types, edges, conditions, joins,
   cycles-need-a-guard — exactly the same rules as `POST /api/workflows`).
+- each workflow `status` is omitted/`null` (defaults to `active`) or exactly `draft`,
+  `active`, or `disabled`; other values including `""`, `false`, and `0` are rejected.
 - every entry in `roles` is one of `admin`, `operator`, `viewer`, `auditor`.
 - every trigger's `workflow` index points at an existing workflow and its `type` passes
   `validate_workflow_trigger_payload`.

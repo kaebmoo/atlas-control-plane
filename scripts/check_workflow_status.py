@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT))
 from atlas.app import AtlasHttpServer, AtlasRuntime
 from atlas.config import Config
 from atlas.db import Database, _migration_016_workflow_status_backfill, now_iso
+from atlas.packs import import_pack, validate_pack
 from atlas.workflows import WorkflowNotRunnable, ensure_workflow_runnable
 
 # A join-only graph finishes without any worker, so "allowed" runs stay hermetic.
@@ -87,11 +88,18 @@ def check_http(runtime: AtlasRuntime, base_url: str) -> None:
     # Create defaults to draft; the closed vocabulary is enforced on create and update.
     workflow = request(base_url, "POST", "/api/workflows", {"name": "Status", "graph": GRAPH})["workflow"]
     assert workflow["status"] == "draft", workflow["status"]
-    status_code, invalid = request_error(base_url, "POST", "/api/workflows", {"name": "bad", "graph": GRAPH, "status": "archived"})
-    assert status_code == HTTPStatus.BAD_REQUEST and "status must be one of" in invalid["error"], invalid
+    assert request(base_url, "POST", "/api/workflows", {"name": "Null status", "graph": GRAPH, "status": None})["workflow"]["status"] == "draft"
+    for bad_status in ("archived", "", False, 0):
+        status_code, invalid = request_error(
+            base_url,
+            "POST",
+            "/api/workflows",
+            {"name": "bad", "graph": GRAPH, "status": bad_status},
+        )
+        assert status_code == HTTPStatus.BAD_REQUEST and "status must be one of" in invalid["error"], invalid
     status_code, invalid = request_error(base_url, "PUT", f"/api/workflows/{workflow['id']}", {"status": "on"})
     assert status_code == HTTPStatus.BAD_REQUEST and "status must be one of" in invalid["error"], invalid
-    print("  create defaults draft; invalid statuses rejected OK")
+    print("  create missing/null defaults draft; invalid and falsy statuses rejected OK")
 
     wf_id = workflow["id"]
 
@@ -223,7 +231,7 @@ def check_db_validation() -> None:
     """The db layer is the shared choke point (packs import goes through it too)."""
     with TemporaryDirectory() as tmp:
         db = Database(Path(tmp) / "atlas.sqlite")
-        for bad in ("archived", "Draft", 7):
+        for bad in ("archived", "Draft", 7, "", False, 0):
             try:
                 db.create_workflow_definition({"name": "x", "graph": GRAPH, "status": bad})
             except ValueError as exc:
@@ -232,8 +240,7 @@ def check_db_validation() -> None:
                 raise AssertionError(f"create must reject status {bad!r}")
         created = db.create_workflow_definition({"name": "x", "graph": GRAPH})
         assert created["status"] == "draft"
-        # Falsy statuses (absent, null, "") take the draft default rather than erroring —
-        # the legacy `or "draft"` behavior, kept so old clients sending null stay valid.
+        # Missing/null keep the compatibility default; other falsy values are invalid.
         assert db.create_workflow_definition({"name": "x", "graph": GRAPH, "status": None})["status"] == "draft"
         try:
             db.update_workflow_definition(created["id"], {"status": "archived"})
@@ -244,9 +251,37 @@ def check_db_validation() -> None:
     print("  db-layer status validation OK")
 
 
+def check_pack_import_validation() -> None:
+    """Pack validation/import default only missing/null status and reject other falsy values."""
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+
+        def bundle(status_marker: object = ...) -> dict:
+            workflow = {"name": "Packed", "graph": GRAPH}
+            if status_marker is not ...:
+                workflow["status"] = status_marker
+            return {"schema_version": 1, "name": "status-pack", "version": "1", "workflows": [workflow]}
+
+        assert import_pack(db, bundle())["workflows"][0]["status"] == "active"
+        assert import_pack(db, bundle(None))["workflows"][0]["status"] == "active"
+        before = len(db.list_workflow_definitions())
+        for bad_status in ("", False, 0):
+            invalid_bundle = bundle(bad_status)
+            for operation in (validate_pack, lambda candidate: import_pack(db, candidate)):
+                try:
+                    operation(invalid_bundle)
+                except ValueError as exc:
+                    assert "status must be one of" in str(exc), str(exc)
+                else:
+                    raise AssertionError(f"pack validation/import must reject status {bad_status!r}")
+            assert len(db.list_workflow_definitions()) == before, "rejected pack must not create a workflow"
+    print("  pack validate/import: missing/null defaults active; invalid falsy statuses rejected atomically OK")
+
+
 def main() -> None:
     check_guard_unit()
     check_db_validation()
+    check_pack_import_validation()
     check_migration_backfill()
     with TemporaryDirectory() as tmp:
         runtime = AtlasRuntime(
