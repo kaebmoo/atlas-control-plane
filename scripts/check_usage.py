@@ -129,6 +129,7 @@ def main() -> None:
         runtime.jobs.poll_worker(worker["id"])
         definition = runtime.db.create_workflow_definition(
             {
+                "status": "active",
                 "name": "Metered workflow",
                 "graph": {
                     "start": "work",

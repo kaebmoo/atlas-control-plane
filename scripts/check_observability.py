@@ -63,7 +63,7 @@ def main() -> None:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         base_url = f"http://127.0.0.1:{server.server_address[1]}"
         try:
-            definition = runtime.db.create_workflow_definition({"name": "Obs join", "graph": JOIN_ONLY_GRAPH})
+            definition = runtime.db.create_workflow_definition({"status": "active", "name": "Obs join", "graph": JOIN_ONLY_GRAPH})
             status, started, _ = request_json(
                 base_url, "POST", "/api/workflow-runs",
                 {"workflow_definition_id": definition["id"]}, tokens["operator"],
@@ -98,7 +98,7 @@ def main() -> None:
             # file_ref artifact for byte-purge coverage. Uploads are only accepted while a run is
             # still live (a finished run 409s), so the bytes land on a run parked at a gate, which
             # is then cancelled — purge needs its run TERMINAL to consider the artifact at all.
-            upload_definition = runtime.db.create_workflow_definition({"name": "Obs upload gate", "graph": GATE_GRAPH})
+            upload_definition = runtime.db.create_workflow_definition({"status": "active", "name": "Obs upload gate", "graph": GATE_GRAPH})
             status, upload_run, _ = request_json(
                 base_url, "POST", "/api/workflow-runs",
                 {"workflow_definition_id": upload_definition["id"]}, tokens["operator"],
@@ -133,7 +133,7 @@ def main() -> None:
             assert status == 200 and payload["audit"] == [], payload
 
             # 4) purge: a non-terminal run's artifact survives; terminal-run artifacts go.
-            gate_definition = runtime.db.create_workflow_definition({"name": "Obs gate", "graph": GATE_GRAPH})
+            gate_definition = runtime.db.create_workflow_definition({"status": "active", "name": "Obs gate", "graph": GATE_GRAPH})
             status, gated, _ = request_json(
                 base_url, "POST", "/api/workflow-runs",
                 {"workflow_definition_id": gate_definition["id"]}, tokens["operator"],

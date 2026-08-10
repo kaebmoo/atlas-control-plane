@@ -19,7 +19,7 @@ python3 -m py_compile \
   scripts/check_observability.py scripts/check_permit_poc.py scripts/check_booth_poc.py scripts/check_event_views.py \
   scripts/check_lib.py scripts/check_async_jobs.py scripts/check_worker_state.py \
   scripts/check_job_artifacts.py scripts/check_file_handoff.py scripts/check_dashboard_surfaces.py \
-  scripts/check_headless.py scripts/serve_ui.py
+  scripts/check_headless.py scripts/check_workflow_status.py scripts/serve_ui.py
 
 node --check atlas/static/app.js
 
@@ -28,6 +28,7 @@ python3 scripts/check_jobs.py
 python3 scripts/check_workflows.py
 python3 scripts/check_workflow_api.py
 python3 scripts/check_workflow_interface.py  # Milestone B: workflow.interface contract (docs/adr/0002)
+python3 scripts/check_workflow_status.py     # status enforcement: draft/active/disabled × execution_mode + 016 backfill
 python3 scripts/check_auth.py
 python3 scripts/check_usage.py
 python3 scripts/check_migrations.py   # M3

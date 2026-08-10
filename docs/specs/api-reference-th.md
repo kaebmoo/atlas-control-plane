@@ -532,6 +532,25 @@ inherit มัน — ถ้า allowlist เปลี่ยนจน default �
 `DELETE` ลบ definition และ trigger ที่ผูก; run เก่ายังคงอยู่แต่
 `workflow_definition_id` อาจเป็น null ตาม foreign-key behavior
 
+### Workflow status คือ execution policy
+
+`status` รับได้เฉพาะ `draft`, `active`, `disabled` (สร้างใหม่ default เป็น `draft`;
+ค่าอื่นได้ `400`) และถูกบังคับใช้ที่ทุกทางเริ่ม run — ทั้ง `POST /api/workflow-runs`
+โดยตรง, trigger fire และการเริ่มภายในที่อ้าง definition:
+
+| Status | Test run | Production run | Trigger run |
+| --- | --- | --- | --- |
+| `draft` | ได้ | ถูกบล็อก | ถูกบล็อก |
+| `active` | ได้ | ได้ | ได้ |
+| `disabled` | ถูกบล็อก | ถูกบล็อก | ถูกบล็อก |
+
+การเปลี่ยน status ถูกบันทึก audit เป็น `workflow_definition.status_change` พร้อมคู่
+ค่าเก่า/ใหม่ `status` ของ workflow กับ `enabled` ของ trigger เป็นสวิตช์อิสระต่อกัน:
+ปิด trigger จะเงียบเฉพาะ trigger นั้น ส่วน status ที่ไม่ใช่ `active` บล็อก production
+run จากทุกทางเข้า แถวที่มีอยู่ก่อนกฎนี้ถูก backfill เป็น `active` (migration 016,
+audit เป็น `workflow_definition.status_backfill`) เพื่อไม่ให้ workflow เดิมหยุดทำงาน;
+แถวที่ตั้ง `disabled` ไว้อย่างชัดแจ้งจะถูกคงไว้ตามเดิม
+
 response ของการสร้าง, อัปเดต และ validation มี array ระดับบนสุดชื่อ `warnings` เพิ่มเติม
 เพื่อความเข้ากันได้ `collect_files` บน node ที่ไม่ใช่ `worker`/`manager` ยังยอมให้ save
 graph เดิมได้ แต่จะไม่มีผลตอน runtime; หากต้องการเก็บไฟล์ให้ย้าย field ไปไว้ที่ job node
@@ -692,6 +711,21 @@ curl -sS -X POST "$BASE_URL/api/workflow-runs" \
 
 ตอบ `202` Run states: `running`, `paused`, `waiting_for_human`,
 `recovery_required`, `succeeded`, `failed`, `cancelled`
+
+`execution_mode` เป็น optional รับได้เฉพาะ `test` หรือ `production` (ค่าอื่นได้ `400`)
+ถ้าไม่ส่งจะถือเป็น `production` — caller เดิมจึง fail closed กับ workflow ที่เป็น `draft`
+status ของ workflow เป็นตัวตัดสิน: `draft` ยอมเฉพาะ `"execution_mode":"test"`,
+`active` ยอมทั้งสองโหมด, `disabled` ไม่ยอมทั้งคู่ การปฏิเสธเป็น `409` พร้อม body
+แบบ machine-readable ที่เสถียร และไม่สร้าง run:
+
+```json
+{"error":"workflow_not_runnable","reason":"draft_requires_test_mode","status":"draft"}
+```
+
+`reason` เป็นหนึ่งใน `draft_requires_test_mode`, `workflow_disabled` หรือ
+`status_not_runnable` ส่วน run ที่เกิดจาก trigger เริ่มในโหมด production เสมอ ดังนั้น
+workflow ที่เป็น draft หรือ disabled จะไม่มีวันรันจาก trigger; การปฏิเสธถูกบันทึกเป็น
+event `failed` ของ trigger โดยข้อความ error ระบุ `workflow_not_runnable`
 
 ถ้า workflow เป้าหมายมี [interface](#7-workflow-definitions-และ-ai-builder) การเรียกนี้จะ
 validate `input` ก่อนสร้าง run ใด ๆ: business projection (ตัด `_meta`/`_trigger_chain`

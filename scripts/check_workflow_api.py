@@ -39,13 +39,14 @@ def main() -> None:
         thread.start()
         base_url = f"http://127.0.0.1:{server.server_address[1]}"
         try:
-            invalid = request_error(base_url, "POST", "/api/workflows", {"name": "bad", "graph": {"nodes": []}})
+            invalid = request_error(base_url, "POST", "/api/workflows", {"status": "active", "name": "bad", "graph": {"nodes": []}})
             assert "non-empty list" in invalid["error"]
             bad_worker = request_error(
                 base_url,
                 "POST",
                 "/api/workflows",
                 {
+                    "status": "active",
                     "name": "bad worker",
                     "graph": {"start": "only", "nodes": [{"id": "only", "type": "worker", "worker_id": "wrk_missing"}], "edges": []},
                 },
@@ -56,6 +57,7 @@ def main() -> None:
                 "POST",
                 "/api/workflows",
                 {
+                    "status": "active",
                     "name": "bad policy",
                     "graph": {"start": "only", "nodes": [{"id": "only", "type": "worker"}], "edges": []},
                     "policy": {"max_jobs": 1000},
@@ -79,7 +81,7 @@ def main() -> None:
             # `warnings` key from the save/validate responses -> KeyError; invert
             # workflow_graph_warnings' node-type predicate -> the list comes back empty.)
             legacy_graph = {"start": "gate", "nodes": [{"id": "gate", "type": "human_gate", "collect_files": ["out.md"]}], "edges": []}
-            legacy = request(base_url, "POST", "/api/workflows", {"name": "Legacy collection", "graph": legacy_graph})
+            legacy = request(base_url, "POST", "/api/workflows", {"status": "active", "name": "Legacy collection", "graph": legacy_graph})
             assert len(legacy["warnings"]) == 1 and "gate" in legacy["warnings"][0] and "ignored" in legacy["warnings"][0], legacy
             assert request(base_url, "POST", f"/api/workflows/{legacy['workflow']['id']}/validate")["warnings"] == legacy["warnings"]
             updated_legacy = request(base_url, "PUT", f"/api/workflows/{legacy['workflow']['id']}", {"description": "still compatible"})
@@ -97,7 +99,7 @@ def main() -> None:
             # A clean definition reports an empty list, never a missing key.
             clean = request(
                 base_url, "POST", "/api/workflows",
-                {"name": "Clean graph", "graph": {"start": "only", "nodes": [{"id": "only", "type": "worker"}], "edges": []}},
+                {"status": "active", "name": "Clean graph", "graph": {"start": "only", "nodes": [{"id": "only", "type": "worker"}], "edges": []}},
             )["workflow"]
             assert request(base_url, "GET", f"/api/workflows/{clean['id']}")["workflow"]["warnings"] == []
             request(base_url, "DELETE", f"/api/workflows/{clean['id']}")
@@ -108,6 +110,7 @@ def main() -> None:
                 "POST",
                 "/api/workflows",
                 {
+                    "status": "active",
                     "name": "API smoke",
                     "graph": {
                         "start": "only",
@@ -129,6 +132,7 @@ def main() -> None:
                 "POST",
                 "/api/workflows",
                 {
+                    "status": "active",
                     "name": "blocked reply",
                     "graph": {"start": "only", "nodes": [{"id": "only", "type": "worker"}], "edges": []},
                     "default_reply": {"mode": "webhook", "callback_url": "https://10.1.2.3/reply"},
@@ -429,7 +433,7 @@ def check_upload_rejected_after_run_finished(runtime: AtlasRuntime, base_url: st
     # re-check and reject. (Mutation: swap create_artifact_for_live_run back to create_artifact ->
     # the upload 201s and strands a file_ref on a cancelled run -> red.)
     gate_graph = {"start": "hold", "nodes": [{"id": "hold", "type": "human_gate", "label": "Hold"}], "edges": []}
-    gated_workflow = request(base_url, "POST", "/api/workflows", {"name": "Upload TOCTOU", "graph": gate_graph})["workflow"]
+    gated_workflow = request(base_url, "POST", "/api/workflows", {"status": "active", "name": "Upload TOCTOU", "graph": gate_graph})["workflow"]
     live = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": gated_workflow["id"]})["run"]
     wait_for_api_run(base_url, live["id"], "waiting_for_human")
     parsed = urllib.parse.urlparse(base_url)
@@ -459,6 +463,7 @@ def check_milestones_3_and_4(base_url: str, workflow_id: str) -> None:
         "POST",
         "/api/workflows",
         {
+            "status": "active",
             "name": "Event source",
             "graph": {"start": "source", "nodes": [{"id": "source", "type": "worker", "prompt": "source"}], "edges": []},
         },
@@ -655,6 +660,7 @@ def check_milestone_5(base_url: str) -> None:
         "POST",
         "/api/workflows",
         {
+            "status": "active",
             "name": "Human gate API",
             "graph": {
                 "start": "gate",
@@ -695,6 +701,7 @@ def check_milestone_5(base_url: str) -> None:
         "POST",
         "/api/workflows",
         {
+            "status": "active",
             "name": "Choice gate",
             "graph": {
                 "start": "gate",
@@ -918,8 +925,8 @@ def check_milestone_14(runtime: AtlasRuntime, base_url: str) -> None:
     # live (a finished run 409s — check_upload_rejected_after_run_finished), and this check is
     # about the upload/trigger/purge behavior, not about the run's state.
     gate_graph = {"start": "hold", "nodes": [{"id": "hold", "type": "human_gate", "label": "Hold for uploads"}], "edges": []}
-    source = request(base_url, "POST", "/api/workflows", {"name": "Upload source", "graph": gate_graph})["workflow"]
-    target = request(base_url, "POST", "/api/workflows", {"name": "Upload target", "graph": control_graph})["workflow"]
+    source = request(base_url, "POST", "/api/workflows", {"status": "active", "name": "Upload source", "graph": gate_graph})["workflow"]
+    target = request(base_url, "POST", "/api/workflows", {"status": "active", "name": "Upload target", "graph": control_graph})["workflow"]
     run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": source["id"]})["run"]
     wait_for_api_run(base_url, run["id"], "waiting_for_human")
     trigger = request(
@@ -992,6 +999,7 @@ def check_milestones_13_and_15(runtime: AtlasRuntime, base_url: str) -> None:
         "POST",
         "/api/workflows",
         {
+            "status": "active",
             "name": "Invalid quorum",
             "graph": {
                 "start": "join",
@@ -1005,6 +1013,7 @@ def check_milestones_13_and_15(runtime: AtlasRuntime, base_url: str) -> None:
     worker = runtime.db.list_workers()[0]
     definition = runtime.db.create_workflow_definition(
         {
+            "status": "active",
             "name": "API recovery",
             "graph": {
                 "start": "work",

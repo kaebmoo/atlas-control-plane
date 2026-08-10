@@ -29,6 +29,43 @@ from .usage import elapsed_seconds
 from .workflow_interface import validate_run_input
 
 
+WORKFLOW_EXECUTION_MODES = frozenset({"test", "production"})
+
+
+class WorkflowNotRunnable(ValueError):
+    """The workflow's status forbids starting a run in the requested execution mode.
+
+    Stable error contract: HTTP callers receive `payload` verbatim as a 409 body —
+    `{"error": "workflow_not_runnable", "reason": ..., "status": ...}` — so clients can
+    branch on `reason` without parsing prose. `str(exc)` stays informative for the
+    non-HTTP paths (trigger events record it as the failure text)."""
+
+    def __init__(self, status: str, reason: str):
+        super().__init__(f"workflow_not_runnable: {reason} (status: {status})")
+        self.status = status
+        self.reason = reason
+        self.payload = {"error": "workflow_not_runnable", "reason": reason, "status": status}
+
+
+def ensure_workflow_runnable(definition: dict[str, Any], execution_mode: str) -> None:
+    """The one status/mode gate for every definition-backed start path (direct API,
+    trigger fire, synchronous run_workflow). draft+test is the only draft run allowed;
+    active runs in both modes; disabled (or any unknown legacy status) never runs —
+    fail closed, an omitted mode upstream must already have defaulted to production."""
+    if execution_mode not in WORKFLOW_EXECUTION_MODES:
+        raise ValueError(f"execution_mode must be one of {sorted(WORKFLOW_EXECUTION_MODES)}")
+    status = definition.get("status") or "draft"
+    if status == "active":
+        return
+    if status == "draft":
+        if execution_mode == "test":
+            return
+        raise WorkflowNotRunnable("draft", "draft_requires_test_mode")
+    if status == "disabled":
+        raise WorkflowNotRunnable("disabled", "workflow_disabled")
+    raise WorkflowNotRunnable(status, "status_not_runnable")
+
+
 _FIELD_RE = re.compile(r"{([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)}")
 _JOB_TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
 # Extra wait the runner grants a callback job PAST its deadline+grace, to let the reaper's
@@ -437,10 +474,16 @@ class WorkflowRunner:
         self._threads: dict[str, threading.Thread] = {}
         self._thread_lock = threading.RLock()
 
-    def run_workflow(self, workflow_definition_id: str, input: dict[str, Any] | None = None) -> dict[str, Any]:
+    def run_workflow(
+        self,
+        workflow_definition_id: str,
+        input: dict[str, Any] | None = None,
+        execution_mode: str = "production",
+    ) -> dict[str, Any]:
         definition = self.db.get_workflow_definition(workflow_definition_id)
         if not definition:
             raise ValueError(f"Unknown workflow_definition_id: {workflow_definition_id}")
+        ensure_workflow_runnable(definition, execution_mode)
         if input is None:
             input = {}
         if not isinstance(input, dict):
@@ -468,6 +511,7 @@ class WorkflowRunner:
         input: dict[str, Any] | None = None,
         expected_workflow_version: int | None = None,
         hold: bool = False,
+        execution_mode: str = "production",
     ) -> dict[str, Any]:
         # expected_workflow_version is a DIRECT-START-ONLY guard (never passed by trigger
         # fire — v1 does not add a trigger-side version pin, docs/adr/0002). Loaded and
@@ -476,6 +520,9 @@ class WorkflowRunner:
         definition = self.db.get_workflow_definition(workflow_definition_id)
         if not definition:
             raise ValueError(f"Unknown workflow_definition_id: {workflow_definition_id}")
+        # Status gate first, against that SAME definition object. execution_mode defaults to
+        # production so legacy callers (and trigger fire) fail closed on draft/disabled.
+        ensure_workflow_runnable(definition, execution_mode)
         graph = definition["graph"]
         policy = definition.get("policy") or {}
         interface = definition.get("interface")

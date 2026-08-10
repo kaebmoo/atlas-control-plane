@@ -942,7 +942,12 @@ paths:
                   type: integer
                   minimum: 1
                   description: Optional optimistic-concurrency precondition. Do not combine with version; a matching save increments version by one, a stale save returns 409.
-                status: {type: string}
+                status:
+                  type: string
+                  enum: [draft, active, disabled]
+                  description: >-
+                    Execution policy. A change is audited as
+                    workflow_definition.status_change with the old/new pair.
                 graph:
                   $ref: './workflow-definition.schema.json#/$defs/graph'
                 policy:
@@ -1134,6 +1139,15 @@ paths:
                     (`POST /api/workflow-runs/{run_id}/files`) race-free before the first
                     node dispatches. Anything but a JSON boolean is a 400. Absent/false
                     keeps exact legacy start-immediately behavior.
+                execution_mode:
+                  type: string
+                  enum: [test, production]
+                  default: production
+                  description: >-
+                    Which class of run this is, checked against the workflow's status:
+                    draft allows test only, active allows both, disabled allows neither.
+                    Omitted means production, so legacy callers fail closed against a
+                    draft workflow. Trigger-created runs are always production.
       responses:
         '202':
           description: Run accepted
@@ -1152,10 +1166,18 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
         '409':
-          description: expected_workflow_version did not match the current workflow version. Creates no run.
+          description: >-
+            Creates no run. Either expected_workflow_version did not match the current
+            workflow version (body is the generic Error shape), or the workflow's status
+            forbids this execution_mode — then the body is the stable
+            WorkflowNotRunnableError contract, distinguishable by
+            `"error": "workflow_not_runnable"`.
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/Error'}
+              schema:
+                oneOf:
+                  - {$ref: '#/components/schemas/Error'}
+                  - {$ref: '#/components/schemas/WorkflowNotRunnableError'}
         default: {$ref: '#/components/responses/Error'}
 
   /api/workflow-runs/{run_id}:
@@ -2212,7 +2234,7 @@ components:
         name: {type: string}
         description: {type: string}
         version: {type: integer}
-        status: {type: string}
+        status: {type: string, enum: [draft, active, disabled]}
         graph:
           $ref: './workflow-definition.schema.json#/$defs/graph'
         policy:
@@ -2236,6 +2258,22 @@ components:
         updated_at: {type: string, format: date-time}
       additionalProperties: true
 
+    WorkflowNotRunnableError:
+      type: object
+      required: [error, reason, status]
+      properties:
+        error: {type: string, enum: [workflow_not_runnable]}
+        reason:
+          type: string
+          enum: [draft_requires_test_mode, workflow_disabled, status_not_runnable]
+          description: >-
+            draft_requires_test_mode — a draft workflow was asked for a production run;
+            workflow_disabled — the workflow is disabled; status_not_runnable — a legacy
+            row carries a status outside the vocabulary (fails closed).
+        status:
+          type: string
+          description: The workflow's current status at refusal time.
+
     WorkflowCreateInput:
       type: object
       required: [graph]
@@ -2244,7 +2282,13 @@ components:
         name: {type: string, default: Untitled workflow}
         description: {type: string}
         version: {type: integer, minimum: 1, default: 1}
-        status: {type: string, default: draft}
+        status:
+          type: string
+          enum: [draft, active, disabled]
+          default: draft
+          description: >-
+            Execution policy, not a label. draft allows explicit test runs only;
+            active allows test and production runs; disabled blocks every run.
         graph:
           $ref: './workflow-definition.schema.json#/$defs/graph'
         policy:

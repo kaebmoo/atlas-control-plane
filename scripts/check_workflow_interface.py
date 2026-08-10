@@ -433,7 +433,7 @@ def check_crud_and_versioning(base_url: str) -> None:
         base_url,
         "POST",
         "/api/workflows",
-        {"name": "Interface CRUD", "graph": _simple_graph(), "policy": {"max_jobs": 1}, "interface": SIMPLE_INTERFACE},
+        {"status": "active", "name": "Interface CRUD", "graph": _simple_graph(), "policy": {"max_jobs": 1}, "interface": SIMPLE_INTERFACE},
     )["workflow"]
     workflow_id = workflow["id"]
     assert workflow["interface"]["schema_version"] == 1, workflow
@@ -446,7 +446,7 @@ def check_crud_and_versioning(base_url: str) -> None:
         base_url,
         "POST",
         "/api/workflows",
-        {"name": "bad", "graph": _simple_graph(), "interface": {"schema_version": 1, "input_schema": {"type": "object"}}},
+        {"status": "active", "name": "bad", "graph": _simple_graph(), "interface": {"schema_version": 1, "input_schema": {"type": "object"}}},
     )
     assert "declared and required" in bad_create["error"], bad_create
 
@@ -524,7 +524,7 @@ def check_direct_run(base_url: str, runtime) -> None:
         base_url,
         "POST",
         "/api/workflows",
-        {"name": "Direct run", "graph": _simple_graph(), "policy": {"max_jobs": 1}, "interface": SIMPLE_INTERFACE},
+        {"status": "active", "name": "Direct run", "graph": _simple_graph(), "policy": {"max_jobs": 1}, "interface": SIMPLE_INTERFACE},
     )["workflow"]
     workflow_id = workflow["id"]
 
@@ -561,6 +561,7 @@ def check_direct_run(base_url: str, runtime) -> None:
         "POST",
         "/api/workflows",
         {
+            "status": "active",
             "name": "Default reply tips over",
             "graph": _simple_graph(),
             "interface": SIMPLE_INTERFACE,
@@ -633,7 +634,7 @@ def check_trigger_fire(base_url: str) -> None:
         base_url,
         "POST",
         "/api/workflows",
-        {"name": "Trigger interface", "graph": _simple_graph(), "interface": SIMPLE_INTERFACE},
+        {"status": "active", "name": "Trigger interface", "graph": _simple_graph(), "interface": SIMPLE_INTERFACE},
     )["workflow"]
     trigger = request(
         base_url, "POST", "/api/workflow-triggers", {"workflow_definition_id": workflow["id"], "name": "Manual", "type": "manual"}
@@ -688,7 +689,7 @@ def check_trigger_fire(base_url: str) -> None:
 
 def check_snapshot_survival(base_url: str) -> None:
     workflow = request(
-        base_url, "POST", "/api/workflows", {"name": "Snapshot", "graph": _simple_graph(), "interface": SIMPLE_INTERFACE}
+        base_url, "POST", "/api/workflows", {"status": "active", "name": "Snapshot", "graph": _simple_graph(), "interface": SIMPLE_INTERFACE}
     )["workflow"]
     run = request(base_url, "POST", "/api/workflow-runs", {"workflow_definition_id": workflow["id"], "input": {"topic": "x"}})["run"]
     original_snapshot = request(base_url, "GET", f"/api/workflow-runs/{run['id']}")["run"]["interface_snapshot"]
@@ -717,7 +718,7 @@ def check_rbac_and_audit(base_url: str, runtime) -> None:
     # implementation; exercised end-to-end here via the loopback-authenticated calls
     # every other check in this file already makes through those same routes.
     workflow = request(
-        base_url, "POST", "/api/workflows", {"name": "Audit", "graph": _simple_graph(), "interface": SIMPLE_INTERFACE}
+        base_url, "POST", "/api/workflows", {"status": "active", "name": "Audit", "graph": _simple_graph(), "interface": SIMPLE_INTERFACE}
     )["workflow"]
     request(base_url, "PUT", f"/api/workflows/{workflow['id']}", {"description": "x"})
     with runtime.db.connect() as conn:
@@ -790,7 +791,7 @@ def check_possible_outputs_and_undeclared_artifacts(runtime) -> None:
         "input_schema": {"type": "object"},
         "outputs": [{"key": "reached", "kind": "text"}, {"key": "never_reached", "kind": "text"}],
     }
-    definition = runtime.db.create_workflow_definition({"name": "Possible outputs", "graph": graph, "interface": interface})
+    definition = runtime.db.create_workflow_definition({"status": "active", "name": "Possible outputs", "graph": graph, "interface": interface})
     jobs = FakeJobService(runtime.db, worker["id"])
     runner = WorkflowRunner(runtime.db, jobs, poll_interval_seconds=0)
     run = runner.start_workflow(definition["id"], {})
@@ -889,6 +890,7 @@ def check_permit_fixture(base_url: str, runtime) -> None:
     interface/version snapshots exactly like start_workflow (no bypass entry point)."""
     worker = runtime.db.upsert_worker({"base_url": "http://permit-check.local", "name": "permit"})
     wf = request(base_url, "POST", "/api/workflows", {
+        "status": "active",
         "name": "PoC Permit Application",
         "graph": _permit_graph(worker["id"]),
         "policy": {"max_jobs": 2, "allowed_worker_ids": [worker["id"]]},

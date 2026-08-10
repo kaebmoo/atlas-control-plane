@@ -150,7 +150,7 @@ def check_runner() -> None:
             ],
             "edges": [{"from": "reporter", "to": "anchor", "condition": {"type": "always"}}],
         }
-        definition = db.create_workflow_definition({"name": "Linear", "graph": graph, "policy": {"max_jobs": 5}})
+        definition = db.create_workflow_definition({"status": "active", "name": "Linear", "graph": graph, "policy": {"max_jobs": 5}})
         fake_jobs = FakeJobService(db, worker["id"])
         run = WorkflowRunner(db, fake_jobs, poll_interval_seconds=0).run_workflow(definition["id"], {"topic": "weather"})
 
@@ -236,7 +236,7 @@ def check_joins_and_fan_out() -> None:
             "nodes": [{"id": "first", "type": "worker", "prompt": "first"}, {"id": "second", "type": "worker", "prompt": "second"}],
             "edges": [{"from": "first", "to": "second"}],
         }
-        definition = db.create_workflow_definition({"name": "Resume completed", "graph": resume_graph})
+        definition = db.create_workflow_definition({"status": "active", "name": "Resume completed", "graph": resume_graph})
         paused = db.create_workflow_run(
             {
                 "workflow_definition_id": definition["id"],
@@ -334,7 +334,7 @@ def check_condition_runner() -> None:
             ],
         }
         approved_jobs = FakeJobService(db, worker["id"], lambda prompt: '{"verdict":"approved"}' if prompt.startswith("Check ") else "ok")
-        definition = db.create_workflow_definition({"name": "Approved", "graph": graph, "policy": {"max_iterations": 10}})
+        definition = db.create_workflow_definition({"status": "active", "name": "Approved", "graph": graph, "policy": {"max_iterations": 10}})
         approved = WorkflowRunner(db, approved_jobs, poll_interval_seconds=0).run_workflow(definition["id"], {"topic": "weather"})
         assert approved["state"] == "succeeded"
         assert [edge["to_node"] for edge in db.list_workflow_edges(approved["id"])] == ["fact_checker", "anchor"]
@@ -346,7 +346,7 @@ def check_condition_runner() -> None:
         graph["nodes"][0]["worker_id"] = worker["id"]
         graph["nodes"][1]["worker_id"] = worker["id"]
         graph["nodes"][2]["worker_id"] = worker["id"]
-        definition = db.create_workflow_definition({"name": "Needs more", "graph": graph, "policy": {"max_iterations": 4}})
+        definition = db.create_workflow_definition({"status": "active", "name": "Needs more", "graph": graph, "policy": {"max_iterations": 4}})
         more_jobs = FakeJobService(db, worker["id"], lambda prompt: '{"verdict":"needs_more_sources"}' if prompt.startswith("Check ") else "ok")
         needs_more = WorkflowRunner(db, more_jobs, poll_interval_seconds=0).run_workflow(definition["id"], {"topic": "weather"})
         assert needs_more["state"] == "failed"
@@ -368,7 +368,7 @@ def check_condition_runner() -> None:
                 {"from": "fact_checker", "to": "reporter", "condition": {"type": "max_iterations_below", "node": "reporter", "max": 2}},
             ],
         )
-        definition = db.create_workflow_definition({"name": "Guarded loop", "graph": guarded, "policy": {}})
+        definition = db.create_workflow_definition({"status": "active", "name": "Guarded loop", "graph": guarded, "policy": {}})
         guard_jobs = FakeJobService(db, worker["id"], lambda prompt: '{"verdict":"needs_more_sources"}' if prompt.startswith("Check ") else "ok")
         guarded_run = WorkflowRunner(db, guard_jobs, poll_interval_seconds=0).run_workflow(definition["id"], {"topic": "weather"})
         assert guarded_run["state"] == "succeeded"
@@ -548,7 +548,7 @@ def check_hardening() -> None:
     with TemporaryDirectory() as tmp:
         db = Database(Path(tmp) / "atlas.sqlite")
         worker = db.upsert_worker({"name": "Fake", "base_url": "http://127.0.0.1:1"})
-        definition = db.create_workflow_definition({"name": "Pause", "graph": graph})
+        definition = db.create_workflow_definition({"status": "active", "name": "Pause", "graph": graph})
         jobs = BlockingFakeJobService(db, worker["id"])
         runner = WorkflowRunner(db, jobs, poll_interval_seconds=0)
         run = runner.start_workflow(definition["id"])
@@ -566,7 +566,7 @@ def check_hardening() -> None:
     with TemporaryDirectory() as tmp:
         db = Database(Path(tmp) / "atlas.sqlite")
         worker = db.upsert_worker({"name": "Fake", "base_url": "http://127.0.0.1:1"})
-        definition = db.create_workflow_definition({"name": "Cancel", "graph": graph})
+        definition = db.create_workflow_definition({"status": "active", "name": "Cancel", "graph": graph})
         jobs = BlockingFakeJobService(db, worker["id"])
         runner = WorkflowRunner(db, jobs, poll_interval_seconds=0)
         run = runner.start_workflow(definition["id"])
@@ -582,7 +582,7 @@ def check_hardening() -> None:
         db = Database(Path(tmp) / "atlas.sqlite")
         worker = db.upsert_worker({"name": "Fake", "base_url": "http://127.0.0.1:1"})
         jobs = FakeJobService(db, worker["id"])
-        definition = db.create_workflow_definition({"name": "Expired", "graph": graph, "policy": {"max_minutes": 1}})
+        definition = db.create_workflow_definition({"status": "active", "name": "Expired", "graph": graph, "policy": {"max_minutes": 1}})
         expired = db.create_workflow_run(
             {
                 "workflow_definition_id": definition["id"],
@@ -711,7 +711,7 @@ def check_human_gates() -> None:
             ],
             "edges": [{"from": "gate", "to": "publish"}],
         }
-        definition = db.create_workflow_definition({"name": "Approval", "graph": graph})
+        definition = db.create_workflow_definition({"status": "active", "name": "Approval", "graph": graph})
         jobs = FakeJobService(db, worker["id"])
         runner = WorkflowRunner(db, jobs, poll_interval_seconds=0)
 
@@ -762,7 +762,7 @@ def check_human_gates() -> None:
                 {"from": "gate", "to": "right", "condition": {"type": "human_selected", "choice": "right"}},
             ],
         }
-        definition = db.create_workflow_definition({"name": "Choice", "graph": graph})
+        definition = db.create_workflow_definition({"status": "active", "name": "Choice", "graph": graph})
         jobs = FakeJobService(db, worker["id"])
         runner = WorkflowRunner(db, jobs, poll_interval_seconds=0)
         waiting = runner.run_workflow(definition["id"])
@@ -785,7 +785,7 @@ def check_human_gates() -> None:
             "edges": [{"from": "loop", "to": "loop", "condition": {"type": "max_iterations_below", "node": "loop", "max": 3}}],
         }
         definition = db.create_workflow_definition(
-            {"name": "Guarded approval loop", "graph": graph, "policy": {"requires_human_after_iterations": 2}}
+            {"status": "active", "name": "Guarded approval loop", "graph": graph, "policy": {"requires_human_after_iterations": 2}}
         )
         jobs = FakeJobService(db, worker["id"])
         runner = WorkflowRunner(db, jobs, poll_interval_seconds=0)
@@ -815,7 +815,7 @@ def check_recovery() -> None:
             ],
             "edges": [{"from": "first", "to": "second"}],
         }
-        definition = db.create_workflow_definition({"name": "Recovery", "graph": graph})
+        definition = db.create_workflow_definition({"status": "active", "name": "Recovery", "graph": graph})
         run = db.create_workflow_run(
             {
                 "workflow_definition_id": definition["id"],
@@ -856,7 +856,7 @@ def check_recovery() -> None:
         assert any(entry["action"] == "workflow.recovery_required" for entry in reopened.list_audit())
 
         control_definition = reopened.create_workflow_definition(
-            {"name": "Control recovery", "graph": {"start": "done", "nodes": [{"id": "done", "type": "join", "mode": "all"}], "edges": []}}
+            {"status": "active", "name": "Control recovery", "graph": {"start": "done", "nodes": [{"id": "done", "type": "join", "mode": "all"}], "edges": []}}
         )
         control_run = reopened.create_workflow_run(
             {"workflow_definition_id": control_definition["id"], "state": "running", "current_nodes": ["done"], "started_at": now_iso()}
@@ -867,6 +867,7 @@ def check_recovery() -> None:
 
         gate_definition = reopened.create_workflow_definition(
             {
+                "status": "active",
                 "name": "Pending gate",
                 "graph": {
                     "start": "gate",
