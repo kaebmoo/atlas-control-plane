@@ -1978,12 +1978,35 @@ def _builder_prompt(runtime: AtlasRuntime, plain_prompt: str) -> str:
 
 
 def _builder_context(runtime: AtlasRuntime) -> dict[str, Any]:
+    workers = runtime.db.list_workers()
+    available_roles = sorted(
+        {
+            normalized
+            for worker in workers
+            for value in [worker.get("role"), *(worker.get("tags") or [])]
+            if (normalized := str(value or "").strip().lower())
+        }
+    )
+    role_rules = [
+        "role is optional",
+        "if role is set without worker_id or workspace_id, it must be one of available_roles; Atlas matches a worker whose role equals it or whose tags contain it, case-insensitively",
+        "if no available role fits the task, omit role (Atlas auto-routes at run time) or choose a worker_id from workers",
+        "never invent roles, worker ids, or workspace ids",
+    ]
     return {
-        "workers": [_public_worker(worker) for worker in runtime.db.list_workers()],
+        "workers": [_public_worker(worker) for worker in workers],
         "workspaces": runtime.db.list_workspaces(),
+        "available_roles": available_roles,
         "node_types": {
-            "worker": {"fields": ["id", "prompt", "worker_id", "workspace_id", "role", "outputs", "output_format", "budget_units"]},
-            "manager": {"fields": ["id", "prompt", "worker_id", "workspace_id", "role", "schema", "budget_units"], "schema": "manager_decision_v1"},
+            "worker": {
+                "fields": ["id", "prompt", "worker_id", "workspace_id", "role", "outputs", "output_format", "budget_units"],
+                "rules": role_rules,
+            },
+            "manager": {
+                "fields": ["id", "prompt", "worker_id", "workspace_id", "role", "schema", "budget_units"],
+                "schema": "manager_decision_v1",
+                "rules": role_rules,
+            },
             "join": {
                 "fields": ["id", "mode", "quorum"],
                 "modes": ["all", "any", "quorum"],

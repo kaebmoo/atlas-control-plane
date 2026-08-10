@@ -746,6 +746,10 @@ spells out the nested contracts — the `human_gate` `choices` item shape
 (`{"id","label"}`) and the required fields per edge-condition type — so drafts
 do not have to guess them.
 
+The context also lists `available_roles`, the lowercase union of configured
+worker roles and tags, and tells the builder to omit an unmatched role or use a
+real `worker_id`; invented roles are rejected by deterministic validation.
+
 `POST /api/workflows/suggest-workers` works locally without an AI worker and
 accepts `{"graph":...,"policy":...}`. Suggestions can reference only real
 worker/workspace IDs.

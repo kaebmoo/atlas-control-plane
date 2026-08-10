@@ -706,6 +706,10 @@ AI endpoint ไม่ Save/Run อัตโนมัติ
 ที่ส่งให้ builder ระบุ contract ซ้อนในครบ — รูปทรงของ `choices` ใน `human_gate`
 (`{"id","label"}`) และ field ที่จำเป็นของ condition แต่ละชนิด — โมเดลจึงไม่ต้องเดา
 
+context ยังระบุ `available_roles` ซึ่งเป็น union ตัวพิมพ์เล็กของ role และ tag ของ
+worker ที่ตั้งค่าไว้ และกำชับให้เว้น role ที่จับคู่ไม่ได้หรือใช้ `worker_id` ที่มีจริง
+role ที่โมเดลคิดขึ้นเองจะถูก deterministic validation ปฏิเสธ
+
 `POST /api/workflows/suggest-workers` ทำงานแบบ local ได้ถ้าไม่มี AI worker และรับ
 `{"graph":...,"policy":...}` ข้อเสนออ้างได้เฉพาะ worker/workspace ID ที่มีจริง
 

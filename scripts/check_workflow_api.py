@@ -826,6 +826,18 @@ def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) ->
                 "required positive integer",
             )
         ), "builder context must include the nested choices/condition contracts"
+        context_json = prompts[-1].split("Context JSON:\n", 1)[1].split("\n\nUser request:", 1)[0]
+        assert "workflow_builder" in json.loads(context_json)["available_roles"]
+        assert all(
+            fragment in prompts[-1]
+            for fragment in (
+                "role is optional",
+                "one of available_roles",
+                "case-insensitively",
+                "omit role (Atlas auto-routes at run time)",
+                "never invent roles, worker ids, or workspace ids",
+            )
+        ), "builder context must state the role-grounding contract"
 
         invalid_schedule = dict(valid_draft, triggers=[{"type": "schedule", "config": {"interval_minutes": 0}}])
         response["text"] = json.dumps(invalid_schedule)
@@ -854,6 +866,27 @@ def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) ->
             assert fragment in request_error(
                 base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "bad draft"}
             )["error"], fragment
+
+        # Role grounding: an invented role is a model-output validation failure, so the bounded
+        # retry gets the exact rejection and can omit role when no configured role fits.
+        role_bad = json.loads(json.dumps(valid_draft))
+        role_bad["graph"] = {
+            "start": "task",
+            "nodes": [{"id": "task", "type": "worker", "prompt": "Handle the request", "role": "summarizer"}],
+            "edges": [],
+        }
+        role_good = json.loads(json.dumps(role_bad))
+        role_good["graph"]["nodes"][0].pop("role")
+        calls_before = len(prompts)
+        response_queue[:] = [json.dumps(role_bad), json.dumps(role_good)]
+        role_repaired = request(
+            base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "ground the worker role"}
+        )["draft"]
+        assert len(prompts) == calls_before + 2
+        assert "has no matching worker" in prompts[-1], "retry prompt must carry the role-grounding error"
+        assert "available_roles" in prompts[-1]
+        assert "role" not in role_repaired["graph"]["nodes"][0]
+        assert any("self-repair" in warning for warning in role_repaired["warnings"])
 
         # Bounded self-repair: a first draft with the classic wrong choices shape (plain strings)
         # is fed back to the builder exactly once; the corrected second reply comes out with a
