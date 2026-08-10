@@ -424,7 +424,7 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 /* ============================ JOBS ============================ */
 .jobs { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start; }
 .jobs-list-card { flex: 1 1 280px; display: flex; flex-direction: column; max-height: calc(100vh - 130px); }
-.jobs-scroll { flex: 1; overflow-y: auto; }
+.jobs-scroll { flex: 1; overflow-y: auto; min-height: 180px; }
 .stream-card { flex: 2 1 420px; min-width: 0; display: flex; flex-direction: column; }
 
 .job-row { display: block; width: 100%; text-align: left; padding: 13px 20px; border-bottom: 1px solid var(--line2); color: var(--ink); background: transparent; }
@@ -443,18 +443,24 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 
 .job-detail-head { display: flex; align-items: flex-start; gap: 14px; padding: 18px 22px; }
 .job-detail-head .grow { flex: 1; min-width: 0; }
-.job-detail-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.job-detail-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
 .job-detail-id { font-size: 15px; color: var(--faint); font-family: var(--mono); }
-.job-detail-prompt { font-size: 18px; font-weight: 700; line-height: 1.4; max-height: 26vh; overflow-y: auto; }
+/* Three lines, cut on a line boundary so the clip reads as deliberate; the rest scrolls.
+   A 500-character prompt used to push the live stream — the reason the panel is open — most
+   of the way off the card. */
+.job-detail-prompt { font-size: 18px; font-weight: 700; line-height: 1.4; max-height: 4.2em; overflow-y: auto; overflow-wrap: anywhere; }
 .job-detail-route { font-size: 15.5px; color: var(--mut); margin-top: 3px; }
-.job-run-chip { display: inline-flex; align-items: center; padding: 3px 11px; border-radius: var(--r-pill); background: rgba(255,209,0,.22); color: var(--warn-ink); font-size: 14.5px; font-weight: 700; font-family: var(--mono); transition: background var(--fast); }
+/* block, not inline-flex: a workflow name can run long in either language, and only a block
+   box actually ellipsizes instead of spilling past the card edge into the Cancel button. */
+.job-run-chip { display: block; max-width: 100%; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 3px 11px; border-radius: var(--r-pill); background: rgba(255,209,0,.22); color: var(--warn-ink); font-size: 14.5px; font-weight: 700; font-family: var(--mono); transition: background var(--fast); }
 .job-run-chip:hover { background: rgba(255,209,0,.38); }
 .job-run-chip[hidden] { display: none; }
-.job-filters { display: flex; gap: 6px; padding: 12px 16px; border-bottom: 1px solid var(--line2); flex-wrap: wrap; }
+/* One row, one line, whatever the run count: this strip sits between the card head and the
+   job list, so anything that grows here comes straight out of the list's height. */
+.job-filters { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line2); flex-shrink: 0; }
 .job-filters[hidden] { display: none; }
-.job-filter { padding: 5px 12px; border: 1px solid var(--line); border-radius: var(--r-pill); font-size: 14.5px; font-weight: 700; font-family: var(--mono); color: var(--mut); background: transparent; }
-.job-filter:hover { border-color: var(--faint); }
-.job-filter.is-active { background: var(--ink900); color: #fff; border-color: var(--ink900); }
+.job-filters label { font-size: 14.5px; font-weight: 700; color: var(--mut); white-space: nowrap; }
+.job-run-select { flex: 1; min-width: 0; padding: 8px 11px; border: 1.5px solid var(--line); border-radius: var(--r-in); background: var(--panel2); color: var(--ink); font-size: 15.5px; font-weight: 600; }
 
 .tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 14px 22px 0; border-bottom: 1px solid var(--line2); }
 .tab { padding: 9px 15px; font-size: 16px; font-weight: 700; color: var(--faint); border-bottom: 2.5px solid transparent; background: none; }
@@ -621,7 +627,7 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 .form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 15.5px; font-weight: 700; color: var(--mut); }
 .field input, .field select { padding: 10px 13px; border: 1.5px solid var(--line); border-radius: var(--r-in); background: var(--panel2); color: var(--ink); font-size: 17px; font-weight: 400; }
-.field input:focus, .field select:focus, .usage-controls input:focus, .acct-form input:focus, .acct-form select:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgba(255,209,0,.25); }
+.field input:focus, .field select:focus, .usage-controls input:focus, .acct-form input:focus, .acct-form select:focus, .job-run-select:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgba(255,209,0,.25); }
 
 /* ============================ TOAST ============================ */
 /* Screen-reader-only live region: visually clipped, still announced. */
@@ -676,7 +682,7 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
   .ws-mini { padding: 12px 14px; }
   .tab { padding: 12px 15px; }
   .audit-chip { padding: 11px 16px; }
-  .job-filter { padding: 10px 14px; }
+  .job-run-select { padding: 11px; }
   .preview-btn { padding: 11px 15px; }
   .icon-btn, .nav-toggle, .signout-btn { width: 44px; height: 44px; }
 }

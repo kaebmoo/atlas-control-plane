@@ -270,10 +270,13 @@
             <div class="view-wrap jobs">
               <div class="card card-pad-0 jobs-list-card">
                 <div class="card-head">
-                  <div><h2>All jobs</h2><p class="card-sub" lang="th">แยกตาม flow ที่ run</p></div>
+                  <div><h2>All jobs</h2><p class="card-sub">Newest first · <span lang="th">งานล่าสุดอยู่บนสุด</span></p></div>
                   <span class="card-count" id="jobCount">0 jobs</span>
                 </div>
-                <div id="jobFilters" class="job-filters" hidden></div>
+                <div id="jobFilters" class="job-filters" hidden>
+                  <label for="jobRunFilter">Workflow run</label>
+                  <select id="jobRunFilter" class="job-run-select"></select>
+                </div>
                 <div id="jobList" class="jobs-scroll"><div class="empty">Loading… · <span lang="th">กำลังโหลด</span></div></div>
               </div>
 
