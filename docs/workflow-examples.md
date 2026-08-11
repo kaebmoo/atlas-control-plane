@@ -490,6 +490,70 @@ uses are human review at a gate, audit evidence, and an external integration
 fetching a deliverable. See [Artifact kinds](concepts-en.md#9-artifact-kinds) or
 [ชนิด artifact](concepts-th.md#9-ชนิด-artifact).
 
+## Cross-Host File Handoff
+
+Two workers on different machines, no shared filesystem. `coder` writes real
+files; Atlas freezes them as `file_ref` artifacts and pushes the matching ones
+to `reviewer` before that node's job starts. Pinning `worker_id` (instead of
+`role`) is what forces each node onto a specific machine.
+
+```mermaid
+flowchart LR
+  coder["coder<br/>host 1"] -->|"push_files: files.coder.*"| reviewer["reviewer<br/>host 2"]
+```
+
+Graph:
+
+```json
+{
+  "start": "coder",
+  "nodes": [
+    {
+      "id": "coder",
+      "type": "worker",
+      "worker_id": "wrk_a",
+      "prompt": "Implement {input.task} and write the report under reports/",
+      "collect_files": ["reports/*"],
+      "collect_required": true
+    },
+    {
+      "id": "reviewer",
+      "type": "worker",
+      "worker_id": "wrk_b",
+      "prompt": "Review the files in {files_dir} and list blocking issues.",
+      "outputs": ["review"]
+    }
+  ],
+  "edges": [
+    {
+      "from": "coder",
+      "to": "reviewer",
+      "condition": {"type": "always"},
+      "push_files": ["files.coder.*"]
+    }
+  ]
+}
+```
+
+Policy — `file_handoff` is required and off by default; saving a `push_files`
+edge without it is a validation error:
+
+```json
+{
+  "max_jobs": 5,
+  "max_iterations": 5,
+  "file_handoff": true
+}
+```
+
+The files land on host 2 under `inputs/incoming/<run_id>/coder/…`, which
+`{files_dir}` resolves to. Every file is size- and SHA-256-verified on both
+legs; a failed push fails the edge before the `reviewer` job is created.
+`collect_required: true` is optional — without it a node still succeeds when
+collection finds nothing. Caps and deadlines are in the
+[API Reference](specs/api-reference-en.md); the network requirements are in
+[Deployment §6](ops/deployment.md).
+
 ## Restart Recovery API
 
 After restart, retry a `recovery_required` run only after reviewing possible

@@ -138,6 +138,7 @@ Creates a thClaws job.
 | `outputs` | Artifact keys this node writes |
 | `output_format` | `json` parses the reply as JSON (node fails if unparseable) |
 | `collect_files` | List of relative file-path globs to collect from the worker as `file_ref` artifacts once the job succeeds (T9a; see [API reference](specs/api-reference-en.md)) |
+| `collect_required` | `true` fails the NODE when a declared `collect_files` produced no artifact (collection failed or matched nothing). Default `false` — collection is failure-isolated, so the node still completes with no files. Allowed only alongside `collect_files`; the JOB still succeeds either way |
 | `budget_units` | Cost against `max_budget_units` (default `1`) |
 
 The reply is stored under the **first** declared `outputs` key (parsed JSON when
@@ -410,6 +411,15 @@ What Upload and Download actually do:
 Use this for contracts reviewed by a person, auditable evidence/final deliverables,
 or files fetched by an external integration. Do not use it expecting a worker to
 parse an uploaded PDF automatically, or as a general-purpose file manager.
+
+To get files *into* a worker — including a worker on another machine — use the
+file handoff path instead: `collect_files` on the upstream node freezes its real
+output files as `file_ref` artifacts, and an edge with `push_files` (requires
+`policy.file_handoff: true`) uploads them to the downstream worker, where the
+prompt reads them via `{files_dir}`. An uploaded `file_ref` can be selected by
+`push_files` too. See
+[Architecture — Cross-Machine Worker Handoff](architecture.md) and the
+[API Reference](specs/api-reference-en.md).
 
 ### Example 1 — a `json` artifact drives a branch
 

@@ -115,6 +115,57 @@ trigger service. Internal triggers can filter by source workflow, state,
 artifact key/kind, worker, or status. Atlas blocks unguarded self-triggering to
 avoid infinite automation loops.
 
+## Cross-Machine Worker Handoff
+
+Workers never talk to each other and never share a filesystem. Every exchange
+between two workers — on the same host or on different hosts — goes through
+Atlas, which routes the work, stores the result, and moves the bytes.
+
+```mermaid
+flowchart LR
+  WA["thClaws Worker A<br/>host 1"] -->|"SSE result + frozen files"| ATL["Atlas<br/>artifacts · file_ref storage"]
+  ATL -->|"POST /agent/run (prompt)"| WA
+  ATL -->|"POST /agent/run (prompt)"| WB["thClaws Worker B<br/>host 2"]
+  ATL -->|"POST /v1/inputs (files)"| WB
+  WB -->|"SSE result"| ATL
+```
+
+Three lanes, all mediated:
+
+- **Text/JSON inside a workflow.** The upstream node's result becomes an
+  artifact; the downstream node's prompt reads it with `{artifact.KEY}`. Atlas
+  dispatches Worker B only after Worker A's job succeeds.
+- **Text between standalone jobs.** A job's `handoff` block starts a child job
+  on another worker with `{result}`, `{source_prompt}`, `{source_job_id}`.
+- **Real files.** The upstream node declares `collect_files`; Atlas pulls the
+  frozen files from Worker A's Job Artifact API, stores each as a `file_ref`
+  artifact, and an edge with `push_files` uploads the matching artifacts to
+  Worker B through `POST /v1/inputs`. They land under
+  `inputs/incoming/<run_id>/<node_key>/`, which the downstream prompt
+  references as `{files_dir}`. Requires `policy.file_handoff: true`; every
+  transfer is size- and SHA-256-verified, and a failed push fails the edge
+  before the downstream job exists. Workspace sync is not involved — this works
+  on a sync-`disabled` worker. Shapes, caps, and deadlines:
+  [API Reference — `collect_files`](specs/api-reference-en.md) and `push_files`.
+
+Files uploaded to a run by a human (`POST /api/workflow-runs/{run_id}/files`)
+are a separate case: they stay in Atlas for people and external systems, and
+reach a worker only if a `push_files` edge selects them — see
+[Concepts §9](concepts-en.md).
+
+**What this requires of the network.** Atlas is the only party that initiates
+worker traffic: it must reach each worker's `base_url` and presents that
+worker's Bearer token. `POST /api/workers/{id}/poll` is a health/capability
+probe issued *by* Atlas — it is not a mechanism for workers to pull work, so a
+worker behind NAT or on a foreign network needs a VPN, private network, SSH
+tunnel, or reverse proxy that makes it reachable from Atlas. With
+`execution: "callback"` the traffic also flows back: the worker POSTs to
+`/api/worker-callbacks/{job_id}`, so it needs `ATLAS_PUBLIC_BASE_URL` to be
+reachable and Atlas needs `ATLAS_SECRET_KEY`. Callback changes only how the
+result returns — collection and handoff still move through Atlas either way.
+Approved worker-connectivity shapes are in
+[Deployment §6](ops/deployment.md).
+
 ## Input Adapters & Return Path
 
 Atlas's ingress is a **contract, not a channel.** Any source — LINE, email
