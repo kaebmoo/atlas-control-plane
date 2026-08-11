@@ -735,6 +735,21 @@ curl -sS -X POST "$BASE_URL/api/workflows/draft" \
 AI must return one JSON object, and deterministic validation runs before the API
 returns it. The endpoint never automatically saves or runs the draft.
 
+If the first reply is not one JSON object or fails validation, Atlas feeds the
+error (and the rejected draft) back to the builder for exactly one bounded
+retry, so a draft spends at most two builder jobs and can take up to twice the
+model time. A successful retry appends a `Draft needed one self-repair retry…`
+entry to the draft's `warnings`; a second failure returns the validation error
+as a normal `400`. Infrastructure failures (no `workflow_builder` configured,
+or the builder job itself fails) are never retried. The builder context also
+spells out the nested contracts — the `human_gate` `choices` item shape
+(`{"id","label"}`) and the required fields per edge-condition type — so drafts
+do not have to guess them.
+
+The context also lists `available_roles`, the lowercase union of configured
+worker roles and tags, and tells the builder to omit an unmatched role or use a
+real `worker_id`; invented roles are rejected by deterministic validation.
+
 `POST /api/workflows/suggest-workers` works locally without an AI worker and
 accepts `{"graph":...,"policy":...}`. Suggestions can reference only real
 worker/workspace IDs.

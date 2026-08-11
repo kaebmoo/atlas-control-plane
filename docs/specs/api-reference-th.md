@@ -697,6 +697,19 @@ curl -sS -X POST "$BASE_URL/api/workflows/draft" \
 ผล AI ต้องเป็น JSON object เดียวและผ่าน deterministic validation ก่อน API ส่งกลับ
 AI endpoint ไม่ Save/Run อัตโนมัติ
 
+ถ้าคำตอบแรกไม่ใช่ JSON object เดียวหรือไม่ผ่าน validation Atlas จะป้อน error
+(พร้อม draft ที่ถูกปฏิเสธ) กลับให้ builder แก้เอง 1 ครั้งเท่านั้น — หนึ่ง draft
+จึงใช้ builder job สูงสุด 2 งานและอาจใช้เวลานานขึ้นถึงเท่าตัว ถ้า retry สำเร็จ
+จะมีข้อความ `Draft needed one self-repair retry…` เพิ่มใน `warnings` ของ draft
+ถ้าพลาดซ้ำจะได้ validation error เป็น `400` ตามปกติ ความล้มเหลวเชิงระบบ (ไม่มี
+`workflow_builder` หรือ builder job ล้มเอง) ไม่ retry เด็ดขาด นอกจากนี้ context
+ที่ส่งให้ builder ระบุ contract ซ้อนในครบ — รูปทรงของ `choices` ใน `human_gate`
+(`{"id","label"}`) และ field ที่จำเป็นของ condition แต่ละชนิด — โมเดลจึงไม่ต้องเดา
+
+context ยังระบุ `available_roles` ซึ่งเป็น union ตัวพิมพ์เล็กของ role และ tag ของ
+worker ที่ตั้งค่าไว้ และกำชับให้เว้น role ที่จับคู่ไม่ได้หรือใช้ `worker_id` ที่มีจริง
+role ที่โมเดลคิดขึ้นเองจะถูก deterministic validation ปฏิเสธ
+
 `POST /api/workflows/suggest-workers` ทำงานแบบ local ได้ถ้าไม่มี AI worker และรับ
 `{"graph":...,"policy":...}` ข้อเสนออ้างได้เฉพาะ worker/workspace ID ที่มีจริง
 

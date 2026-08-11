@@ -12,7 +12,15 @@ sys.path.insert(0, str(ROOT))
 
 from atlas.db import Database, now_iso
 from atlas.router import Router
-from atlas.workflows import MAX_TRIGGER_CHAIN_DEPTH, WorkflowRunner, _trigger_chain_blocks, render_prompt, validate_workflow_graph
+from atlas.workflows import (
+    MAX_TRIGGER_CHAIN_DEPTH,
+    WorkflowRunner,
+    _trigger_chain_blocks,
+    _worker_matches_role,
+    render_prompt,
+    validate_workflow_graph,
+    validate_workflow_references,
+)
 
 
 def main() -> None:
@@ -307,6 +315,18 @@ def check_role_routing() -> None:
         decision = Router(db).resolve({"prompt": "write this", "role": "anchor"})
         assert decision.worker["id"] == anchor["id"]
         assert_raises("No routeable worker", Router(db).resolve, {"prompt": "write this", "role": "missing"})
+
+        # A padded role must not become a role the AI-draft builder context advertises
+        # (available_roles is stripped+lowercased) but no validator ever matches.
+        padded = db.upsert_worker({"name": "Padded", "base_url": "http://127.0.0.1:3", "role": "  Ops  "})
+        assert padded["role"] == "Ops", "worker role must be stored stripped"
+        assert _worker_matches_role({"role": "  Ops  "}, "ops"), "legacy padded rows must still match"
+        graph = {
+            "start": "task",
+            "nodes": [{"id": "task", "type": "worker", "role": "ops", "prompt": "Handle it"}],
+            "edges": [],
+        }
+        validate_workflow_references(db, graph, {})
 
 
 def check_condition_runner() -> None:

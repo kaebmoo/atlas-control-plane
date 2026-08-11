@@ -374,8 +374,12 @@ def _string_list(value: Any, name: str) -> list[str]:
 
 
 def _worker_matches_role(worker: dict[str, Any], role: str) -> bool:
+    # Both sides are stripped+lowercased: the caller normalizes the node's role the same way,
+    # and the AI-draft builder context advertises available_roles stripped — an unstripped
+    # comparison here would reject a role the context told the model to use (legacy rows only;
+    # upsert_worker normalizes on write).
     tags = {str(tag).strip().lower() for tag in worker.get("tags") or [] if str(tag).strip()}
-    return str(worker.get("role") or "").lower() == role or role in tags
+    return str(worker.get("role") or "").strip().lower() == role or role in tags
 
 
 def validate_workflow_references(db: Any, graph: dict[str, Any], policy: dict[str, Any], allow_unresolved_roles: bool = False) -> None:
