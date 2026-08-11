@@ -181,6 +181,27 @@ re-running is a no-op. Back up first — see [backup-restore.md](backup-restore.
 
 ## 6. thClaws worker connectivity
 
+**Direction of traffic.** Atlas is the only party that initiates worker calls;
+workers do not pull work from Atlas. Plan the network accordingly:
+
+- **Atlas → worker (always).** Atlas must reach each registered `base_url` for
+  `/agent/run` (dispatch and SSE) and `/v1/inputs` (file handoff). A worker on
+  another machine therefore needs a route from the Atlas host — VPN, private
+  network, SSH tunnel, or a reverse proxy in front of it. Workers on separate
+  machines never talk to each other and never share a filesystem; all
+  work and files pass through Atlas (see
+  [Architecture — Cross-Machine Worker Handoff](../architecture.md)).
+- **`POST /api/workers/{id}/poll` is a probe, not a queue.** It is an outbound
+  health/capability check issued by Atlas. It gives no inbound path for a
+  worker behind NAT, so it is not a substitute for real reachability.
+- **Worker → Atlas (only for `execution: "callback"`).** The worker POSTs its
+  result to `/api/worker-callbacks/{job_id}`, so `ATLAS_PUBLIC_BASE_URL` must be
+  set and reachable *from the worker*, and `ATLAS_SECRET_KEY` must be set (it
+  signs the callback token). Unset `ATLAS_PUBLIC_BASE_URL` ⇒ async jobs are
+  rejected at submit; stream jobs are unaffected.
+- **TLS is not built in.** Any cross-machine hop — either direction — belongs
+  behind the HTTPS reverse proxy in §2, not on a plain port.
+
 Atlas authenticates `/agent/run` and `/v1/*` with each worker's
 `THCLAWS_API_TOKEN`. That Bearer token does **not** protect
 `/workspace/sync/*` on a plain single-tenant `thclaws --serve` listener.

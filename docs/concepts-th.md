@@ -133,6 +133,7 @@ connection ขาดไปพร้อม restart ส่วน workflow run พ�
 | `outputs` | คีย์ artifact ที่ node นี้เขียน |
 | `output_format` | `json` จะ parse คำตอบเป็น JSON (parse ไม่ได้ = node fail) |
 | `collect_files` | รายการ glob ของไฟล์ (relative path) ที่จะเก็บจาก worker เป็น artifact ชนิด `file_ref` หลัง job สำเร็จ (T9a; ดู [API reference](specs/api-reference-th.md)) |
+| `collect_required` | `true` = ถ้า `collect_files` ที่ประกาศไว้ไม่ได้ artifact เลย (เก็บล้มเหลวหรือไม่ match) ให้ **node** fail; ค่าเริ่มต้น `false` เพราะการเก็บไฟล์แยก failure ออกจากงานหลัก node จึงยังสำเร็จได้แม้ไม่มีไฟล์ ใช้ได้เฉพาะเมื่อประกาศ `collect_files` ด้วย และไม่ว่ากรณีใด **job** ยังคง succeeded |
 | `budget_units` | ต้นทุนเทียบ `max_budget_units` (ค่าเริ่มต้น `1`) |
 
 คำตอบถูกเก็บไว้ที่คีย์ `outputs` **ตัวแรก** (เป็น JSON ที่ parse แล้วถ้าตั้ง
@@ -391,6 +392,14 @@ filename, ขนาด, SHA-256 ดาวน์โหลดด้วย `GET /ap
 เหมาะกับการแนบสัญญาให้คนอนุมัติ, เก็บหลักฐาน/ไฟล์ผลลัพธ์เพื่อ audit หรือให้ระบบภายนอก
 มารับไฟล์ ไม่เหมาะกับการอัปโหลด PDF แล้วคาดหวังให้ worker อ่านเอง หรือใช้แทน file manager
 ทั่วไป
+
+ถ้าต้องการส่งไฟล์ **เข้า** worker — รวมถึง worker ที่อยู่คนละเครื่อง — ให้ใช้เส้นทาง file
+handoff แทน: `collect_files` ที่ node ต้นทางเก็บไฟล์ผลลัพธ์จริงเป็น artifact `file_ref`
+แล้ว edge ที่มี `push_files` (ต้องตั้ง `policy.file_handoff: true`) อัปโหลดไฟล์เหล่านั้น
+ไปยัง worker ปลายทาง โดย prompt ฝั่งปลายทางอ่านผ่าน `{files_dir}` ไฟล์ `file_ref` ที่
+อัปโหลดเข้ามาเองก็ถูกเลือกด้วย `push_files` ได้เช่นกัน ดู
+[Architecture — Cross-Machine Worker Handoff](architecture.md) และ
+[API reference](specs/api-reference-th.md)
 
 ### ตัวอย่าง 1 — artifact `json` ใช้ตัดสินเส้นทาง
 
