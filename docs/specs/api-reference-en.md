@@ -1258,6 +1258,11 @@ Each threshold notifies exactly once, tracked by `approvals.overdue_level`:
 }
 ```
 
+A runnable reference receiver — signature verification, deduplication, and routing, in
+stdlib Python — ships at `poc/approval_reminder_receiver.py`. Start there rather than from
+this prose: a signature computed over re-serialized JSON instead of the raw request bytes is
+the one mistake that makes every reminder fail silently.
+
 The body is self-sufficient on purpose — a receiver composes a human message from
 it without calling Atlas back, which is what keeps a long-lived read credential
 off worker hosts. Atlas states the fact and stops there: **who** to notify at
