@@ -2,12 +2,12 @@
 
 > **Status 2026-08-12.** Implemented and gate-green: **D2b-1** (trigger contract,
 > `dsl_boundary`, F1b vocabulary lock), **D2b-2** (`_normalize_builder_draft`),
-> **D2b-3** (fence-tolerant `_json_from_text`), **D2c-1** (gate wait excluded from
-> `max_minutes`), **D2b-5** (flow-designer headline/detail split). Outstanding:
-> **D2b-4** — the single live retest, which costs real model calls and needs an Atlas
-> restart, so it is the human's to run; and **D2c-2**, blocked on the contract
-> decision in §8.5.1. §8.2 was confirmed empirically before the fix and is now
-> covered by `scripts/check_workflows.py`.
+> **D2b-3** (fence-tolerant `_json_from_text`), **D2b-5** (flow-designer
+> headline/detail split), **D2c-1** (gate wait excluded from `max_minutes`),
+> **D2c-2** (approval SLA reminders → outbound delivery). Outstanding: **D2b-4**
+> only — the single live retest, which spends real model calls and needs an Atlas
+> restart, so it is the human's to run. §8.2 was confirmed empirically before the
+> fix and is now covered by `scripts/check_workflows.py`.
 
 > TL;DR (ภาษาไทย): field test รอบที่ 4 (prompt อนุมัติจัดซื้อภาษาไทย) ล้มด้วย 400
 > `workflow draft trigger at index 0 must be an object` หลังเสีย model call ไป **2 ครั้ง**
@@ -532,8 +532,9 @@ Two things to state rather than hide:
   it into this change.
 
 **D2c-2 — age pending approvals in the scheduler tick, emit an outbound
-delivery.** *(BLOCKED on one decision — see 8.5.1.)* No new node type, no DSL
-change, no inbound credential:
+delivery.** *(SHIPPED 2026-08-12; the §8.5.1 decisions were answered — per-workflow
+routing over a global default, multi-level thresholds, no `decide_url`.)* No new
+node type, no DSL change, no inbound credential:
 
 - the periodic scheduler that already advances trigger `next_fire_at` also scans
   `approvals` where `state = 'pending'` and `created_at` is older than a
@@ -555,7 +556,9 @@ calendar it knows. Atlas emitting a plain age in hours is a fact; Atlas deciding
 what "2 business days" means for a Thai public holiday is a calendar it has no
 business owning.
 
-#### 8.5.1 Why D2c-2 stopped short of implementation
+#### 8.5.1 The contract decisions, and how they were answered
+
+*(Resolved 2026-08-12. Kept because the reasoning is the contract's rationale.)*
 
 The outbound ledger turned out to be **run-completion-shaped**, not event-shaped.
 `deliver_run` / `deliver_run_completion` (`atlas/outbound.py:304-350`) both
@@ -580,9 +583,34 @@ engineering ones:
    start; per-workflow or per-gate is option C.
 
 Everything upstream of that — the sweep, the age computation, the once-per-
-threshold record — is mechanical and cheap. The contract is the part that needs
+threshold record — is mechanical and cheap. The contract is the part that needed
 a human answer, per this repo's own rule that an ambiguity touching an Atlas
 contract stops and asks.
+
+**Answers, as built:**
+
+1. **Where.** `policy.approval_webhook_url` on the workflow definition, falling
+   back to `ATLAS_APPROVAL_WEBHOOK_URL`. Per-workflow won over a single global
+   because several departments share one Atlas and each should route its own
+   reminders without an ops change — and the earlier cost estimate for
+   "per-workflow" was wrong: `validate_workflow_policy` is an OPEN vocabulary, so
+   a policy key costs two validation branches, no migration, no API change, and it
+   rides the existing policy snapshot and pack export. It is safe because
+   `resolve_outbound_target` still checks the operator's allowlist at send time:
+   an author picks among approved hosts, never an arbitrary one. The **definition's
+   current** policy is read rather than the run's `policy_snapshot`, so fixing a
+   wrong URL revives approvals that are already waiting.
+2. **What.** A self-sufficient body (workflow name, gate label, reason, choices,
+   age, level, threshold) so the receiver never has to call Atlas back — needing a
+   callback would put a long-lived read credential on a worker host, which is the
+   thing §8.3 exists to avoid. `decide_url` was dropped: it would have required
+   Atlas to learn the flow-designer base URL, and a receiver can compose the link
+   from the approval id.
+3. **Threshold.** A **list**, not a single value: Atlas must persist "already
+   notified" either way, and storing an `int` level instead of a `bool` costs the
+   same code while supporting remind-then-escalate. Business days stay out of
+   Atlas — thresholds are wall-clock hours chosen with a weekend margin, and the
+   receiver decides the exact send moment from `age_hours`.
 
 ### 8.6 Where thClaws's own scheduler fits
 

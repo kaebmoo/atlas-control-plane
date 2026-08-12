@@ -1154,6 +1154,49 @@ route ต้องการให้ run เสร็จสิ้นแล้ว
 `GET /api/workflow-runs/{run_id}` จนถึงสถานะ terminal แล้วอ่าน
 `GET /api/workflow-runs/{run_id}/artifacts` แทน
 
+### การเตือน approval ที่ค้าง (Approval SLA)
+
+approval ของ `human_gate` ที่ยังไม่ถูกตัดสินจนเกินเกณฑ์เวลาที่ตั้งไว้ จะสร้าง delivery
+ที่เซ็นแล้วบน ledger เดียวกัน ไม่ต้องมีใคร poll Atlas — scheduler tick ตัวเดียวกับที่
+เดิน schedule trigger จะนับอายุ approval ที่ค้างให้ด้วย ฝั่งผู้รับจึงไม่ต้องมี credential
+สำหรับเรียกเข้า Atlas
+
+ตั้งปลายทางและเกณฑ์แบบรวมด้วย `ATLAS_APPROVAL_WEBHOOK_URL` และ
+`ATLAS_APPROVAL_OVERDUE_HOURS` (คั่นด้วยจุลภาค เช่น `48,120`) และ override ราย workflow
+ได้ด้วย `policy.approval_webhook_url` กับ `policy.approval_overdue_hours` (list ของ
+จำนวนเต็มบวก เรียงจากน้อยไปมาก ห้ามซ้ำ) — เหมาะกับกรณีหลายแผนกใช้ Atlas ตัวเดียวกัน
+**ถ้าไม่ได้ตั้ง URL ไว้เลย การกวาดจะไม่ทำงานและไม่ส่งอะไรทั้งสิ้น** URL ถูกตรวจกับ
+`ATLAS_OUTBOUND_ALLOWLIST` ตอนส่งเหมือน delivery อื่นทุกตัว คนเขียน workflow จึงชี้ได้
+เฉพาะ host ที่ operator อนุญาตไว้แล้ว และระบบอ่าน policy ของ definition ปัจจุบัน ไม่ใช่
+`policy_snapshot` ของ run การแก้ URL ที่ตั้งผิดจึงมีผลกับ approval ที่ค้างอยู่แล้วทันที
+
+แต่ละเกณฑ์แจ้งเตือนครั้งเดียว ติดตามด้วย `approvals.overdue_level`:
+
+```json
+{
+  "event": "approval_overdue",
+  "delivery_id": "dlv_apr_apr_123_l2",
+  "approval": {
+    "id": "apr_123", "label": "อนุมัติคำขอจัดซื้อ", "reason": "250,000 บาท",
+    "choices": [{"id": "approve", "label": "อนุมัติ"}],
+    "created_at": "2026-08-07T02:00:00Z",
+    "age_hours": 130.5, "level": 2, "threshold_hours": 120
+  },
+  "run": {
+    "id": "wfr_…", "node_key": "dept_head_approval",
+    "workflow_definition_id": "wfd_…", "workflow_name": "อนุมัติคำขอจัดซื้อ"
+  },
+  "signed_at": "2026-08-12T12:30:00Z"
+}
+```
+
+body ตั้งใจให้ครบในตัวเอง — ผู้รับเขียนข้อความหาคนได้จากข้อมูลนี้โดยไม่ต้องเรียกกลับมาถาม
+Atlas ซึ่งเป็นเหตุผลที่ทำให้ไม่ต้องมี read credential อายุยาวไปวางบนเครื่อง worker
+Atlas บอกแค่ข้อเท็จจริงและหยุดแค่นั้น: **ใคร**ควรถูกแจ้งที่ `level` 2 แทน 1 คือเรื่อง
+routing ซึ่งต้องใช้ผังองค์กรที่ Atlas ไม่มี และ "2 วันทำการ" คือปฏิทิน ไม่ใช่จำนวนชั่วโมง
+เกณฑ์เป็นชั่วโมงตามเวลาจริง ให้ตั้งเผื่อวันหยุด (เช่น `72,168`) แล้วให้ผู้รับตัดสินจังหวะ
+ส่งจริงเอง
+
 ## 15. OpenAPI 3.1
 
 [openapi.yaml](openapi.yaml) ระบุ 62 paths และ 81 operations พร้อม security schemes,

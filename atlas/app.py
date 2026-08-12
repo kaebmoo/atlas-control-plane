@@ -42,9 +42,7 @@ from .workflow_interface import cross_check_against_graph, validate_interface
 from .workflow_templates import workflow_templates
 from .workflows import (
     TRIGGER_CONFIG_KEYS,
-    WORKFLOW_CONDITION_TYPES,
     WORKFLOW_EXECUTION_MODES,
-    WORKFLOW_NODE_TYPES,
     WORKFLOW_POLICY_LIMITS,
     WORKFLOW_TRIGGER_TYPES,
     WorkflowNotRunnable,
@@ -218,7 +216,12 @@ class AtlasRuntime:
         self.workflows = WorkflowRunner(
             self.db, self.jobs, outbound_allowlist=config.outbound_allowlist, outbound_service=self.outbound
         )
-        self.triggers = WorkflowTriggerService(self.db, self.workflows)
+        self.triggers = WorkflowTriggerService(
+            self.db,
+            self.workflows,
+            approval_webhook_url=config.approval_webhook_url,
+            approval_overdue_hours=config.approval_overdue_hours,
+        )
         # Reconcile jobs first so orphaned worker jobs are terminal before runs recover,
         # then reconcile workflow runs (which re-arm interrupted nodes).
         self.jobs.reconcile_jobs()
@@ -2039,6 +2042,11 @@ def _builder_context(runtime: AtlasRuntime) -> dict[str, Any]:
         "workers": [_public_worker(worker) for worker in workers],
         "workspaces": runtime.db.list_workspaces(),
         "available_roles": available_roles,
+        # The keys of node_types / condition_types below must equal WORKFLOW_NODE_TYPES /
+        # WORKFLOW_CONDITION_TYPES in atlas/workflows.py. They stay hand-written here because
+        # each entry carries bespoke per-type contract prose, and scripts/check_workflow_api.py
+        # asserts the set equality — so adding a type without describing it here fails the gate
+        # rather than reaching a user as a 400 two model calls later.
         "node_types": {
             "worker": {
                 "fields": ["id", "prompt", "worker_id", "workspace_id", "role", "outputs", "output_format", "budget_units"],

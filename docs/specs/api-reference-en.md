@@ -1220,6 +1220,52 @@ If the effective persisted `_meta.reply` is absent or `mode: "none"`, the adapte
 `GET /api/workflow-runs/{run_id}` until terminal, then reads
 `GET /api/workflow-runs/{run_id}/artifacts`.
 
+### Approval SLA reminders
+
+A pending `human_gate` approval that stays undecided past a configured threshold
+produces a signed delivery on the same ledger. Nothing needs to poll Atlas: the
+scheduler tick that advances schedule triggers also ages pending approvals, so no
+inbound Atlas credential is required on the receiving side.
+
+Configure the destination and thresholds globally with
+`ATLAS_APPROVAL_WEBHOOK_URL` and `ATLAS_APPROVAL_OVERDUE_HOURS` (comma-separated,
+e.g. `48,120`), and override either per workflow with `policy.approval_webhook_url`
+and `policy.approval_overdue_hours` (a non-empty ascending list of positive
+integers) — useful when several departments share one Atlas. **With no URL
+configured, the sweep is inert and nothing is sent.** The URL is validated against
+`ATLAS_OUTBOUND_ALLOWLIST` at send time like any other delivery, so a workflow
+author can only address hosts the operator already allows. The workflow
+definition's current policy is read, not the run's `policy_snapshot`, so
+correcting a wrong URL starts working for approvals that are already waiting.
+
+Each threshold notifies exactly once, tracked by `approvals.overdue_level`:
+
+```json
+{
+  "event": "approval_overdue",
+  "delivery_id": "dlv_apr_apr_123_l2",
+  "approval": {
+    "id": "apr_123", "label": "Approve purchase", "reason": "250,000 THB",
+    "choices": [{"id": "approve", "label": "Approve"}],
+    "created_at": "2026-08-07T02:00:00Z",
+    "age_hours": 130.5, "level": 2, "threshold_hours": 120
+  },
+  "run": {
+    "id": "wfr_…", "node_key": "dept_head_approval",
+    "workflow_definition_id": "wfd_…", "workflow_name": "Purchase approval"
+  },
+  "signed_at": "2026-08-12T12:30:00Z"
+}
+```
+
+The body is self-sufficient on purpose — a receiver composes a human message from
+it without calling Atlas back, which is what keeps a long-lived read credential
+off worker hosts. Atlas states the fact and stops there: **who** to notify at
+`level` 2 rather than 1 is routing, which needs an org chart Atlas does not have,
+and "two business days" is a calendar, not an age. Thresholds are wall-clock
+hours; pick values with a margin for weekends (e.g. `72,168`) and let the receiver
+decide the exact moment to send.
+
 ## 15. OpenAPI 3.1
 
 [openapi.yaml](openapi.yaml) defines 62 paths and 81 operations, including

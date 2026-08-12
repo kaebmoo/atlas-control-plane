@@ -24,6 +24,7 @@ import urllib.request
 from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -409,6 +410,85 @@ def main() -> None:
             }, listed
             status, failed_listed = request_json(base_url, "GET", "/api/deliveries?status=blocked")
             assert status == 200 and {d["id"] for d in failed_listed["deliveries"]} >= {blocked_seed["id"], delivery_d["id"]}
+
+            # I. D2c-2 approval SLA: a pending human approval that crosses a configured threshold
+            # produces ONE signed notification per level, addressed by the workflow's own policy.
+            gate_definition = runtime.db.create_workflow_definition(
+                {
+                    "status": "active",
+                    "name": "Purchase approval",
+                    "graph": {
+                        "start": "gate",
+                        "nodes": [{"id": "gate", "type": "human_gate", "label": "Approve purchase"}],
+                        "edges": [],
+                    },
+                    # Per-workflow routing: departments sharing one Atlas each address their own
+                    # reminders without an ops change. The URL still clears the operator's
+                    # outbound allowlist at send time, which is what makes that safe.
+                    "policy": {
+                        "approval_webhook_url": f"{receiver_base}/reply/sla",
+                        "approval_overdue_hours": [48, 120],
+                    },
+                }
+            )
+            waiting = runtime.workflows.run_workflow(gate_definition["id"])
+            approval = runtime.db.list_approvals(state="pending", run_id=waiting["id"])[0]
+
+            def sla_sent() -> list[dict]:
+                return [item for item in MockReceiverHandler.received if item["path"] == "/reply/sla"]
+
+            def age_approval(approval_id: str, hours: int) -> None:
+                stamp = (datetime.now(UTC) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                with runtime.db.connect() as conn:
+                    conn.execute("UPDATE approvals SET created_at = ? WHERE id = ?", (stamp, approval_id))
+
+            # Not yet overdue -> silence.
+            assert runtime.triggers.sweep_overdue_approvals() == 0
+            assert not sla_sent()
+
+            age_approval(approval["id"], 60)  # past threshold 1 only
+            assert runtime.triggers.sweep_overdue_approvals() == 1
+            body = sla_sent()[-1]["body"]
+            assert body["event"] == "approval_overdue"
+            assert body["approval"]["level"] == 1 and body["approval"]["threshold_hours"] == 48
+            assert body["approval"]["age_hours"] >= 60
+            # Self-sufficient body: the receiver composes a human message without calling Atlas
+            # back, which is what keeps a long-lived read credential off the worker host.
+            assert body["approval"]["label"] == "Approve purchase"
+            assert body["run"]["workflow_name"] == "Purchase approval" and body["run"]["node_key"] == "gate"
+            assert sla_sent()[-1]["signature"], "an SLA delivery must be signed like any other"
+
+            # Sweeping again must NOT re-notify the same level — a channel that repeats every
+            # tick gets muted by its recipients, and then the feature is decorative.
+            assert runtime.triggers.sweep_overdue_approvals() == 0
+            assert len(sla_sent()) == 1
+
+            age_approval(approval["id"], 130)  # past threshold 2
+            assert runtime.triggers.sweep_overdue_approvals() == 1
+            assert len(sla_sent()) == 2
+            assert sla_sent()[-1]["body"]["approval"]["level"] == 2
+            assert sla_sent()[-1]["body"]["approval"]["threshold_hours"] == 120
+            assert runtime.triggers.sweep_overdue_approvals() == 0
+
+            # A decided approval leaves the pending set and can never be reminded again.
+            runtime.workflows.approve_approval(approval["id"])
+            assert runtime.triggers.sweep_overdue_approvals() == 0
+            assert len(sla_sent()) == 2
+
+            # No URL configured anywhere -> the sweep is inert, so upgrading a deployment that
+            # never sets ATLAS_APPROVAL_WEBHOOK_URL produces no surprise outbound traffic.
+            silent_definition = runtime.db.create_workflow_definition(
+                {
+                    "status": "active",
+                    "name": "Unconfigured approval",
+                    "graph": {"start": "gate", "nodes": [{"id": "gate", "type": "human_gate"}], "edges": []},
+                }
+            )
+            silent_run = runtime.workflows.run_workflow(silent_definition["id"])
+            silent_approval = runtime.db.list_approvals(state="pending", run_id=silent_run["id"])[0]
+            age_approval(silent_approval["id"], 500)
+            assert runtime.triggers.sweep_overdue_approvals() == 0
+            assert len(sla_sent()) == 2
         finally:
             runtime.close()  # stop the reaper daemon before the tempdir exits
             server.shutdown()

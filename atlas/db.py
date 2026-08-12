@@ -759,6 +759,20 @@ def _migration_016_workflow_status_backfill(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_017_approval_sla(conn: sqlite3.Connection) -> None:
+    # D2c-2: approval SLA reminders.
+    # `approvals.overdue_level` is the highest threshold already notified — an INTEGER rather
+    # than a boolean because Atlas has to remember *something* either way (without it every
+    # scheduler tick re-notifies and recipients mute the channel within a day), and an int
+    # costs the same code while supporting remind-then-escalate.
+    # `deliveries.payload` freezes an event body at creation time. The run-completion body is
+    # rebuilt from the run on every attempt, which is correct for a finished run but wrong for
+    # an event about a moment in time — restart reconcile would otherwise re-drive an overdue
+    # reminder with a run-completion body. NULL keeps every existing row on the old path.
+    _add_missing_columns(conn, "approvals", {"overdue_level": "INTEGER NOT NULL DEFAULT 0"})
+    _add_missing_columns(conn, "deliveries", {"payload": "TEXT"})
+
+
 # Ordered, append-only migration steps. A step is either a SQL string (run via
 # executescript) or a callable(conn). The 1-based index is the schema version.
 # Every step MUST be idempotent on its own: SCHEMA is all CREATE ... IF NOT EXISTS,
@@ -783,6 +797,7 @@ MIGRATIONS: list[str | Any] = [
     _migration_014_token_lifecycle,
     _migration_015_workflow_interface,
     _migration_016_workflow_status_backfill,
+    _migration_017_approval_sla,
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -2248,9 +2263,9 @@ class Database:
             """
             INSERT OR IGNORE INTO deliveries(
               id, run_id, url, correlation_id, status, attempts, max_attempts,
-              last_error, created_at, updated_at, delivered_at
+              last_error, created_at, updated_at, delivered_at, payload
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 delivery_id,
@@ -2264,6 +2279,7 @@ class Database:
                 now,
                 now,
                 payload.get("delivered_at"),
+                encode_json(payload["payload"]) if payload.get("payload") is not None else None,
             ),
         )
         return delivery_id, cursor.rowcount > 0
@@ -2271,6 +2287,18 @@ class Database:
     def create_delivery(self, payload: dict[str, Any]) -> dict[str, Any]:
         delivery, _created = self.claim_delivery(payload)
         return delivery
+
+    def claim_approval_overdue_level(self, approval_id: str, level: int) -> bool:
+        """D2c-2: atomically raise an approval's notified-threshold level. Returns True iff THIS
+        call raised it, so exactly one scheduler tick sends each level even if two run
+        concurrently. The `<` guard is the whole point — a read-then-write would let both ticks
+        see the old level and both notify."""
+        with self._lock, self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE approvals SET overdue_level = ?, updated_at = ? WHERE id = ? AND state = 'pending' AND overdue_level < ?",
+                (int(level), now_iso(), approval_id, int(level)),
+            )
+        return cursor.rowcount > 0
 
     def claim_delivery(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         """Create a delivery, returning (row, created). `created` is False iff a row with this

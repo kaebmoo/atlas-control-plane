@@ -329,6 +329,61 @@ class OutboundService:
             return delivery  # another path already owns this run's completion delivery
         return self._drive_owned(delivery, run)
 
+    def deliver_approval_overdue(
+        self,
+        approval: dict[str, Any],
+        run: dict[str, Any],
+        url: str,
+        level: int,
+        threshold_hours: int,
+        age_hours: float,
+    ) -> dict[str, Any] | None:
+        """D2c-2: one signed notification that a pending approval has crossed a threshold.
+
+        The body is deliberately SELF-SUFFICIENT — workflow name, gate label, reason and choices
+        are all included — so the receiver can compose a human message without calling Atlas
+        back. Needing a callback would mean handing a worker host a long-lived Atlas read
+        credential, and thClaws holds nothing of the kind today (only per-job callback bearers);
+        avoiding that is the whole reason reminders push outward instead of being polled.
+
+        Atlas states the fact and stops there. WHO gets told at level 2 rather than level 1 is
+        routing, and routing needs an org chart Atlas does not have. Business days and holidays
+        are the receiver's too: `age_hours` is a fact, "two business days" is a calendar.
+
+        The delivery id is deterministic per (approval, level), so a concurrent tick or a restart
+        reconcile converges on one row instead of notifying twice.
+        """
+        delivery, created = self.db.claim_delivery(
+            {
+                "id": f"dlv_apr_{approval['id']}_l{level}",
+                "run_id": run["id"],
+                "url": url,
+                "max_attempts": self.settings.max_attempts,
+                "payload": {
+                    "event": "approval_overdue",
+                    "approval": {
+                        "id": approval["id"],
+                        "label": approval.get("label"),
+                        "reason": approval.get("reason"),
+                        "choices": approval.get("choices") or [],
+                        "created_at": approval.get("created_at"),
+                        "age_hours": round(age_hours, 2),
+                        "level": level,
+                        "threshold_hours": threshold_hours,
+                    },
+                    "run": {
+                        "id": run["id"],
+                        "node_key": approval.get("node_key"),
+                        "workflow_definition_id": run.get("workflow_definition_id"),
+                        "workflow_name": run.get("name"),
+                    },
+                },
+            }
+        )
+        if not created:
+            return delivery
+        return self._drive_owned(delivery, run)
+
     def deliver_run(self, run: dict[str, Any]) -> dict[str, Any]:
         """POST /api/workflow-runs/{id}/deliver: one manual, immediate (re)send. `mode` need not
         be "webhook" — an explicit manual request overrides the adapter's original poll
@@ -409,14 +464,26 @@ class OutboundService:
         target = resolve_outbound_target(delivery["url"], self.settings.allowlist)
         if not target.allowed:
             return self._block(delivery, target.reason)
-        body_dict = {
-            "delivery_id": delivery["id"],
-            "run_id": run["id"],
-            "state": run.get("state"),
-            "correlation_id": delivery.get("correlation_id"),
-            "artifacts": [_artifact_payload(artifact) for artifact in self.db.list_artifacts(run_id=run["id"], limit=1000)],
-            "signed_at": now_iso(),
-        }
+        # A stored payload means this is an EVENT delivery (D2c-2). Its body describes a moment in
+        # time, so it must NOT be rebuilt from the run on a later attempt or a restart reconcile —
+        # that would re-send an overdue reminder wearing a run-completion body. `delivery_id` and
+        # `signed_at` are still stamped per attempt so the signature keeps its meaning. No stored
+        # payload -> the original run-completion body, rebuilt exactly as before.
+        stored = delivery.get("payload") or None
+        body_dict = (
+            {**stored, "delivery_id": delivery["id"], "signed_at": now_iso()}
+            if stored
+            else {
+                "delivery_id": delivery["id"],
+                "run_id": run["id"],
+                "state": run.get("state"),
+                "correlation_id": delivery.get("correlation_id"),
+                "artifacts": [
+                    _artifact_payload(artifact) for artifact in self.db.list_artifacts(run_id=run["id"], limit=1000)
+                ],
+                "signed_at": now_iso(),
+            }
+        )
         body = json.dumps(body_dict, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
         headers = {"Content-Type": "application/json", "X-Atlas-Signature": sign_delivery_body(self.settings.secret_key, body)}
         attempts = delivery["attempts"] + 1

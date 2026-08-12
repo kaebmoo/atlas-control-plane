@@ -374,6 +374,26 @@ def validate_workflow_policy(policy: dict[str, Any] | None) -> None:
     if "file_handoff" in policy and not isinstance(policy["file_handoff"], bool):
         # T6 opt-in for edge push_files. A bare boolean, off by default.
         raise ValueError("workflow policy file_handoff must be boolean")
+    # D2c-2: per-workflow approval SLA, overriding the ATLAS_APPROVAL_* defaults so departments
+    # sharing one Atlas can route their own reminders without an ops change. Only the SHAPE is
+    # checked here; the URL is re-checked against the operator's outbound allowlist at send time
+    # (resolve_outbound_target), which is what stops a workflow author pointing Atlas anywhere.
+    if "approval_webhook_url" in policy:
+        url = policy["approval_webhook_url"]
+        if url is not None and (not isinstance(url, str) or not url.strip()):
+            raise ValueError("workflow policy approval_webhook_url must be a non-empty string or null")
+    if "approval_overdue_hours" in policy:
+        hours = policy["approval_overdue_hours"]
+        if (
+            not isinstance(hours, list)
+            or not hours
+            or any(isinstance(item, bool) or not isinstance(item, int) or item <= 0 for item in hours)
+        ):
+            raise ValueError("workflow policy approval_overdue_hours must be a non-empty list of positive integers")
+        if list(hours) != sorted(set(hours)):
+            # Ascending and unique, because the index into this list IS the `level` sent to the
+            # receiver; out-of-order thresholds would deliver level 2 before level 1.
+            raise ValueError("workflow policy approval_overdue_hours must be ascending and unique")
 
 
 def _string_list(value: Any, name: str) -> list[str]:
@@ -1925,12 +1945,23 @@ class WorkflowRunner:
 
 
 class WorkflowTriggerService:
-    def __init__(self, db: Database, runner: WorkflowRunner, poll_seconds: float = 30):
+    def __init__(
+        self,
+        db: Database,
+        runner: WorkflowRunner,
+        poll_seconds: float = 30,
+        approval_webhook_url: str | None = None,
+        approval_overdue_hours: tuple[int, ...] = (),
+    ):
         self.db = db
         self.runner = runner
         self.runner.trigger_service = self
         self.runner.job_service.trigger_service = self
         self.poll_seconds = poll_seconds
+        # D2c-2 defaults; a workflow's own policy overrides them. Both empty by default, so the
+        # approval sweep is inert until an operator configures it.
+        self.approval_webhook_url = approval_webhook_url
+        self.approval_overdue_hours = approval_overdue_hours
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -1966,6 +1997,58 @@ class WorkflowTriggerService:
                 advanced = next_fire_at_for_trigger(trigger, now)
                 if advanced and _parse_utc(advanced) > now:
                     self.db.update_workflow_trigger(trigger["id"], {"next_fire_at": advanced})
+        self.sweep_overdue_approvals(now)
+
+    def sweep_overdue_approvals(self, now: datetime | None = None) -> int:
+        """D2c-2: notify once per configured threshold that a human approval is still pending.
+
+        Lives on the scheduler tick because Atlas is the only party that knows an approval's age
+        and the only one that can act without a new inbound credential. Returns the number of
+        notifications sent — useful to a caller's assertions, ignored by the loop.
+
+        Config cascades: policy.approval_webhook_url / policy.approval_overdue_hours on the
+        workflow definition, falling back to the ATLAS_APPROVAL_* defaults. The DEFINITION is
+        read, not the run's policy_snapshot: a snapshot is right for the rules a run started
+        under (graph, limits), but a wrong notification URL fixed by an operator should start
+        working for runs that are already waiting, not stay broken for their lifetime.
+        """
+        service = self.runner.outbound_service
+        if service is None:
+            return 0
+        now = now or datetime.now(UTC)
+        sent = 0
+        for approval in self.db.list_approvals(limit=500, state="pending"):
+            run = self.db.get_workflow_run(approval.get("run_id") or "")
+            if not run:
+                continue
+            definition = self.db.get_workflow_definition(run.get("workflow_definition_id") or "")
+            policy = (definition or {}).get("policy") or {}
+            url = policy.get("approval_webhook_url") or self.approval_webhook_url
+            thresholds = policy.get("approval_overdue_hours") or list(self.approval_overdue_hours)
+            if not url or not thresholds:
+                continue
+            try:
+                age_hours = (now - _parse_utc(approval["created_at"])).total_seconds() / 3600
+            except (KeyError, ValueError):
+                continue
+            # Highest threshold crossed, so a restart that missed level 1 still escalates rather
+            # than replaying every level in order days late.
+            level = sum(1 for hours in thresholds if age_hours >= hours)
+            if level <= int(approval.get("overdue_level") or 0):
+                continue
+            # Claim BEFORE sending: the compare-and-set is what makes "notify once per level"
+            # true even with two ticks in flight. A send that then fails is retried by the
+            # delivery ledger's own bounded retry, not by re-running this sweep.
+            if not self.db.claim_approval_overdue_level(approval["id"], level):
+                continue
+            try:
+                service.deliver_approval_overdue(
+                    approval, run, url, level, int(thresholds[level - 1]), age_hours
+                )
+                sent += 1
+            except Exception:  # noqa: BLE001 - a notification must never break the scheduler loop
+                LOGGER.exception("approval overdue delivery failed for %s", approval["id"])
+        return sent
 
     def fire_trigger(self, trigger_id: str, payload: dict[str, Any] | None = None, dedupe_key: str | None = None) -> dict[str, Any]:
         trigger = self.db.get_workflow_trigger(trigger_id)
