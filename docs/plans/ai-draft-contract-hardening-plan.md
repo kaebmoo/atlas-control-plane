@@ -6,8 +6,8 @@
 > headline/detail split), **D2c-1** (gate wait excluded from `max_minutes`),
 > **D2c-2** (approval SLA reminders → outbound delivery). **D2b-4 ran on
 > 2026-08-12 and PASSED** — see run 5 in §1. Nothing is outstanding; the one
-> residual (the model branching on routing workers instead of on its own bucket
-> artifact) is a context-quality note, not a failure. §8.2 was confirmed
+> residual — the model spending a worker where a `join` would route for free — is
+> a context gap worth one more example, not a failure. §8.2 was confirmed
 > empirically before the fix and is now covered by `scripts/check_workflows.py`.
 
 > TL;DR (ภาษาไทย): field test รอบที่ 4 (prompt อนุมัติจัดซื้อภาษาไทย) ล้มด้วย 400
@@ -87,7 +87,7 @@ the pipeline, not in the prompt. No user should have to type the word *object*.
 | 3 | after D1 context/retry hardening | 400 `node summarizer role has no matching worker` — invented role |
 | 3b | after D2 role grounding | success; `warnings` shows one self-repair retry caused by a **fenced** first reply (`ai_draft_result.json:80`) |
 | **4** | **Thai purchase-approval prompt** | **400 `workflow draft trigger at index 0 must be an object`, 2 builder jobs spent** |
-| **5** | **D2b-4: same prompt, after D2b-1/2/3** | **PASS.** 200; 12 nodes / 16 edges; `triggers` a valid object list; amount handled by a `classify_budget` worker; reminders/escalation, the missing email role, and the audit non-requirement all in `warnings`. Residual: the model produced the `budget_tier` bucket artifact and then **branched on two extra routing workers instead of on it** — the classifier half of the rule landed, the `artifact_equals`-on-the-bucket half did not, costing two model calls per run. Candidate for a future context example, not a 400. |
+| **5** | **D2b-4: same prompt, after D2b-1/2/3** | **PASS.** 200; 12 nodes / 16 edges; `triggers` a valid object list; amount handled by a `classify_budget` worker; reminders/escalation, the missing email role, and the audit non-requirement all in `warnings`. Residual, and it is a **context gap, not model sloppiness**: an edge leaving a `human_gate` with choices MUST use `human_selected`, and an edge carries exactly one condition, so branching on a tier *after* a gate needs an intermediate node. The model reached for a `worker` (two per run, pure passthrough restating `budget_tier`) when a `join` does it for free. Nothing in the context says a `join` is the zero-cost way to fan a gate's outcome into artifact-conditioned edges. |
 
 Three of the four failures are one class: **a rule the validator enforces that
 the context never states.** Run 3b adds a fourth, cheaper class: a well-formed
