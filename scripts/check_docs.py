@@ -225,6 +225,49 @@ def check_trigger_interval_schema_parity() -> list[str]:
     return problems
 
 
+def check_workflow_examples_validate() -> list[str]:
+    """Every graph in docs/workflow-examples.md must be one Atlas would actually accept.
+
+    Until now nothing checked them, so the file's JSON was prose that happened to look like a
+    contract — an example carrying a condition type or policy key the validator rejects would
+    have sat there indefinitely, and copying it is the first thing a reader does. Each fenced
+    JSON object carrying start/nodes/edges is run through the real `validate_workflow_graph`,
+    paired with the next fenced object if that one looks like a policy (so the examples that
+    need `max_iterations` to legalise a cycle are judged the way Atlas judges them).
+    """
+    import re
+
+    from atlas.workflows import validate_workflow_graph, validate_workflow_policy
+
+    path = ROOT / "docs" / "workflow-examples.md"
+    if not path.exists():
+        return [f"{path.name} is missing"]
+    blocks: list[dict] = []
+    for raw in re.findall(r"```json\n(.*?)```", path.read_text(encoding="utf-8"), re.S):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return [f"workflow-examples.md has a json block that does not parse: {exc}"]
+        blocks.append(parsed if isinstance(parsed, dict) else {})
+
+    problems: list[str] = []
+    graphs = 0
+    for index, block in enumerate(blocks):
+        if not {"start", "nodes", "edges"} <= set(block):
+            continue
+        graphs += 1
+        following = blocks[index + 1] if index + 1 < len(blocks) else {}
+        policy = following if following and not {"start", "nodes"} & set(following) else {}
+        try:
+            validate_workflow_policy(policy)
+            validate_workflow_graph(block, policy)
+        except ValueError as exc:
+            problems.append(f"workflow-examples.md graph starting at '{block.get('start')}' is invalid: {exc}")
+    if graphs == 0:
+        problems.append("workflow-examples.md has no graph examples — the check would pass vacuously")
+    return problems
+
+
 def main() -> None:
     tracked = _tracked_files()
     problems = (
@@ -233,6 +276,7 @@ def main() -> None:
         + check_artifact_classification_contract()
         + check_usage_range_doc_precision()
         + check_trigger_interval_schema_parity()
+        + check_workflow_examples_validate()
     )
     if problems:
         print("docs check FAILED:")

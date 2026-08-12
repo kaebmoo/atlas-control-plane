@@ -702,3 +702,239 @@ List built-in templates without saving them:
 ```bash
 curl -sS http://127.0.0.1:8787/api/workflow-templates
 ```
+
+## Purchase Approval By Amount
+
+The shape a real approval workflow takes, and the two constraints that decide it.
+
+Atlas has **no numeric comparison condition** — a worker classifies the amount
+into a named bucket artifact, and edges branch on that. And an edge leaving a
+`human_gate` that declares choices must carry a `human_selected` condition, while
+an edge carries exactly one condition — so branching by amount *after* a gate
+needs a node in between. A `join` does that routing for free; a `worker` there
+would spend a model call to restate an artifact that already exists.
+
+```mermaid
+flowchart LR
+  check["check_completeness"] -->|missing| notify_incomplete["notify_incomplete"]
+  check -->|ok| classify["classify_budget<br/>-> budget_tier"]
+  classify --> gate{"dept_head_approval<br/>human gate"}
+  gate -. reject .-> notify_reject["notify_reject"]
+  gate -->|approve| route(("route_after_dept_head<br/>join"))
+  route -->|le_50k| po["create_po"]
+  route -->|le_200k, gt_200k| finance{"finance_approval<br/>human gate"}
+  finance -->|approve| po
+```
+
+```json
+{
+  "start": "classify_budget",
+  "nodes": [
+    {
+      "id": "classify_budget",
+      "type": "worker",
+      "role": "classifier",
+      "prompt": "Classify the purchase budget into a tier. Output JSON with 'tier' set to 'le_50k' (<= 50,000), 'le_200k' (> 50,000 and <= 200,000), or 'gt_200k' (> 200,000). Request: {input.request}",
+      "outputs": ["budget_tier"],
+      "output_format": "json"
+    },
+    {
+      "id": "dept_head_approval",
+      "type": "human_gate",
+      "label": "Approve purchase request",
+      "choices": [
+        {"id": "approve", "label": "Approve"},
+        {"id": "reject", "label": "Reject"}
+      ]
+    },
+    {"id": "route_after_dept_head", "type": "join", "mode": "all"},
+    {
+      "id": "finance_approval",
+      "type": "human_gate",
+      "label": "Finance budget check",
+      "choices": [
+        {"id": "approve", "label": "Approve"},
+        {"id": "reject", "label": "Reject"}
+      ]
+    },
+    {
+      "id": "create_po",
+      "type": "worker",
+      "role": "procurement",
+      "prompt": "Create the purchase order for {input.request} and return the PO number.",
+      "outputs": ["po_number"]
+    },
+    {
+      "id": "notify_reject",
+      "type": "worker",
+      "role": "notifier",
+      "prompt": "Tell the requester their purchase request was rejected."
+    }
+  ],
+  "edges": [
+    {
+      "from": "classify_budget",
+      "to": "dept_head_approval",
+      "condition": {"type": "always"}
+    },
+    {
+      "from": "dept_head_approval",
+      "to": "notify_reject",
+      "condition": {"type": "human_selected", "choice": "reject"}
+    },
+    {
+      "from": "dept_head_approval",
+      "to": "route_after_dept_head",
+      "condition": {"type": "human_selected", "choice": "approve"}
+    },
+    {
+      "from": "route_after_dept_head",
+      "to": "create_po",
+      "condition": {
+        "type": "artifact_equals",
+        "artifact": "budget_tier",
+        "path": "tier",
+        "value": "le_50k"
+      }
+    },
+    {
+      "from": "route_after_dept_head",
+      "to": "finance_approval",
+      "condition": {
+        "type": "artifact_in",
+        "artifact": "budget_tier",
+        "path": "tier",
+        "values": ["le_200k", "gt_200k"]
+      }
+    },
+    {
+      "from": "finance_approval",
+      "to": "notify_reject",
+      "condition": {"type": "human_selected", "choice": "reject"}
+    },
+    {
+      "from": "finance_approval",
+      "to": "create_po",
+      "condition": {"type": "human_selected", "choice": "approve"}
+    }
+  ]
+}
+```
+
+Policy — the gates may wait for days, so pair it with the reminders below:
+
+```json
+{
+  "max_jobs": 20,
+  "stop_on_first_failure": true,
+  "approval_webhook_url": "http://127.0.0.1:9000/atlas/approval-overdue",
+  "approval_overdue_hours": [72, 168]
+}
+```
+
+Two things Atlas does NOT need modelled here. Every decision is already audited
+with who, when, outcome and reason, so an audit node would duplicate the ledger.
+And time parked at a gate does not count against `policy.max_minutes`, so a gate
+answered three days later resumes normally.
+
+Sending the email is an ordinary `worker` node — `node_types` is closed, but what
+a worker *does* is not. It needs a registered worker whose role has that
+capability; if none exists, that is a roster gap ("add a worker with role
+`notifier`"), not an Atlas limitation.
+
+## Approval Reminders (Overdue Human Gate) API
+
+A `human_gate` waits indefinitely — nothing in the graph expresses "chase whoever
+has not answered". That is `policy`, not topology, and the notification leaves
+Atlas as a signed outbound delivery.
+
+Two things have to exist before a reminder can be sent, and Atlas is silent
+rather than loud when either is missing:
+
+1. `ATLAS_SECRET_KEY`, or Atlas refuses to send unsigned and nothing leaves.
+2. The receiver's host in `ATLAS_OUTBOUND_ALLOWLIST`, or every delivery is
+   recorded `blocked` and no socket is opened.
+
+```bash
+export ATLAS_SECRET_KEY='...'                  # openssl rand -hex 32
+export ATLAS_OUTBOUND_ALLOWLIST='127.0.0.1'
+export ATLAS_APPROVAL_OVERDUE_HOURS='72,168'   # deployment default
+python3 -m atlas
+```
+
+Per workflow, in `policy` — these override the deployment defaults, so several
+departments can share one Atlas and each address its own reminders:
+
+```json
+{
+  "max_jobs": 20,
+  "approval_webhook_url": "http://127.0.0.1:9000/atlas/approval-overdue",
+  "approval_overdue_hours": [72, 168]
+}
+```
+
+The list is ascending and unique because **the index is the escalation level**:
+`72` is level 1, `168` is level 2. Hours are wall clock counted from when the gate
+was reached, not from when the run started. "Two business days" is a calendar —
+leave room for a weekend (72, not 48) and let the receiver decide the exact
+moment to send.
+
+Prove a receiver is listening without waiting days for a real gate to age:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/api/workflows/wfd_xxx/test-approval-webhook
+# {"test":{"ok":true,"status":204}}
+# {"test":{"ok":false,"reason":"callback_url host is not covered by ATLAS_OUTBOUND_ALLOWLIST: relay.internal"}}
+```
+
+It resolves the same URL the sweep would, sends one synthetic event marked
+`"test": true`, and writes no delivery row — the ledger stays an answer to "did a
+real reminder go out".
+
+Atlas notifies once per level. What it POSTs:
+
+```json
+{
+  "event": "approval_overdue",
+  "delivery_id": "dlv_apr_apr_123_l2",
+  "approval": {
+    "id": "apr_123",
+    "label": "Approve purchase request",
+    "reason": "Budget 250,000 THB",
+    "choices": [{"id": "approve", "label": "Approve"}],
+    "created_at": "2026-08-07T02:00:00Z",
+    "age_hours": 130.5,
+    "level": 2,
+    "threshold_hours": 120
+  },
+  "run": {
+    "id": "wfr_xxx",
+    "node_key": "dept_head_approval",
+    "workflow_definition_id": "wfd_xxx",
+    "workflow_name": "Purchase approval"
+  },
+  "signed_at": "2026-08-12T12:30:00Z"
+}
+```
+
+signed with `X-Atlas-Signature: sha256=<hex>` over the exact bytes on the wire.
+The body is self-sufficient on purpose: a receiver composes a human message from
+it without calling Atlas back, which is why it needs no Atlas credential. Route on
+`run.node_key` (which gate is stuck) and `approval.level` (remind or escalate) —
+Atlas states the fact and stops there, because who to tell needs an org chart it
+does not have.
+
+A runnable receiver is at [`poc/approval_reminder_receiver.py`](../poc/approval_reminder_receiver.py):
+
+```bash
+ATLAS_SECRET_KEY='...' python3 poc/approval_reminder_receiver.py --port 9000
+```
+
+Verify the signature over the **raw request bytes** — `json.loads` then
+`json.dumps` produces different bytes and a different digest, which is the single
+most common way a receiver rejects every legitimate delivery.
+
+Whether a reminder was sent, and whether it arrived, is on `GET /api/deliveries`
+(`delivered` / `failed` / `blocked`), filtered in the UI by event type. A `failed`
+`dlv_apr_*` row is worth an alert: it is the one signal that a human was supposed
+to be chased and was not.
