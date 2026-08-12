@@ -987,8 +987,12 @@ def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) ->
         assert repaired["graph"]["nodes"][0]["choices"][0] == {"id": "approve", "label": "Approve"}
         assert any("self-repair" in warning for warning in repaired["warnings"]), "retry must be surfaced in warnings"
 
-        # A reply that is not one JSON object is the same retry-worthy class as a validation
-        # failure — one bounded retry, then success.
+        # Since D2b-3 this reply is no longer a parse failure: the fence is stripped and
+        # `{"name": "fenced"}` parses cleanly, then fails DRAFT VALIDATION for its missing
+        # fields. So it still costs exactly one bounded retry and still ends in success — the
+        # assertions below are unchanged — but it now exercises the validation-failure class
+        # rather than the not-one-JSON-object class. The fence-specific cases (a fenced VALID
+        # draft costing no retry, unfenced prose still costing one) are asserted above.
         calls_before = len(prompts)
         response_queue[:] = ["```json\n{\"name\": \"fenced\"}\n```", json.dumps(valid_draft)]
         retried = request(
