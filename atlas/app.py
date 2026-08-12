@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import hmac
 import json
 import mimetypes
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -1608,12 +1610,36 @@ def run_server(config: Config) -> None:
     runtime = AtlasRuntime(config)
     server = AtlasHttpServer((config.host, config.port), runtime)
     runtime.triggers.start()
+
+    # Ctrl+C already unwound `serve_forever` through KeyboardInterrupt and ran the cleanup
+    # below; a plain `kill` did not. SIGTERM's default action terminates the process outright,
+    # skipping every `finally`, so the scheduler kept firing triggers into a half-torn-down
+    # runtime and the listening socket was never released. That is the signal systemd sends on
+    # `systemctl stop` (docs/ops/deployment.md ships atlas.service), so the DEPLOYED shutdown
+    # path was the ungraceful one.
+    #
+    # Raising KeyboardInterrupt from the handler — rather than calling server.shutdown() —
+    # because the handler runs on the main thread, which is the thread blocked inside
+    # serve_forever(): shutdown() waits for that loop to exit and would deadlock against
+    # itself. The exception unwinds the same way Ctrl+C does, so both signals now take one
+    # shared, already-exercised path.
+    def _request_stop(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    with contextlib.suppress(ValueError):  # not the main thread (e.g. an embedding test harness)
+        signal.signal(signal.SIGTERM, _request_stop)
+
     print(f"Atlas listening on {config.base_url}")
     print(f"SQLite state: {config.db_path}")
     try:
         server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping Atlas…")
     finally:
         runtime.triggers.stop()
+        runtime.close()
+        server.server_close()
+        print("Atlas stopped.")
 
 
 def _public_worker(worker: dict[str, Any]) -> dict[str, Any]:
