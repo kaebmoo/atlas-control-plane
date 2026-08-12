@@ -9,6 +9,15 @@
 > residual — the model spending a worker where a `join` would route for free — is
 > a context gap worth one more example, not a failure. §8.2 was confirmed
 > empirically before the fix and is now covered by `scripts/check_workflows.py`.
+>
+> **Closed 2026-08-12** after a stage-by-stage audit against the code. Three gaps the
+> audit found are fixed: the flow-designer format gate was red, the D2b-3 DoD line
+> "existing fenced assertion's comment corrected" had been skipped, and D2b-5's dialog
+> test was missing — delivered as `tests/e2e/zz-ai-draft-error.spec.ts` (Playwright, no
+> new dependency, asserting against a real Atlas 400). One deviation stands and cannot
+> be undone: §4 wanted D2b-3 separately revertable and D2c-1 isolated from the
+> builder-context work; both were folded into single commits. Every hermetic check for
+> the folded stages exists and passes, but the granularity rule was not honoured.
 
 > TL;DR (ภาษาไทย): field test รอบที่ 4 (prompt อนุมัติจัดซื้อภาษาไทย) ล้มด้วย 400
 > `workflow draft trigger at index 0 must be an object` หลังเสีย model call ไป **2 ครั้ง**
