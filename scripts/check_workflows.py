@@ -719,6 +719,11 @@ def check_budget_and_failure_policy() -> None:
         assert manager_jobs.prompts == [manager_jobs.prompts[0]]
 
 
+# The one node the D2c-1 gate-wait cases dispatch; named so the graph and both
+# assertions cannot drift apart.
+PO_PROMPT = "create PO"
+
+
 def check_human_gates() -> None:
     with TemporaryDirectory() as tmp:
         db = Database(Path(tmp) / "atlas.sqlite")
@@ -915,7 +920,7 @@ def check_recovery() -> None:
             "start": "gate",
             "nodes": [
                 {"id": "gate", "type": "human_gate", "label": "Approve purchase"},
-                {"id": "po", "type": "worker", "worker_id": worker["id"], "prompt": "create PO"},
+                {"id": "po", "type": "worker", "worker_id": worker["id"], "prompt": PO_PROMPT},
             ],
             "edges": [{"from": "gate", "to": "po"}],
         }
@@ -940,7 +945,7 @@ def check_recovery() -> None:
         resumed = wait_for_run(db, waiting["id"], "succeeded")
         wait_for_runner_stopped(runner, waiting["id"])
         assert resumed["state"] == "succeeded", resumed.get("error")
-        assert jobs.prompts == ["create PO"], jobs.prompts
+        assert jobs.prompts == [PO_PROMPT], jobs.prompts
         assert resumed["counters"]["human_wait_seconds"] > 0
 
         # The credit is earned per approval, never a blanket exemption: a run with no gate wait
@@ -958,7 +963,7 @@ def check_recovery() -> None:
         failed = wait_for_run(db, burned["id"], "failed")
         wait_for_runner_stopped(runner, burned["id"])
         assert "max_minutes exceeded" in (failed["error"] or ""), failed.get("error")
-        assert jobs.prompts == ["create PO"], jobs.prompts
+        assert jobs.prompts == [PO_PROMPT], jobs.prompts
 
 
 class FakeJobService:

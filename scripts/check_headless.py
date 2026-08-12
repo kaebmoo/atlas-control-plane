@@ -261,7 +261,7 @@ def wait_for_health(base_url: str, timeout: float = 15) -> None:
         try:
             with urllib.request.urlopen(f"{base_url}/healthz", timeout=1):
                 return
-        except (urllib.error.URLError, OSError):
+        except OSError:  # URLError derives from OSError, so this covers both
             time.sleep(0.2)
     raise AssertionError(f"server at {base_url} never became healthy")
 

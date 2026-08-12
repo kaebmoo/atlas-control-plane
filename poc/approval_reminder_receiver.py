@@ -133,11 +133,23 @@ def compose(body: dict) -> tuple[str, str]:
     return subject, "\n".join(lines)
 
 
+def _one_line(value: str, limit: int = 500) -> str:
+    """Collapse anything bound for a log line into one line.
+
+    The body is Atlas's, but the fields inside it are not: a gate label and its reason come from
+    whoever authored the workflow or filed the request. A newline in either would let them write
+    what looks like a second log entry — the log-forging class (CWE-117). Escaping here rather
+    than trusting the source is the habit worth copying into a real receiver.
+    """
+    escaped = value.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    return escaped if len(escaped) <= limit else escaped[: limit - 1] + "…"
+
+
 def notify(recipient: str, subject: str, message: str) -> None:
     """REPLACE THIS with your real channel — smtplib, the LINE Messaging API, a Slack webhook,
     a thClaws job. It runs AFTER the 2xx response, so a slow channel cannot make Atlas retry
     (Rule 2)."""
-    LOGGER.info("notify %s | %s\n%s", recipient, subject, message)
+    LOGGER.info("notify %s | %s | %s", _one_line(recipient), _one_line(subject), _one_line(message))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -211,7 +223,11 @@ def main() -> None:
     Handler.secret_key = secret
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    LOGGER.info("listening on http://%s:%d%s", args.host, args.port, args.path)
+    # Plain http on purpose, and only ever reachable on loopback: Atlas refuses to POST http to
+    # any host that is not a loopback literal (resolve_outbound_target), so a receiver exposed
+    # off-box has to terminate TLS in front of itself — which is a deployment concern, not
+    # something a stdlib reference should pretend to do.
+    LOGGER.info("listening on http://%s:%d%s", args.host, args.port, args.path)  # NOSONAR S5332
     LOGGER.info("set the workflow's approval_webhook_url to that URL, and allowlist %s in Atlas", args.host)
     try:
         server.serve_forever()
