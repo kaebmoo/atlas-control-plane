@@ -111,8 +111,19 @@ same owner — real accountability, not an auto-assigned name).
    temp+replace prevents truncation, but two concurrent writers can lose an update). Fleet secret
    writes already hold a cross-process `flock`. → *Trigger:* concurrent automation invoking BYOK →
    add an OS file lock around the env read-modify-write.
-5. **`max_minutes` counts paused / human-wait wall time** (intended total-wall budget). →
-   *Trigger:* if it must be active-compute only → subtract paused intervals.
+5. ~~**`max_minutes` counts paused / human-wait wall time** (intended total-wall budget).~~
+   **RESOLVED (D2c-1) — and it was never only a design preference.** Accepted here as a
+   trade-off, the behaviour was a live data-loss defect: a run parked at a `human_gate` longer
+   than `max_minutes` (default **30 minutes**) recorded the approval as `approved` and then
+   failed the run on the very next step, so the node that approval authorized never
+   dispatched. The approver saw their decision accepted and silently discarded.
+   `_workflow_deadline` now subtracts measured human-wait time, credited per approval from the
+   approval row's `created_at`. Compute stays bounded — `max_jobs`, `max_iterations`,
+   `max_attempts_per_node` and `max_budget_units` are untouched, and a run that burns
+   `max_minutes` on real work still trips the guard. *Residual:* concurrent gates over-credit
+   (waits are summed, not unioned); the error direction is leniency, never killing a run
+   early. *New trigger:* if a run-lifetime cap is wanted, add it as its own policy key
+   (`max_pending_days`) rather than restoring this coupling.
 6. **Worker-hostname DNS resolution (`getaddrinfo`) is bounded only by the OS resolver**, not by
    Atlas. The open-phase watchdog (`_urlopen_deadline`, `atlas/thclaws_client.py`) force-closes a
    worker's socket once its deadline passes, but a `getaddrinfo` that hangs blocks the caller with
@@ -172,7 +183,7 @@ index):
 | Risk 2 — migration `executescript` | `db.py:549`; string steps are `CREATE … IF NOT EXISTS` (`MIGRATIONS`, `db.py:503`) | match |
 | Risk 3 — removing `ATLAS_SECRET_KEY` 400s GET `/api/workers` | `db.py:1594` raises `ValueError` → `app.py:174` maps to 400 | match |
 | Risk 4 — BYOK env-file has no cross-process lock; fleet sidecar does | `byok.py:41-64` atomic-write, no flock; `fleet.py:138-164` `fcntl.flock` across read-modify-write | match |
-| Risk 5 — `max_minutes` = wall-clock from start | `workflows.py:2106-2111` (`_workflow_deadline`: `started_at + timedelta(minutes=max_minutes)`) | match |
+| Risk 5 — `max_minutes` = wall-clock from start | RESOLVED: `_workflow_deadline` is now `started_at + max_minutes + human_wait_seconds` (`workflows.py`), credited by `_credit_human_wait` on approve/choose; covered by `scripts/check_workflows.py:check_human_gates` (long gate succeeds, gateless overrun still fails) | fixed |
 
 ## Definition of done (stop criterion — replaces "audit until zero")
 

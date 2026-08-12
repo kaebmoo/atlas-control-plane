@@ -466,7 +466,7 @@ instead of continuing.
 | `max_jobs` | Max jobs per run |
 | `max_iterations` | Max total iterations |
 | `max_attempts_per_node` | Max executions of any one node |
-| `max_minutes` | Overall wall-clock limit |
+| `max_minutes` | Overall wall-clock limit, **excluding** time parked at a `human_gate` (an idle gate consumes no compute, so waiting for a person never counts against it) |
 | `requires_human_after_iterations` | Require one human approval once this many jobs have started |
 | `max_budget_units` | Total budget; an abstract unit, **not** money or tokens |
 | `allowed_worker_ids` | Allowlist of worker ids |

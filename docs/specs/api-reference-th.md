@@ -710,6 +710,23 @@ context ยังระบุ `available_roles` ซึ่งเป็น union �
 worker ที่ตั้งค่าไว้ และกำชับให้เว้น role ที่จับคู่ไม่ได้หรือใช้ `worker_id` ที่มีจริง
 role ที่โมเดลคิดขึ้นเองจะถูก deterministic validation ปฏิเสธ
 
+`trigger_types` เป็น contract map ราย type (ระบุ config key ของแต่ละ type; `manual`
+และ `webhook` เป็น config แบบเปิด) มาพร้อมตัวอย่าง `trigger_item` และกฎว่า `triggers`
+เป็น list ของ object ที่ใช้ได้เฉพาะคีย์ `type`/`name`/`config`/`enabled` และมีบล็อก
+`dsl_boundary` ระบุว่า `node_types`, `condition_types`, `trigger_types`,
+`artifact_kinds` เป็นคำศัพท์ชุดปิด — และที่สำคัญคือ **action ไม่ใช่ชุดคำศัพท์**:
+การส่งอีเมล เรียก API หรือจัดกลุ่มค่า ล้วนเป็น `worker` node ดังนั้นการที่ทำไม่ได้
+คือ "ไม่มี worker ที่มีความสามารถนั้นใน roster" ไม่ใช่ข้อจำกัดของ Atlas นอกจากนี้ยัง
+บอกวิธีแตกสาขาตามตัวเลข (ให้ worker จัดค่าเป็น bucket artifact แล้วใช้
+`artifact_equals` / `artifact_in`), บอกว่าไม่มี timer/reminder/escalation และให้ใส่
+สิ่งที่โมเดลไม่ได้ลงใน `warnings` พร้อมคืน draft ส่วนที่เหลือตามปกติ
+
+คำตอบของโมเดลสองรูปแบบจะถูก normalize แทนการเสีย retry: คำตอบที่ห่อด้วย
+```` ```json ```` จะถูกแกะ fence แล้ว parse และ item ใน `triggers` ที่ไม่ใช่ object
+จะถูกตัดทิ้งพร้อมเพิ่ม `warnings` ที่ยกค่าที่ตัดออกมาแสดง ทั้งสองอย่างไม่มีผลกับ input
+ของ client — `triggers` ที่ส่งเข้า `POST /api/workflows` ยังถูกตรวจเข้มเหมือนเดิม และ
+`triggers` ที่ไม่ใช่ list ยังคงเป็น `400`
+
 `POST /api/workflows/suggest-workers` ทำงานแบบ local ได้ถ้าไม่มี AI worker และรับ
 `{"graph":...,"policy":...}` ข้อเสนออ้างได้เฉพาะ worker/workspace ID ที่มีจริง
 

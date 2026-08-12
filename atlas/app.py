@@ -41,8 +41,12 @@ from .usage import audit_csv, normalize_usage_range, summarize_usage, usage_csv
 from .workflow_interface import cross_check_against_graph, validate_interface
 from .workflow_templates import workflow_templates
 from .workflows import (
+    TRIGGER_CONFIG_KEYS,
+    WORKFLOW_CONDITION_TYPES,
     WORKFLOW_EXECUTION_MODES,
+    WORKFLOW_NODE_TYPES,
     WORKFLOW_POLICY_LIMITS,
+    WORKFLOW_TRIGGER_TYPES,
     WorkflowNotRunnable,
     WorkflowRunner,
     WorkflowTriggerService,
@@ -1751,14 +1755,49 @@ def _build_workflow_draft(runtime: AtlasRuntime, payload: dict[str, Any]) -> dic
     if failure.get("draft") is not None:
         retry_request += f"Previous draft JSON:\n{json.dumps(failure['draft'], ensure_ascii=True)}\n\n"
     retry_request += "Fix the error and return the corrected complete draft object."
-    draft = _run_workflow_builder(runtime, _builder_prompt(runtime, retry_request))
-    draft.setdefault("triggers", [])
-    draft.setdefault("warnings", [])
+    draft = _normalize_builder_draft(_run_workflow_builder(runtime, _builder_prompt(runtime, retry_request)))
     _validate_workflow_draft(runtime, draft)
     # Surface the retry in the draft's own warnings channel so a caller (and later the UI) can
     # see the draft needed a correction round — useful signal about builder/model quality.
     draft["warnings"] = [*draft["warnings"], f"Draft needed one self-repair retry; first attempt was rejected: {failure['error']}"]
     return draft
+
+
+def _normalize_builder_draft(draft: dict[str, Any]) -> dict[str, Any]:
+    """D2b-2: the single normalization point for a MODEL-produced draft, applied before the first
+    deterministic validation so a malformed suggestion never costs a model call.
+
+    Never reachable from _validate_workflow_payload: triggers supplied by an API client on
+    POST /api/workflows must keep failing loudly, and scripts/check_workflow_api.py locks that.
+
+    Deliberately NOT normalized:
+    - `triggers` that is not a list at all (None, a string, a dict) stays a validation failure —
+      a structurally wrong field is a broken reply, not a malformed suggestion, and the schema-
+      equivalence check asserts that 400.
+    - a dropped string is never converted into a `manual` trigger object. Tempting and safe on
+      the wire (drafted triggers are display-only), but it invents content; the authoring plan
+      permits exactly one sanctioned mutation of model output — Atlas appending its own warning.
+    """
+    draft.setdefault("triggers", [])
+    draft.setdefault("warnings", [])
+    triggers, warnings = draft["triggers"], draft["warnings"]
+    if not isinstance(triggers, list) or not isinstance(warnings, list):
+        return draft
+    dropped = [item for item in triggers if not isinstance(item, dict)]
+    if dropped:
+        draft["triggers"] = [item for item in triggers if isinstance(item, dict)]
+        quoted = ", ".join(_truncate_for_warning(json.dumps(item, ensure_ascii=True)) for item in dropped)
+        plural = "" if len(dropped) == 1 else "s"
+        draft["warnings"] = [
+            *warnings,
+            f"Ignored {len(dropped)} trigger suggestion{plural} that {'was' if not plural else 'were'} "
+            f"not a trigger object: {quoted}. Create the trigger on the Triggers page instead.",
+        ]
+    return draft
+
+
+def _truncate_for_warning(value: str, limit: int = 120) -> str:
+    return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
 def _attempt_workflow_draft(
@@ -1773,8 +1812,7 @@ def _attempt_workflow_draft(
         draft = _run_workflow_builder(runtime, prompt)
     except _BuilderReplyError as exc:
         return None, {"error": str(exc), "draft": None}
-    draft.setdefault("triggers", [])
-    draft.setdefault("warnings", [])
+    _normalize_builder_draft(draft)
     try:
         _validate_workflow_draft(runtime, draft)
     except ValueError as exc:
@@ -1803,9 +1841,7 @@ def _repair_workflow(runtime: AtlasRuntime, workflow: dict[str, Any], payload: d
             f"Repair this workflow. Error: {exc}\nWorkflow JSON:\n"
             f"{json.dumps({'graph': graph, 'policy': policy, 'triggers': triggers}, ensure_ascii=True)}",
         )
-        draft = _run_workflow_builder(runtime, prompt)
-        draft.setdefault("triggers", [])
-        draft.setdefault("warnings", [])
+        draft = _normalize_builder_draft(_run_workflow_builder(runtime, prompt))
         _validate_workflow_draft(runtime, draft)
         return draft
 
@@ -1971,7 +2007,13 @@ def _builder_prompt(runtime: AtlasRuntime, plain_prompt: str) -> str:
         "Return only a JSON object with keys name, description, graph, policy, triggers, explanation, warnings.\n"
         "Use only the node, condition, trigger, artifact, and policy contracts in the context.\n"
         "Manager nodes must use schema=manager_decision_v1 and manager_selected outgoing edges.\n"
-        "Cycles must be bounded by policy.max_iterations or max_iterations_below.\n\n"
+        "Cycles must be bounded by policy.max_iterations or max_iterations_below.\n"
+        # D2b-1: four rules are read here before any context JSON — the cheapest, highest-leverage
+        # position in the whole prompt. This fifth one carries the escape hatch, because a model
+        # that reaches an unmodellable requirement decides what to do about it long before it
+        # finishes reading the context.
+        "Obey dsl_boundary in the context: never invent a node, condition, or trigger type; put "
+        "anything you cannot model in warnings and still return a valid draft for the rest.\n\n"
         f"Context JSON:\n{json.dumps(_builder_context(runtime), ensure_ascii=True)}\n\n"
         f"User request:\n{plain_prompt}"
     )
@@ -2046,9 +2088,42 @@ def _builder_context(runtime: AtlasRuntime) -> dict[str, Any]:
                 "fields": {"node": "required node id whose completed iterations are counted", "max": "required positive integer"},
             },
         },
-        "trigger_types": ["manual", "schedule", "webhook", "workflow_run_completed", "artifact_created", "worker_status_changed"],
-        "schedule_configs": [{"interval_minutes": 15}, {"daily_time": "09:30"}],
+        # D2b-1: a per-type contract map, not a bare name list. The bare list let a model write
+        # `"triggers": ["พนักงานส่งคำขอจัดซื้อ"]` — prose in the array — which cost two builder
+        # jobs and returned `workflow draft trigger at index 0 must be an object` to a user who
+        # had never heard the word "object". Config keys come from _TRIGGER_CONFIG_KEYS;
+        # manual/webhook are OPEN configs in docs/specs/workflow-trigger.schema.json and must
+        # not be described as closed. Folds in the old separate `schedule_configs` example.
+        "trigger_types": {
+            trigger_type: {
+                "config_keys": sorted(TRIGGER_CONFIG_KEYS[trigger_type]) if trigger_type in TRIGGER_CONFIG_KEYS else "open",
+                **({"config_examples": [{"interval_minutes": 15}, {"daily_time": "09:30"}]} if trigger_type == "schedule" else {}),
+            }
+            for trigger_type in sorted(WORKFLOW_TRIGGER_TYPES)
+        },
+        "trigger_item": {"type": "manual", "name": "Employee submits a purchase request", "enabled": False},
+        "trigger_rules": [
+            "triggers is a list of OBJECTS, never strings; describing a start condition in prose inside the array is the single most common way this request fails",
+            "a trigger item uses only these keys: type, name, config, enabled",
+            "if the described start condition does not map to a listed type, return triggers: [] and record it in warnings",
+        ],
         "artifact_kinds": sorted(ARTIFACT_KINDS),
+        # D2b-1/F2: the escape hatch. Every rule here exists because a real field-test draft was
+        # rejected for guessing at it. The capability rule is the load-bearing one: without it a
+        # model must guess whether "send an email" is a missing node type or a missing worker,
+        # and both wrong answers are expensive — inventing an `email` node costs a 400, while
+        # refusing into warnings when a notifier worker exists silently drops a requirement the
+        # engine could have run.
+        "dsl_boundary": [
+            "node_types, condition_types, trigger_types, and artifact_kinds are COMPLETE vocabularies; never invent a member of any of them",
+            "actions are NOT a vocabulary: sending an email, calling an API, checking a vendor, classifying a value are all worker nodes. node_types is closed; what a worker DOES is not. Pick role from available_roles",
+            "if a required capability matches no role in available_roles, do not call it unsupported — add a warnings entry naming the worker role that would need to exist, e.g. 'no worker with email capability is registered; add one with role notifier'",
+            "no numeric comparison condition exists. To branch on an amount, add a worker node that classifies the value into a named bucket artifact (e.g. approval_tier = le_50k | le_200k | gt_200k), then branch with artifact_equals or artifact_in on that artifact",
+            "no timer, deadline, reminder, or escalation construct exists, and no worker can substitute for one. Put every time-based requirement in warnings, always",
+            "Atlas already audits every decision (who, when, outcome, reason) — never model audit logging",
+            "return only the seven top-level keys; never add interface, inputs, or any other key",
+            "when part of the request cannot be modeled, still return a valid draft for the part that can, and list EACH unmodeled requirement as its own warnings entry — a partial proposal a human reviews beats a refusal",
+        ],
         "policy_defaults": _WORKFLOW_POLICY_DEFAULTS,
         "policy_limits": _WORKFLOW_POLICY_LIMITS,
         "templates": workflow_templates(),
@@ -2069,8 +2144,24 @@ class _BuilderReplyError(ValueError):
     from infrastructure failures (missing builder, failed job) without matching message text."""
 
 
+def _strip_code_fence(text: str) -> str:
+    """D2b-3: a reply wrapped in ```json … ``` is a well-formed draft inside a wrapper, not a
+    broken reply. Parsing it saves a full paid retry — the field log shows one otherwise-perfect
+    draft that cost a second builder job purely for its fence. Deliberately narrow: drop a
+    leading fence line and a trailing fence line, nothing else. Never brace-scan or regex JSON
+    out of arbitrary prose — an unfenced prose reply must stay a _BuilderReplyError so the
+    bounded retry keeps doing its job."""
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if len(lines) < 2:
+        return text
+    body = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+    return "\n".join(body).strip()
+
+
 def _json_from_text(text: str) -> dict[str, Any]:
-    stripped = text.strip()
+    stripped = _strip_code_fence(text.strip())
     try:
         data = json.loads(stripped)
     except json.JSONDecodeError as exc:

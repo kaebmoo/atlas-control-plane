@@ -94,7 +94,18 @@ def _callback_wait_extra_seconds(callback_deadline_at: str, grace_seconds: float
 _META_SOURCE_CHANNELS = frozenset({"line", "email", "web_form", "api", "schedule", "other"})
 _META_REPLY_MODES = frozenset({"webhook", "none"})
 _MANAGER_SCHEMA = "manager_decision_v1"
-_TRIGGER_STATES = {"manual", "schedule", "webhook", "workflow_run_completed", "artifact_created", "worker_status_changed"}
+# D2b-1/F1b: the closed vocabularies, exported so ONE definition feeds both the validator and
+# the AI builder context (atlas/app.py:_builder_context). They used to be inline literals here,
+# hand-copied there; three of the four field-test failures in
+# docs/plans/ai-draft-contract-hardening-plan.md were "a rule the validator enforces that the
+# context never states", so a silently stale copy is this system's most expensive defect class.
+# scripts/check_workflow_api.py asserts set equality between each context vocabulary and its
+# constant — adding a type without updating the context now fails the gate, not the field test.
+WORKFLOW_NODE_TYPES = frozenset({"worker", "manager", "join", "human_gate"})
+WORKFLOW_CONDITION_TYPES = frozenset(
+    {"always", "artifact_equals", "artifact_in", "manager_selected", "human_selected", "max_iterations_below"}
+)
+WORKFLOW_TRIGGER_TYPES = {"manual", "schedule", "webhook", "workflow_run_completed", "artifact_created", "worker_status_changed"}
 _EVENT_TRIGGER_FILTERS = {
     "workflow_run_completed": {"source_workflow_definition_id": "workflow_definition_id", "state": "state"},
     "artifact_created": {"source_workflow_definition_id": "workflow_definition_id", "key": "key", "kind": "kind"},
@@ -105,7 +116,7 @@ _EVENT_TRIGGER_FILTERS = {
 # key (e.g. "kee" instead of "key") would otherwise be silently ignored, turning a narrow
 # filter into a match-all. manual/webhook are intentionally absent: the schema declares their
 # config as an open object, so arbitrary keys are valid and must NOT be rejected.
-_TRIGGER_CONFIG_KEYS = {
+TRIGGER_CONFIG_KEYS = {
     "schedule": {"interval_minutes", "daily_time"},
     "workflow_run_completed": {"source_workflow_definition_id", "state"},
     "artifact_created": {"source_workflow_definition_id", "key", "kind"},
@@ -218,7 +229,7 @@ def validate_workflow_graph(graph: dict[str, Any], policy: dict[str, Any] | None
         node_map[node_id] = node
         if not isinstance(node.get("type"), str) or not node["type"].strip():
             raise ValueError(f"workflow node {node_id} requires a non-empty type")
-        if node["type"] not in {"worker", "manager", "join", "human_gate"}:
+        if node["type"] not in WORKFLOW_NODE_TYPES:
             raise ValueError(f"workflow node {node_id} uses unsupported type: {node['type']}")
         if node["type"] == "manager" and node.get("schema", _MANAGER_SCHEMA) != _MANAGER_SCHEMA:
             raise ValueError(f"workflow manager node {node_id} schema must be {_MANAGER_SCHEMA}")
@@ -793,6 +804,11 @@ class WorkflowRunner:
             approval, run = self._pending_approval_context(approval_id)
             if approval.get("choices"):
                 raise ValueError("approval requires a branch choice")
+            # D2c-1: pin the counters dict onto `run` before crediting, so the credit reaches
+            # whichever branch below persists it — both re-read `run.get("counters") or {}`, and
+            # `or {}` would otherwise hand each of them a separate throwaway dict.
+            run["counters"] = counters = run.get("counters") or {}
+            _credit_human_wait(counters, approval)
             graph, policy = self._run_graph_policy(run)
             runtime_node = None
             if approval.get("workflow_node_id"):
@@ -800,7 +816,6 @@ class WorkflowRunner:
                 if not runtime_node or runtime_node["state"] != "waiting_for_human":
                     raise ValueError("approval workflow node is unavailable")
             approval = self.db.decide_approval(approval_id, "approved")
-            counters = run.get("counters") or {}
             self.db.append_workflow_event(
                 run["id"],
                 "approval_approved",
@@ -822,6 +837,8 @@ class WorkflowRunner:
             approval, run = self._pending_approval_context(approval_id)
             if not approval.get("choices"):
                 raise ValueError("approval does not declare branch choices")
+            run["counters"] = counters = run.get("counters") or {}  # D2c-1, see approve_approval
+            _credit_human_wait(counters, approval)
             graph, policy = self._run_graph_policy(run)
             runtime_node = self.db.get_workflow_node(approval.get("workflow_node_id") or "")
             if not runtime_node or runtime_node["state"] != "waiting_for_human":
@@ -2052,12 +2069,12 @@ class WorkflowTriggerService:
 
 def validate_workflow_trigger_payload(payload: dict[str, Any]) -> None:
     trigger_type = payload.get("type") or "manual"
-    if not isinstance(trigger_type, str) or trigger_type not in _TRIGGER_STATES:
+    if not isinstance(trigger_type, str) or trigger_type not in WORKFLOW_TRIGGER_TYPES:
         raise ValueError(f"unsupported workflow trigger type: {trigger_type}")
     config = payload.get("config")
     if config is not None and not isinstance(config, dict):
         raise ValueError("workflow trigger config must be an object")
-    allowed = _TRIGGER_CONFIG_KEYS.get(trigger_type)
+    allowed = TRIGGER_CONFIG_KEYS.get(trigger_type)
     if allowed is not None:
         # Only the closed-config types are checked; manual/webhook keep an open config (see
         # the schema). A typo'd filter key must fail loudly, not silently widen the trigger to
@@ -2071,7 +2088,7 @@ def validate_workflow_trigger_payload(payload: dict[str, Any]) -> None:
 
 def next_fire_at_for_trigger(trigger: dict[str, Any], base: datetime | None = None) -> str | None:
     trigger_type = trigger.get("type") or "manual"
-    if not isinstance(trigger_type, str) or trigger_type not in _TRIGGER_STATES:
+    if not isinstance(trigger_type, str) or trigger_type not in WORKFLOW_TRIGGER_TYPES:
         raise ValueError(f"unsupported workflow trigger type: {trigger_type}")
     if trigger_type != "schedule":
         return None
@@ -2142,6 +2159,13 @@ def _validate_condition(condition: Any, edge_index: int, node_ids: set[str]) -> 
     if not isinstance(condition, dict):
         raise ValueError(f"workflow edge at index {edge_index} condition must be an object")
     condition_type = condition.get("type")
+    # F1b: gate on the exported vocabulary FIRST so WORKFLOW_CONDITION_TYPES is load-bearing
+    # rather than documentation — the AI builder context is generated from it, and a set that
+    # can drift from what this function accepts is exactly the defect class D2b closes. The
+    # per-type branches below still validate fields, and the tail raise still catches a name
+    # added to the vocabulary with no branch behind it.
+    if condition_type not in WORKFLOW_CONDITION_TYPES:
+        raise ValueError(f"workflow edge at index {edge_index} uses unsupported condition: {condition_type}")
     if condition_type == "always":
         return
     if condition_type == "artifact_equals":
@@ -2325,11 +2349,46 @@ def _requires_human_after_iterations(policy: dict[str, Any], counters: dict[str,
 
 
 def _workflow_deadline(run: dict[str, Any], policy: dict[str, Any]) -> datetime | None:
+    """Wall-clock deadline for the run, MINUS the time it spent parked at a human gate.
+
+    D2c-1: max_minutes is a runaway-AUTOMATION guard — its siblings (max_jobs, max_iterations,
+    max_attempts_per_node, max_budget_units) all bound compute, and a run waiting at a
+    human_gate consumes nothing. Billing human think-time to that budget silently destroyed
+    every approval answered later than max_minutes (default 30 MINUTES): Atlas recorded the
+    approval as approved, then failed the run on the next step, and the node that approval
+    authorized never dispatched.
+
+    Concurrent gates over-credit — two branches waiting at once contribute their waits twice
+    instead of unioning them. Deliberate: the error direction is leniency, never killing a run
+    early, and compute stays bounded by the other four policy keys.
+    """
     max_minutes = policy.get("max_minutes")
     if not isinstance(max_minutes, (int, float)) or max_minutes <= 0:
         return None
     started_at = run.get("started_at") or run["created_at"]
-    return _parse_utc(started_at) + timedelta(minutes=max_minutes)
+    return _parse_utc(started_at) + timedelta(minutes=max_minutes, seconds=_human_wait_seconds(run))
+
+
+def _human_wait_seconds(run: dict[str, Any]) -> float:
+    value = (run.get("counters") or {}).get("human_wait_seconds")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return 0.0
+    return float(value)
+
+
+def _credit_human_wait(counters: dict[str, Any], approval: dict[str, Any]) -> None:
+    """Add this approval's pending time to the run's human-wait credit (see _workflow_deadline).
+    Measured from the approval row's created_at, written when the gate was reached
+    (Database.create_approval), so it is exactly the interval nobody was excluding."""
+    created_at = approval.get("created_at")
+    if not isinstance(created_at, str) or not created_at:
+        return
+    try:
+        waited = (datetime.now(UTC) - _parse_utc(created_at)).total_seconds()
+    except ValueError:
+        return
+    if waited > 0:
+        counters["human_wait_seconds"] = float(counters.get("human_wait_seconds") or 0.0) + waited
 
 
 def _check_deadline(deadline: datetime | None) -> None:

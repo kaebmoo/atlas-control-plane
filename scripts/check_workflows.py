@@ -904,6 +904,62 @@ def check_recovery() -> None:
         assert wait_for_run(reopened, waiting["id"], "succeeded")["state"] == "succeeded"
         wait_for_runner_stopped(runner, waiting["id"])
 
+    # D2c-1: time parked at a human gate must NOT be billed against policy.max_minutes. Before
+    # this, Atlas recorded the approval as approved and then failed the run on the next step, so
+    # the node that approval authorized never dispatched — every approval answered later than
+    # max_minutes (default 30 MINUTES) was silently destroyed.
+    with TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "atlas.sqlite")
+        worker = db.upsert_worker({"name": "Fake", "base_url": "http://127.0.0.1:1"})
+        slow_graph = {
+            "start": "gate",
+            "nodes": [
+                {"id": "gate", "type": "human_gate", "label": "Approve purchase"},
+                {"id": "po", "type": "worker", "worker_id": worker["id"], "prompt": "create PO"},
+            ],
+            "edges": [{"from": "gate", "to": "po"}],
+        }
+        definition = db.create_workflow_definition(
+            {"status": "active", "name": "Slow approval", "graph": slow_graph, "policy": {"max_minutes": 60}}
+        )
+        jobs = FakeJobService(db, worker["id"])
+        runner = WorkflowRunner(db, jobs, poll_interval_seconds=0)
+        waiting = runner.run_workflow(definition["id"])
+        assert waiting["state"] == "waiting_for_human"
+
+        # "The approver answered days later", without sleeping. BOTH rows move: the run started
+        # long ago AND the gate was pending that whole time. Backdating only the run would model
+        # elapsed COMPUTE, which the guard must still kill — asserted by the second case below.
+        long_ago = "2000-01-01T00:00:00Z"
+        approval = db.list_approvals(state="pending", run_id=waiting["id"])[0]
+        db.update_workflow_run(waiting["id"], started_at=long_ago)
+        with db.connect() as conn:
+            conn.execute("UPDATE approvals SET created_at = ? WHERE id = ?", (long_ago, approval["id"]))
+
+        runner.approve_approval(approval["id"])
+        resumed = wait_for_run(db, waiting["id"], "succeeded")
+        wait_for_runner_stopped(runner, waiting["id"])
+        assert resumed["state"] == "succeeded", resumed.get("error")
+        assert jobs.prompts == ["create PO"], jobs.prompts
+        assert resumed["counters"]["human_wait_seconds"] > 0
+
+        # The credit is earned per approval, never a blanket exemption: a run with no gate wait
+        # that outlives max_minutes still trips the guard.
+        burned = db.create_workflow_run(
+            {
+                "workflow_definition_id": definition["id"],
+                "name": "Burned",
+                "state": "paused",
+                "current_nodes": ["po"],
+                "started_at": long_ago,
+            }
+        )
+        runner.resume_run(burned["id"])
+        failed = wait_for_run(db, burned["id"], "failed")
+        wait_for_runner_stopped(runner, burned["id"])
+        assert "max_minutes exceeded" in (failed["error"] or ""), failed.get("error")
+        assert jobs.prompts == ["create PO"], jobs.prompts
+
 
 class FakeJobService:
     def __init__(self, db: Database, worker_id: str, responder=None):

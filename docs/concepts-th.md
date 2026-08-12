@@ -443,7 +443,7 @@ policy กำหนดขอบเขตของ run เมื่อ guard ท�
 | `max_jobs` | จำนวน job สูงสุดต่อ run |
 | `max_iterations` | จำนวนรอบรวมสูงสุด |
 | `max_attempts_per_node` | จำนวนครั้งสูงสุดต่อ node |
-| `max_minutes` | เวลารวมสูงสุด (นาที) |
+| `max_minutes` | เวลารวมสูงสุด (นาที) **ไม่นับ** เวลาที่ค้างรออยู่ที่ `human_gate` (gate ที่รออยู่ไม่กิน compute เวลารอคนจึงไม่ถูกหักจากโควตานี้) |
 | `requires_human_after_iterations` | บังคับอนุมัติหนึ่งครั้งเมื่อ job เริ่มครบจำนวนนี้ |
 | `max_budget_units` | budget รวม; เป็นหน่วยนามธรรม **ไม่ใช่** เงินหรือ token |
 | `allowed_worker_ids` | allowlist ของ worker id |

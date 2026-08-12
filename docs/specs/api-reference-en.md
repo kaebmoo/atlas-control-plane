@@ -750,6 +750,27 @@ The context also lists `available_roles`, the lowercase union of configured
 worker roles and tags, and tells the builder to omit an unmatched role or use a
 real `worker_id`; invented roles are rejected by deterministic validation.
 
+`trigger_types` is a per-type contract map (config keys per type; `manual` and
+`webhook` are documented as open configs), paired with a `trigger_item` example
+and rules stating that `triggers` is a list of objects using only
+`type`/`name`/`config`/`enabled`. A `dsl_boundary` block states that
+`node_types`, `condition_types`, `trigger_types` and `artifact_kinds` are
+complete vocabularies, and — importantly — that **actions are not a vocabulary**:
+sending an email, calling an API or classifying a value are all `worker` nodes,
+so a missing capability is a roster gap (add a worker with that role) rather
+than an Atlas limitation. It also states how to branch on a number (a worker
+classifies the value into a bucket artifact, then `artifact_equals` /
+`artifact_in` branch on it), that no timer/reminder/escalation construct exists,
+and that anything unmodellable belongs in `warnings` with the rest of the draft
+still returned.
+
+Two shapes in a model reply are normalized instead of costing a retry: a reply
+wrapped in a ```` ```json ```` fence is unwrapped and parsed, and non-object
+items inside `triggers` are dropped with a `warnings` entry quoting each dropped
+value. Neither applies to client input — `triggers` supplied to
+`POST /api/workflows` is still validated strictly, and a `triggers` value that is
+not a list at all remains a `400`.
+
 `POST /api/workflows/suggest-workers` works locally without an AI worker and
 accepts `{"graph":...,"policy":...}`. Suggestions can reference only real
 worker/workspace IDs.
