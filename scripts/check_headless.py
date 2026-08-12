@@ -246,6 +246,68 @@ def check_dev_ui_server() -> None:
             proc.wait(timeout=5)
 
 
+def free_port() -> int:
+    """Ask the OS for an unused port, then hand it to the subprocess. ATLAS_PORT=0 would bind a
+    real ephemeral port but Atlas prints its configured base_url, so the child could not report
+    which one it got. The close-then-reuse window is acceptable inside a hermetic check."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def wait_for_health(base_url: str, timeout: float = 15) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"{base_url}/healthz", timeout=1):
+                return
+        except OSError:  # URLError derives from OSError, so this covers both
+            time.sleep(0.2)
+    raise AssertionError(f"server at {base_url} never became healthy")
+
+
+def check_graceful_shutdown(tmp: Path) -> None:
+    """Both stop signals must run the cleanup and exit 0.
+
+    SIGINT already did — it raises KeyboardInterrupt, which unwinds serve_forever into the
+    `finally`. SIGTERM did not: its default action terminates the process outright, skipping
+    every `finally`, leaving the trigger scheduler firing into a half-torn-down runtime. That
+    is precisely the signal `systemctl stop` sends, so the DEPLOYED shutdown was the ungraceful
+    one while the interactive one looked fine.
+    """
+    import signal
+
+    for label, sig in (("SIGINT", signal.SIGINT), ("SIGTERM", signal.SIGTERM)):
+        port = free_port()
+        env = dict(
+            os.environ,
+            ATLAS_DB=str(tmp / f"shutdown-{label}.sqlite"),
+            ATLAS_HOST="127.0.0.1",
+            ATLAS_PORT=str(port),
+            ATLAS_LOOPBACK_NO_AUTH="true",
+            ATLAS_SERVE_UI="false",
+        )
+        env.pop("ATLAS_SECRET_KEY", None)
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "atlas"],
+            cwd=str(ROOT),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            wait_for_health(f"http://127.0.0.1:{port}")
+            proc.send_signal(sig)
+            output = proc.communicate(timeout=15)[0]
+        except Exception:
+            proc.kill()
+            proc.wait(timeout=5)
+            raise
+        assert "Atlas stopped." in output, f"{label} skipped the shutdown cleanup:\n{output}"
+        assert proc.returncode == 0, f"{label} exited {proc.returncode}, expected 0:\n{output}"
+
+
 def main() -> None:
     check_env_wiring()
     with TemporaryDirectory() as tmp:
@@ -254,6 +316,7 @@ def main() -> None:
         check_default_mode(tmp_path)
         check_cors_allowlist(tmp_path)
         check_api_base_wiring(tmp_path)
+        check_graceful_shutdown(tmp_path)
     check_node_syntax()
     check_dev_ui_server()
     print("headless check ok")

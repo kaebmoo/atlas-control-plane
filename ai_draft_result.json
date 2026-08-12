@@ -1,0 +1,82 @@
+{
+  "name": "Citizen Complaint Response Workflow",
+  "description": "Summarizes citizen complaints, drafts official responses, and requires human approval with up to 3 revision cycles.",
+  "graph": {
+    "start": "summarizer",
+    "nodes": [
+      {
+        "id": "summarizer",
+        "type": "worker",
+        "prompt": "Summarize the following complaint and categorize it: {input.complaint}",
+        "outputs": [
+          "summary"
+        ]
+      },
+      {
+        "id": "drafter",
+        "type": "worker",
+        "prompt": "Draft an official response letter based on this summarized complaint: {artifact.summary}",
+        "outputs": [
+          "draft_response"
+        ]
+      },
+      {
+        "id": "human_review",
+        "type": "human_gate",
+        "label": "Review Draft Response",
+        "reason": "Please approve the draft or request a revision.",
+        "choices": [
+          {
+            "id": "approve",
+            "label": "Approve"
+          },
+          {
+            "id": "revise",
+            "label": "Revise"
+          }
+        ]
+      }
+    ],
+    "edges": [
+      {
+        "from": "summarizer",
+        "to": "drafter",
+        "condition": {
+          "type": "always"
+        }
+      },
+      {
+        "from": "drafter",
+        "to": "human_review",
+        "condition": {
+          "type": "always"
+        }
+      },
+      {
+        "from": "human_review",
+        "to": "drafter",
+        "condition": {
+          "type": "human_selected",
+          "choice": "revise"
+        }
+      }
+    ]
+  },
+  "policy": {
+    "max_jobs": 10,
+    "max_iterations": 3,
+    "max_attempts_per_node": 1,
+    "max_minutes": 30
+  },
+  "triggers": [
+    {
+      "type": "manual"
+    }
+  ],
+  "explanation": "The workflow sequentially summarizes the complaint and drafts a response. It then pauses at a human_gate for staff review. If the staff selects 'Revise', it cycles back to the drafting node. The cycle is bounded by policy.max_iterations set to 3 to prevent infinite loops.",
+  "warnings": [
+    "The workflow will suspend indefinitely if the human_gate is not attended to by a staff member.",
+    "If the 3-iteration limit is reached due to repeated 'Revise' selections, the workflow will terminate automatically.",
+    "Draft needed one self-repair retry; first attempt was rejected: workflow_builder response must be one JSON object: Expecting value"
+  ]
+}

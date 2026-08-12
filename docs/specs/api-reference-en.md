@@ -176,6 +176,7 @@ Every error uses one JSON shape:
 | POST | `/api/workflows` | Validate and create definition |
 | GET | `/api/workflow-templates` | Built-in templates |
 | POST | `/api/workflows/draft` | Validated AI draft |
+| POST | `/api/workflows/{workflow_id}/test-approval-webhook` | Send one probe to the reminder webhook |
 | POST | `/api/workflows/suggest-workers` | Worker suggestions |
 | GET | `/api/workflows/{workflow_id}` | Definition detail |
 | PUT | `/api/workflows/{workflow_id}` | Validate and update |
@@ -750,6 +751,27 @@ The context also lists `available_roles`, the lowercase union of configured
 worker roles and tags, and tells the builder to omit an unmatched role or use a
 real `worker_id`; invented roles are rejected by deterministic validation.
 
+`trigger_types` is a per-type contract map (config keys per type; `manual` and
+`webhook` are documented as open configs), paired with a `trigger_item` example
+and rules stating that `triggers` is a list of objects using only
+`type`/`name`/`config`/`enabled`. A `dsl_boundary` block states that
+`node_types`, `condition_types`, `trigger_types` and `artifact_kinds` are
+complete vocabularies, and — importantly — that **actions are not a vocabulary**:
+sending an email, calling an API or classifying a value are all `worker` nodes,
+so a missing capability is a roster gap (add a worker with that role) rather
+than an Atlas limitation. It also states how to branch on a number (a worker
+classifies the value into a bucket artifact, then `artifact_equals` /
+`artifact_in` branch on it), that no timer/reminder/escalation construct exists,
+and that anything unmodellable belongs in `warnings` with the rest of the draft
+still returned.
+
+Two shapes in a model reply are normalized instead of costing a retry: a reply
+wrapped in a ```` ```json ```` fence is unwrapped and parsed, and non-object
+items inside `triggers` are dropped with a `warnings` entry quoting each dropped
+value. Neither applies to client input — `triggers` supplied to
+`POST /api/workflows` is still validated strictly, and a `triggers` value that is
+not a list at all remains a `400`.
+
 `POST /api/workflows/suggest-workers` works locally without an AI worker and
 accepts `{"graph":...,"policy":...}`. Suggestions can reference only real
 worker/workspace IDs.
@@ -1198,6 +1220,64 @@ Both routes require the run to have already completed.
 If the effective persisted `_meta.reply` is absent or `mode: "none"`, the adapter instead polls
 `GET /api/workflow-runs/{run_id}` until terminal, then reads
 `GET /api/workflow-runs/{run_id}/artifacts`.
+
+### Approval SLA reminders
+
+A pending `human_gate` approval that stays undecided past a configured threshold
+produces a signed delivery on the same ledger. Nothing needs to poll Atlas: the
+scheduler tick that advances schedule triggers also ages pending approvals, so no
+inbound Atlas credential is required on the receiving side.
+
+Configure the destination and thresholds globally with
+`ATLAS_APPROVAL_WEBHOOK_URL` and `ATLAS_APPROVAL_OVERDUE_HOURS` (comma-separated,
+e.g. `48,120`), and override either per workflow with `policy.approval_webhook_url`
+and `policy.approval_overdue_hours` (a non-empty ascending list of positive
+integers) — useful when several departments share one Atlas. **With no URL
+configured, the sweep is inert and nothing is sent.** The URL is validated against
+`ATLAS_OUTBOUND_ALLOWLIST` at send time like any other delivery, so a workflow
+author can only address hosts the operator already allows. The workflow
+definition's current policy is read, not the run's `policy_snapshot`, so
+correcting a wrong URL starts working for approvals that are already waiting.
+
+Each threshold notifies exactly once, tracked by `approvals.overdue_level`:
+
+```json
+{
+  "event": "approval_overdue",
+  "delivery_id": "dlv_apr_apr_123_l2",
+  "approval": {
+    "id": "apr_123", "label": "Approve purchase", "reason": "250,000 THB",
+    "choices": [{"id": "approve", "label": "Approve"}],
+    "created_at": "2026-08-07T02:00:00Z",
+    "age_hours": 130.5, "level": 2, "threshold_hours": 120
+  },
+  "run": {
+    "id": "wfr_…", "node_key": "dept_head_approval",
+    "workflow_definition_id": "wfd_…", "workflow_name": "Purchase approval"
+  },
+  "signed_at": "2026-08-12T12:30:00Z"
+}
+```
+
+`POST /api/workflows/{workflow_id}/test-approval-webhook` sends one synthetic
+event to the URL this workflow would really use, right now, and answers
+`{"test":{"ok":true,"status":204}}` or `{"test":{"ok":false,"reason":"…"}}` with
+Atlas's own words. It writes no delivery row — the ledger stays an answer to
+"did a real reminder go out" — and the body carries `test: true` so a receiver
+can decline to page anyone. A missing configuration is the only 400.
+
+A runnable reference receiver — signature verification, deduplication, and routing, in
+stdlib Python — ships at `poc/approval_reminder_receiver.py`. Start there rather than from
+this prose: a signature computed over re-serialized JSON instead of the raw request bytes is
+the one mistake that makes every reminder fail silently.
+
+The body is self-sufficient on purpose — a receiver composes a human message from
+it without calling Atlas back, which is what keeps a long-lived read credential
+off worker hosts. Atlas states the fact and stops there: **who** to notify at
+`level` 2 rather than 1 is routing, which needs an org chart Atlas does not have,
+and "two business days" is a calendar, not an age. Thresholds are wall-clock
+hours; pick values with a margin for weekends (e.g. `72,168`) and let the receiver
+decide the exact moment to send.
 
 ## 15. OpenAPI 3.1
 

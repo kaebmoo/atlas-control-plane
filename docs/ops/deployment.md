@@ -56,6 +56,12 @@ systemctl daemon-reload
 systemctl enable --now atlas
 ```
 
+`systemctl stop` sends SIGTERM, which Atlas handles the same way as Ctrl+C: the trigger
+scheduler is stopped, the callback reaper is stopped, the listening socket is closed, and
+the process exits 0 after printing `Atlas stopped.`. A run interrupted mid-flight is
+recovered by the reconcile pass on the next start, so a stop is safe at any moment.
+
+
 ## 2. Reverse proxy (TLS, gzip, request size, and SSE)
 
 Atlas does not terminate TLS or compress responses itself. Front it with nginx or

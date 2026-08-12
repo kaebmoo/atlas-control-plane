@@ -466,9 +466,11 @@ instead of continuing.
 | `max_jobs` | Max jobs per run |
 | `max_iterations` | Max total iterations |
 | `max_attempts_per_node` | Max executions of any one node |
-| `max_minutes` | Overall wall-clock limit |
+| `max_minutes` | Overall wall-clock limit, **excluding** time parked at a `human_gate` (an idle gate consumes no compute, so waiting for a person never counts against it) |
 | `requires_human_after_iterations` | Require one human approval once this many jobs have started |
 | `max_budget_units` | Total budget; an abstract unit, **not** money or tokens |
+| `approval_webhook_url` | Where overdue-approval reminders are POSTed; overrides `ATLAS_APPROVAL_WEBHOOK_URL`. Still subject to the outbound allowlist |
+| `approval_overdue_hours` | Ascending hours after which a still-pending approval notifies, e.g. `[48, 120]`; each level fires once |
 | `allowed_worker_ids` | Allowlist of worker ids |
 | `allowed_workspace_ids` | Allowlist of workspace ids |
 | `stop_on_first_failure` | Stop the run on the first failed branch; **default `true`** |

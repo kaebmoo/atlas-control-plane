@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 from atlas.app import AtlasHttpServer, AtlasRuntime
 from atlas.config import Config
 from atlas.db import now_iso
+from atlas.workflows import WORKFLOW_CONDITION_TYPES, WORKFLOW_NODE_TYPES, WORKFLOW_TRIGGER_TYPES
 
 
 def main() -> None:
@@ -839,6 +840,78 @@ def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) ->
             )
         ), "builder context must state the role-grounding contract"
 
+        # D2b-1 check 1: the trigger SHAPE and the DSL boundary. The bare `trigger_types` name
+        # list let a model write prose inside the array, costing two builder jobs to return
+        # `workflow draft trigger at index 0 must be an object` to a user who could not act on it.
+        assert all(
+            fragment in prompts[-1]
+            for fragment in (
+                "trigger_item",
+                "list of OBJECTS",
+                "type, name, config, enabled",
+                "never invent",
+                "no numeric comparison",
+                "classifies",
+                "never add interface",
+                # The capability rule: a missing email worker is a ROSTER gap, not a DSL gap.
+                # Without this the model refuses requirements the engine could have run.
+                "what a worker DOES is not",
+                "available_roles",
+            )
+        ), "builder context must state the trigger shape and the DSL boundary"
+        boundary_context = json.loads(prompts[-1].split("Context JSON:\n", 1)[1].split("\n\nUser request:", 1)[0])
+        assert boundary_context["trigger_types"]["manual"]["config_keys"] == "open", "manual config is open, not closed"
+        assert boundary_context["trigger_types"]["schedule"]["config_keys"] == ["daily_time", "interval_minutes"]
+
+        # D2b-1 check 1b (F1b): the context vocabularies are a SECOND copy of what the validator
+        # enforces. Substring assertions cannot catch "a seventh condition type was added and
+        # nobody updated the context" — only set equality can, and that drift is precisely the
+        # failure class this plan exists to close. Mutation test: add a fake member to any
+        # constant below and this must go red.
+        assert set(boundary_context["node_types"]) == set(WORKFLOW_NODE_TYPES), boundary_context["node_types"]
+        assert set(boundary_context["condition_types"]) == set(WORKFLOW_CONDITION_TYPES), boundary_context["condition_types"]
+        assert set(boundary_context["trigger_types"]) == set(WORKFLOW_TRIGGER_TYPES), boundary_context["trigger_types"]
+
+        # D2b-2 check 2: a prose trigger suggestion is DROPPED with a quoting warning instead of
+        # costing a model call. The len(prompts) assertion is the one protecting the user's model
+        # budget — the field failure spent two paid jobs to produce nothing at all.
+        calls_before = len(prompts)
+        response["text"] = json.dumps(
+            dict(valid_draft, triggers=["พนักงานส่งคำขอจัดซื้อ", {"type": "manual", "name": "Manual start"}])
+        )
+        normalized = request(
+            base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "prose trigger"}
+        )["draft"]
+        assert normalized["triggers"] == [{"type": "manual", "name": "Manual start"}], normalized["triggers"]
+        assert any("Ignored 1 trigger suggestion" in warning for warning in normalized["warnings"]), normalized["warnings"]
+        assert any("\\u0e1e\\u0e19\\u0e31\\u0e01" in warning for warning in normalized["warnings"]), "the dropped value must be quoted back"
+        assert len(prompts) == calls_before + 1, "normalizing a suggestion must not spend a retry"
+
+        # D2b-2 check 4: the normalizer touches MODEL output only. Client-supplied triggers on
+        # POST /api/workflows must keep failing loudly — this is the regression lock.
+        assert "workflow draft trigger at index 0 must be an object" in request_error(
+            base_url,
+            "POST",
+            "/api/workflows",
+            {"status": "active", "name": "Client triggers", "graph": valid_draft["graph"], "triggers": ["x"]},
+        )["error"]
+
+        # D2b-3 check 5: a fenced VALID draft parses on the first call. Before this a fence cost a
+        # full extra builder job — seen in the field log on a run that otherwise succeeded.
+        calls_before = len(prompts)
+        response["text"] = "```json\n" + json.dumps(valid_draft) + "\n```"
+        fenced_valid = request(base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "fenced valid"})["draft"]
+        assert len(prompts) == calls_before + 1, "a fenced valid draft must not spend a retry"
+        assert not any("self-repair" in warning for warning in fenced_valid["warnings"]), fenced_valid["warnings"]
+        # Prose around JSON stays a broken reply: the retry keeps its job, and _json_from_text
+        # deliberately refuses to brace-scan its way out of arbitrary text.
+        calls_before = len(prompts)
+        response_queue[:] = ["Here is your workflow: " + json.dumps(valid_draft), json.dumps(valid_draft)]
+        prose = request(base_url, "POST", "/api/workflows/draft", {"plain_language_prompt": "prose reply"})["draft"]
+        assert len(prompts) == calls_before + 2, "an unfenced prose reply must still cost the bounded retry"
+        assert any("self-repair" in warning for warning in prose["warnings"]), prose["warnings"]
+        response["text"] = json.dumps(valid_draft)
+
         invalid_schedule = dict(valid_draft, triggers=[{"type": "schedule", "config": {"interval_minutes": 0}}])
         response["text"] = json.dumps(invalid_schedule)
         assert "interval_minutes must be positive" in request_error(
@@ -914,8 +987,12 @@ def check_milestone_7(runtime: AtlasRuntime, base_url: str, workflow_id: str) ->
         assert repaired["graph"]["nodes"][0]["choices"][0] == {"id": "approve", "label": "Approve"}
         assert any("self-repair" in warning for warning in repaired["warnings"]), "retry must be surfaced in warnings"
 
-        # A reply that is not one JSON object is the same retry-worthy class as a validation
-        # failure — one bounded retry, then success.
+        # Since D2b-3 this reply is no longer a parse failure: the fence is stripped and
+        # `{"name": "fenced"}` parses cleanly, then fails DRAFT VALIDATION for its missing
+        # fields. So it still costs exactly one bounded retry and still ends in success — the
+        # assertions below are unchanged — but it now exercises the validation-failure class
+        # rather than the not-one-JSON-object class. The fence-specific cases (a fenced VALID
+        # draft costing no retry, unfenced prose still costing one) are asserted above.
         calls_before = len(prompts)
         response_queue[:] = ["```json\n{\"name\": \"fenced\"}\n```", json.dumps(valid_draft)]
         retried = request(

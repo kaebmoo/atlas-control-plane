@@ -171,6 +171,7 @@ Error ทุกประเภทเป็น JSON รูปแบบเดี�
 | POST | `/api/workflows` | validate และสร้าง definition |
 | GET | `/api/workflow-templates` | built-in templates |
 | POST | `/api/workflows/draft` | AI draft ที่ validate แล้ว |
+| POST | `/api/workflows/{workflow_id}/test-approval-webhook` | ยิง event ทดสอบไปที่ reminder webhook หนึ่งครั้ง |
 | POST | `/api/workflows/suggest-workers` | worker suggestions |
 | GET | `/api/workflows/{workflow_id}` | definition detail |
 | PUT | `/api/workflows/{workflow_id}` | validate และอัปเดต |
@@ -710,6 +711,23 @@ context ยังระบุ `available_roles` ซึ่งเป็น union �
 worker ที่ตั้งค่าไว้ และกำชับให้เว้น role ที่จับคู่ไม่ได้หรือใช้ `worker_id` ที่มีจริง
 role ที่โมเดลคิดขึ้นเองจะถูก deterministic validation ปฏิเสธ
 
+`trigger_types` เป็น contract map ราย type (ระบุ config key ของแต่ละ type; `manual`
+และ `webhook` เป็น config แบบเปิด) มาพร้อมตัวอย่าง `trigger_item` และกฎว่า `triggers`
+เป็น list ของ object ที่ใช้ได้เฉพาะคีย์ `type`/`name`/`config`/`enabled` และมีบล็อก
+`dsl_boundary` ระบุว่า `node_types`, `condition_types`, `trigger_types`,
+`artifact_kinds` เป็นคำศัพท์ชุดปิด — และที่สำคัญคือ **action ไม่ใช่ชุดคำศัพท์**:
+การส่งอีเมล เรียก API หรือจัดกลุ่มค่า ล้วนเป็น `worker` node ดังนั้นการที่ทำไม่ได้
+คือ "ไม่มี worker ที่มีความสามารถนั้นใน roster" ไม่ใช่ข้อจำกัดของ Atlas นอกจากนี้ยัง
+บอกวิธีแตกสาขาตามตัวเลข (ให้ worker จัดค่าเป็น bucket artifact แล้วใช้
+`artifact_equals` / `artifact_in`), บอกว่าไม่มี timer/reminder/escalation และให้ใส่
+สิ่งที่โมเดลไม่ได้ลงใน `warnings` พร้อมคืน draft ส่วนที่เหลือตามปกติ
+
+คำตอบของโมเดลสองรูปแบบจะถูก normalize แทนการเสีย retry: คำตอบที่ห่อด้วย
+```` ```json ```` จะถูกแกะ fence แล้ว parse และ item ใน `triggers` ที่ไม่ใช่ object
+จะถูกตัดทิ้งพร้อมเพิ่ม `warnings` ที่ยกค่าที่ตัดออกมาแสดง ทั้งสองอย่างไม่มีผลกับ input
+ของ client — `triggers` ที่ส่งเข้า `POST /api/workflows` ยังถูกตรวจเข้มเหมือนเดิม และ
+`triggers` ที่ไม่ใช่ list ยังคงเป็น `400`
+
 `POST /api/workflows/suggest-workers` ทำงานแบบ local ได้ถ้าไม่มี AI worker และรับ
 `{"graph":...,"policy":...}` ข้อเสนออ้างได้เฉพาะ worker/workspace ID ที่มีจริง
 
@@ -1136,6 +1154,60 @@ route ต้องการให้ run เสร็จสิ้นแล้ว
 ถ้า `_meta.reply` ที่ persist แล้วไม่มีหรือ `mode: "none"` adapter จะ poll
 `GET /api/workflow-runs/{run_id}` จนถึงสถานะ terminal แล้วอ่าน
 `GET /api/workflow-runs/{run_id}/artifacts` แทน
+
+### การเตือน approval ที่ค้าง (Approval SLA)
+
+approval ของ `human_gate` ที่ยังไม่ถูกตัดสินจนเกินเกณฑ์เวลาที่ตั้งไว้ จะสร้าง delivery
+ที่เซ็นแล้วบน ledger เดียวกัน ไม่ต้องมีใคร poll Atlas — scheduler tick ตัวเดียวกับที่
+เดิน schedule trigger จะนับอายุ approval ที่ค้างให้ด้วย ฝั่งผู้รับจึงไม่ต้องมี credential
+สำหรับเรียกเข้า Atlas
+
+ตั้งปลายทางและเกณฑ์แบบรวมด้วย `ATLAS_APPROVAL_WEBHOOK_URL` และ
+`ATLAS_APPROVAL_OVERDUE_HOURS` (คั่นด้วยจุลภาค เช่น `48,120`) และ override ราย workflow
+ได้ด้วย `policy.approval_webhook_url` กับ `policy.approval_overdue_hours` (list ของ
+จำนวนเต็มบวก เรียงจากน้อยไปมาก ห้ามซ้ำ) — เหมาะกับกรณีหลายแผนกใช้ Atlas ตัวเดียวกัน
+**ถ้าไม่ได้ตั้ง URL ไว้เลย การกวาดจะไม่ทำงานและไม่ส่งอะไรทั้งสิ้น** URL ถูกตรวจกับ
+`ATLAS_OUTBOUND_ALLOWLIST` ตอนส่งเหมือน delivery อื่นทุกตัว คนเขียน workflow จึงชี้ได้
+เฉพาะ host ที่ operator อนุญาตไว้แล้ว และระบบอ่าน policy ของ definition ปัจจุบัน ไม่ใช่
+`policy_snapshot` ของ run การแก้ URL ที่ตั้งผิดจึงมีผลกับ approval ที่ค้างอยู่แล้วทันที
+
+แต่ละเกณฑ์แจ้งเตือนครั้งเดียว ติดตามด้วย `approvals.overdue_level`:
+
+```json
+{
+  "event": "approval_overdue",
+  "delivery_id": "dlv_apr_apr_123_l2",
+  "approval": {
+    "id": "apr_123", "label": "อนุมัติคำขอจัดซื้อ", "reason": "250,000 บาท",
+    "choices": [{"id": "approve", "label": "อนุมัติ"}],
+    "created_at": "2026-08-07T02:00:00Z",
+    "age_hours": 130.5, "level": 2, "threshold_hours": 120
+  },
+  "run": {
+    "id": "wfr_…", "node_key": "dept_head_approval",
+    "workflow_definition_id": "wfd_…", "workflow_name": "อนุมัติคำขอจัดซื้อ"
+  },
+  "signed_at": "2026-08-12T12:30:00Z"
+}
+```
+
+`POST /api/workflows/{workflow_id}/test-approval-webhook` ยิง event สังเคราะห์หนึ่งครั้งไปยัง URL
+ที่ workflow นี้จะใช้จริง แล้วตอบ `{"test":{"ok":true,"status":204}}` หรือ
+`{"test":{"ok":false,"reason":"…"}}` ด้วยถ้อยคำของ Atlas เอง มันไม่เขียนแถวใน delivery ledger —
+ledger จะได้ยังตอบคำถาม "การเตือนจริงส่งออกไปหรือยัง" ได้ตรง ๆ — และ body มี `test: true` เพื่อให้
+ผู้รับเลือกที่จะไม่ปลุกใครได้ มีแค่กรณีที่ยังไม่ได้ตั้งค่าเท่านั้นที่เป็น 400
+
+มีตัวอย่าง receiver ที่รันได้จริงอยู่ที่ `poc/approval_reminder_receiver.py` (Python stdlib)
+ครอบทั้งการตรวจลายเซ็น การกัน delivery ซ้ำ และการ routing — แนะนำให้เริ่มจากไฟล์นั้นแทนการอ่าน
+คำอธิบายอย่างเดียว เพราะการคำนวณลายเซ็นจาก JSON ที่ serialize ใหม่แทน raw bytes ของ request คือ
+ความผิดพลาดเดียวที่ทำให้การเตือนทุกครั้งล้มเหลวแบบเงียบ ๆ
+
+body ตั้งใจให้ครบในตัวเอง — ผู้รับเขียนข้อความหาคนได้จากข้อมูลนี้โดยไม่ต้องเรียกกลับมาถาม
+Atlas ซึ่งเป็นเหตุผลที่ทำให้ไม่ต้องมี read credential อายุยาวไปวางบนเครื่อง worker
+Atlas บอกแค่ข้อเท็จจริงและหยุดแค่นั้น: **ใคร**ควรถูกแจ้งที่ `level` 2 แทน 1 คือเรื่อง
+routing ซึ่งต้องใช้ผังองค์กรที่ Atlas ไม่มี และ "2 วันทำการ" คือปฏิทิน ไม่ใช่จำนวนชั่วโมง
+เกณฑ์เป็นชั่วโมงตามเวลาจริง ให้ตั้งเผื่อวันหยุด (เช่น `72,168`) แล้วให้ผู้รับตัดสินจังหวะ
+ส่งจริงเอง
 
 ## 15. OpenAPI 3.1
 

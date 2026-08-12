@@ -17,6 +17,14 @@ def _csv_env(name: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
+def _overdue_hours_env(name: str) -> tuple[int, ...]:
+    """D2c-2: `48,120` -> (48, 120). Ascending, de-duplicated, positives only; a malformed entry
+    is dropped rather than raising, because a typo in a notification threshold must not stop
+    Atlas from booting. Sorting is what makes `level` in the delivery body mean "how overdue"."""
+    values = {int(item) for item in _csv_env(name) if item.lstrip("+").isdigit() and int(item) > 0}
+    return tuple(sorted(values))
+
+
 def _positive_int_env(name: str, default: int) -> int:
     try:
         value = int(os.getenv(name, str(default)))
@@ -41,6 +49,13 @@ class Config:
     outbound_allowlist: tuple[str, ...] = ()
     outbound_max_attempts: int = 5
     outbound_timeout_seconds: float = 10.0
+    # D2c-2 approval SLA defaults, overridable per workflow via policy.approval_webhook_url /
+    # policy.approval_overdue_hours. No URL -> the sweep is off, so upgrading an existing
+    # deployment produces no surprise outbound traffic. The URL is still gated by
+    # ATLAS_OUTBOUND_ALLOWLIST like every other delivery, which is what makes the per-workflow
+    # override safe: a workflow author picks among operator-approved hosts, never any host.
+    approval_webhook_url: str | None = None
+    approval_overdue_hours: tuple[int, ...] = ()
     # T3 async execution: the externally reachable Atlas base URL workers deliver callbacks to.
     # Unset -> execution:"callback" is rejected at submit validation time.
     public_base_url: str | None = None
@@ -73,6 +88,8 @@ class Config:
             outbound_allowlist=_csv_env("ATLAS_OUTBOUND_ALLOWLIST"),
             outbound_max_attempts=int(os.getenv("ATLAS_OUTBOUND_MAX_ATTEMPTS", "5")),
             outbound_timeout_seconds=float(os.getenv("ATLAS_OUTBOUND_TIMEOUT", "10")),
+            approval_webhook_url=os.getenv("ATLAS_APPROVAL_WEBHOOK_URL") or None,
+            approval_overdue_hours=_overdue_hours_env("ATLAS_APPROVAL_OVERDUE_HOURS"),
             public_base_url=(os.getenv("ATLAS_PUBLIC_BASE_URL") or "").rstrip("/") or None,
             callback_timeout_seconds=float(os.getenv("ATLAS_CALLBACK_TIMEOUT_SECONDS", "3600")),
             serve_ui=_bool_env("ATLAS_SERVE_UI", True),

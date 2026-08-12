@@ -695,7 +695,30 @@ ATLAS_CALLBACK_TIMEOUT_SECONDS=3600
 ATLAS_OUTBOUND_ALLOWLIST=
 ATLAS_OUTBOUND_MAX_ATTEMPTS=5
 ATLAS_OUTBOUND_TIMEOUT=10
+ATLAS_APPROVAL_WEBHOOK_URL=
+ATLAS_APPROVAL_OVERDUE_HOURS=
 ```
+
+[`.env.example`](.env.example) carries the same list with the reason for each value;
+copy it to `.env` for local development. **Atlas has no dotenv dependency and never
+reads `.env` by itself** — a shell has to export it first:
+
+```bash
+set -a; source .env; set +a
+python3 -m atlas
+```
+
+Under systemd, use its own `EnvironmentFile` instead (see
+[docs/ops/deployment.md](docs/ops/deployment.md)).
+
+`ATLAS_APPROVAL_WEBHOOK_URL` and `ATLAS_APPROVAL_OVERDUE_HOURS` (comma-separated
+ascending hours, e.g. `72,168`) are the deployment defaults for approval-overdue
+reminders; each workflow may override both through `policy.approval_webhook_url` and
+`policy.approval_overdue_hours`. With no URL configured anywhere the sweep is inert.
+The URL is subject to `ATLAS_OUTBOUND_ALLOWLIST` like every other delivery, and it must
+point at a receiver you run — Atlas only POSTs a signed body, it sends no email or chat
+([`poc/approval_reminder_receiver.py`](poc/approval_reminder_receiver.py) is a runnable
+reference).
 
 `ATLAS_REQUEST_LOG=true` emits one JSON line per request to stderr (method, path,
 status, client, duration); it leaves response bodies unchanged and is off by default.

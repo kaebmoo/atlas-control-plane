@@ -24,6 +24,7 @@ import urllib.request
 from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -78,7 +79,13 @@ class MockReceiverHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "1000")
             self.end_headers()
             try:
-                for _ in range(50):
+                # 200 writes x 0.06s = 12s of body against a 2s client deadline. The length is
+                # deliberately far past the deadline rather than just past it: the assertion
+                # below separates "drain was bounded" (~2s) from "drain waited out the whole
+                # drip", and those two numbers have to be far apart or the check turns into a
+                # timing race. It costs nothing in the passing case — the client closes at its
+                # deadline and the next write raises straight into the handler below.
+                for _ in range(200):
                     self.wfile.write(b"x")
                     self.wfile.flush()
                     time.sleep(0.06)
@@ -319,10 +326,17 @@ def main() -> None:
             slow_start = time.monotonic()
             run_g = start_run(base_url, definition["id"], f"{receiver_base}/reply/slow", "corr-slow")
             wait_for_run(runtime, run_g)
-            delivery_g = wait_for_delivery(runtime, run_g, "delivered", timeout=6)
+            delivery_g = wait_for_delivery(runtime, run_g, "delivered", timeout=15)
             elapsed = time.monotonic() - slow_start
             assert delivery_g["attempts"] == 1, delivery_g
-            assert elapsed < 2.9, f"delivery took {elapsed:.2f}s — response drain did not respect the deadline"
+            # The window is wide on purpose. `slow_start` is taken before the run is even
+            # created, so this figure carries run start, a mock worker job, and completion —
+            # none of which the drain deadline governs. The receiver drips for 12s, so anything
+            # under that proves the drain stopped early; 8s leaves room for a loaded CI runner
+            # without letting an unbounded drain (12s+) slip past. The previous bound of 2.9s sat
+            # 0.1s below the unbounded case and failed on CI at 2.92s — it was measuring
+            # scheduling noise, not the behaviour.
+            assert elapsed < 8.0, f"delivery took {elapsed:.2f}s — response drain did not respect the deadline"
 
             # H. A receiver that trickles the STATUS LINE / HEADERS (not just the body) slower
             #    than the timeout must still be bounded: the per-recv socket timeout resets on
@@ -409,6 +423,8 @@ def main() -> None:
             }, listed
             status, failed_listed = request_json(base_url, "GET", "/api/deliveries?status=blocked")
             assert status == 200 and {d["id"] for d in failed_listed["deliveries"]} >= {blocked_seed["id"], delivery_d["id"]}
+
+            check_approval_sla(runtime, base_url, receiver_base)
         finally:
             runtime.close()  # stop the reaper daemon before the tempdir exits
             server.shutdown()
@@ -438,6 +454,134 @@ def start_run(base_url: str, definition_id: str, callback_url: str, correlation_
     )
     assert status == 202, payload
     return payload["run"]["id"]
+
+
+def check_approval_sla(runtime: AtlasRuntime, base_url: str, receiver_base: str) -> None:
+    """Scenario I: a pending approval that crosses a configured threshold notifies exactly
+    once per level, addressed by the workflow's own policy, and the test probe proves a
+    receiver is reachable without waiting days for a real gate to go overdue.
+
+    Lives outside main() because main() is already a long sequence of independent scenarios;
+    appending an eighth one inline pushed it past the complexity the linter allows.
+    """
+    # D2c-2 approval SLA: a pending human approval that crosses a configured threshold
+    # produces ONE signed notification per level, addressed by the workflow's own policy.
+    gate_definition = runtime.db.create_workflow_definition(
+        {
+            "status": "active",
+            "name": "Purchase approval",
+            "graph": {
+                "start": "gate",
+                "nodes": [{"id": "gate", "type": "human_gate", "label": "Approve purchase"}],
+                "edges": [],
+            },
+            # Per-workflow routing: departments sharing one Atlas each address their own
+            # reminders without an ops change. The URL still clears the operator's
+            # outbound allowlist at send time, which is what makes that safe.
+            "policy": {
+                "approval_webhook_url": f"{receiver_base}/reply/sla",
+                "approval_overdue_hours": [48, 120],
+            },
+        }
+    )
+    waiting = runtime.workflows.run_workflow(gate_definition["id"])
+    approval = runtime.db.list_approvals(state="pending", run_id=waiting["id"])[0]
+
+    def sla_sent() -> list[dict]:
+        return [item for item in MockReceiverHandler.received if item["path"] == "/reply/sla"]
+
+    def age_approval(approval_id: str, hours: int) -> None:
+        stamp = (datetime.now(UTC) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with runtime.db.connect() as conn:
+            conn.execute("UPDATE approvals SET created_at = ? WHERE id = ?", (stamp, approval_id))
+
+    # Not yet overdue -> silence.
+    assert runtime.triggers.sweep_overdue_approvals() == 0
+    assert not sla_sent()
+
+    age_approval(approval["id"], 60)  # past threshold 1 only
+    assert runtime.triggers.sweep_overdue_approvals() == 1
+    body = sla_sent()[-1]["body"]
+    assert body["event"] == "approval_overdue"
+    assert body["approval"]["level"] == 1 and body["approval"]["threshold_hours"] == 48
+    assert body["approval"]["age_hours"] >= 60
+    # Self-sufficient body: the receiver composes a human message without calling Atlas
+    # back, which is what keeps a long-lived read credential off the worker host.
+    assert body["approval"]["label"] == "Approve purchase"
+    assert body["run"]["workflow_name"] == "Purchase approval" and body["run"]["node_key"] == "gate"
+    assert sla_sent()[-1]["signature"], "an SLA delivery must be signed like any other"
+
+    # Sweeping again must NOT re-notify the same level — a channel that repeats every
+    # tick gets muted by its recipients, and then the feature is decorative.
+    assert runtime.triggers.sweep_overdue_approvals() == 0
+    assert len(sla_sent()) == 1
+
+    age_approval(approval["id"], 130)  # past threshold 2
+    assert runtime.triggers.sweep_overdue_approvals() == 1
+    assert len(sla_sent()) == 2
+    assert sla_sent()[-1]["body"]["approval"]["level"] == 2
+    assert sla_sent()[-1]["body"]["approval"]["threshold_hours"] == 120
+    assert runtime.triggers.sweep_overdue_approvals() == 0
+
+    # A decided approval leaves the pending set and can never be reminded again.
+    runtime.workflows.approve_approval(approval["id"])
+    assert runtime.triggers.sweep_overdue_approvals() == 0
+    assert len(sla_sent()) == 2
+
+    # No URL configured anywhere -> the sweep is inert, so upgrading a deployment that
+    # never sets ATLAS_APPROVAL_WEBHOOK_URL produces no surprise outbound traffic.
+    silent_definition = runtime.db.create_workflow_definition(
+        {
+            "status": "active",
+            "name": "Unconfigured approval",
+            "graph": {"start": "gate", "nodes": [{"id": "gate", "type": "human_gate"}], "edges": []},
+        }
+    )
+    silent_run = runtime.workflows.run_workflow(silent_definition["id"])
+    silent_approval = runtime.db.list_approvals(state="pending", run_id=silent_run["id"])[0]
+    age_approval(silent_approval["id"], 500)
+    assert runtime.triggers.sweep_overdue_approvals() == 0
+    assert len(sla_sent()) == 2
+
+    # J. The test send. Without it the only way to learn whether a receiver exists is to
+    # build a gate, start a run and wait days — so this must resolve the SAME url the
+    # sweep would (workflow policy first, deployment default second) or a green result
+    # would prove nothing about the real path.
+    sent_before = len(sla_sent())
+    status, tested = request_json(
+        base_url, "POST", f"/api/workflows/{gate_definition['id']}/test-approval-webhook"
+    )
+    assert status == 200 and tested["test"]["ok"] is True, tested
+    assert len(sla_sent()) == sent_before + 1, "the test must actually leave the process"
+    probe = sla_sent()[-1]["body"]
+    assert probe["test"] is True, "a connectivity probe must be marked so a receiver can ignore it"
+    assert probe["event"] == "approval_overdue" and probe["approval"]["id"] == "apr_test"
+    first_probe_id = probe["delivery_id"]
+    assert probe["approval"]["age_hours"] == 0
+    # It must NOT write a delivery row: the ledger answers "did a real reminder go out",
+    # and a probe in it makes that answer worse.
+    assert not [row for row in runtime.db.list_deliveries(limit=500) if row["id"] == "dlv_apr_test"]
+
+    # Each probe carries its OWN delivery_id. A constant one would be deduplicated by
+    # any receiver honouring idempotency, so the second test an operator ran would be
+    # answered 2xx and silently dropped — the worst outcome for a button whose whole job
+    # is saying whether the receiver is alive right now.
+    request_json(base_url, "POST", f"/api/workflows/{gate_definition['id']}/test-approval-webhook")
+    assert sla_sent()[-1]["body"]["delivery_id"] != first_probe_id, "probe ids must not repeat"
+
+    # A receiver that answers non-2xx is reported as such, not silently swallowed.
+    MockReceiverHandler.fail_counts["/reply/sla"] = 1
+    _, refused = request_json(
+        base_url, "POST", f"/api/workflows/{gate_definition['id']}/test-approval-webhook"
+    )
+    assert refused["test"]["ok"] is False and refused["test"]["status"] == 500, refused
+    assert "only 2xx" in refused["test"]["reason"], refused
+
+    # A workflow with no URL and no server default is a 400 naming both places to set it.
+    status, unconfigured = request_json(
+        base_url, "POST", f"/api/workflows/{silent_definition['id']}/test-approval-webhook"
+    )
+    assert status == 400 and "ATLAS_APPROVAL_WEBHOOK_URL" in unconfigured["error"], unconfigured
 
 
 def request_json(base_url: str, method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:

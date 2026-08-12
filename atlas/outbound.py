@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from .db import Database, now_iso
+from .db import Database, new_id, now_iso
 
 
 @dataclass(frozen=True)
@@ -329,6 +329,115 @@ class OutboundService:
             return delivery  # another path already owns this run's completion delivery
         return self._drive_owned(delivery, run)
 
+    def deliver_approval_overdue(
+        self,
+        approval: dict[str, Any],
+        run: dict[str, Any],
+        url: str,
+        level: int,
+        threshold_hours: int,
+        age_hours: float,
+    ) -> dict[str, Any] | None:
+        """D2c-2: one signed notification that a pending approval has crossed a threshold.
+
+        The body is deliberately SELF-SUFFICIENT — workflow name, gate label, reason and choices
+        are all included — so the receiver can compose a human message without calling Atlas
+        back. Needing a callback would mean handing a worker host a long-lived Atlas read
+        credential, and thClaws holds nothing of the kind today (only per-job callback bearers);
+        avoiding that is the whole reason reminders push outward instead of being polled.
+
+        Atlas states the fact and stops there. WHO gets told at level 2 rather than level 1 is
+        routing, and routing needs an org chart Atlas does not have. Business days and holidays
+        are the receiver's too: `age_hours` is a fact, "two business days" is a calendar.
+
+        The delivery id is deterministic per (approval, level), so a concurrent tick or a restart
+        reconcile converges on one row instead of notifying twice.
+        """
+        delivery, created = self.db.claim_delivery(
+            {
+                "id": f"dlv_apr_{approval['id']}_l{level}",
+                "run_id": run["id"],
+                "url": url,
+                "max_attempts": self.settings.max_attempts,
+                "payload": {
+                    "event": "approval_overdue",
+                    "approval": {
+                        "id": approval["id"],
+                        "label": approval.get("label"),
+                        "reason": approval.get("reason"),
+                        "choices": approval.get("choices") or [],
+                        "created_at": approval.get("created_at"),
+                        "age_hours": round(age_hours, 2),
+                        "level": level,
+                        "threshold_hours": threshold_hours,
+                    },
+                    "run": {
+                        "id": run["id"],
+                        "node_key": approval.get("node_key"),
+                        "workflow_definition_id": run.get("workflow_definition_id"),
+                        "workflow_name": run.get("name"),
+                    },
+                },
+            }
+        )
+        if not created:
+            return delivery
+        return self._drive_owned(delivery, run)
+
+    def test_approval_webhook(self, url: str) -> dict[str, Any]:
+        """One synthetic, clearly-marked `approval_overdue` POST, sent inline, reported straight
+        back. No delivery row, because there is no run and no approval to hang one on — and a
+        test that littered the ledger would make the ledger a worse answer to "did a real
+        reminder go out?".
+
+        Exists because the alternative way to learn whether anything is listening was to build a
+        workflow with a gate, start a run, wait for the threshold, and read the ledger days
+        later. Every failure mode an operator can actually cause — no secret, host not on the
+        allowlist, nothing listening, TLS wrong, a redirect — surfaces here in one round trip,
+        with Atlas's own words for the reason.
+
+        `test: true` is in the body so a receiver can refuse to page a human at 3am for a
+        connectivity check."""
+        if not self.settings.secret_key:
+            return {"ok": False, "reason": "ATLAS_SECRET_KEY is not configured; refusing to send an unsigned delivery"}
+        target = resolve_outbound_target(url, self.settings.allowlist)
+        if not target.allowed:
+            return {"ok": False, "reason": target.reason}
+        body_dict = {
+            "event": "approval_overdue",
+            "test": True,
+            # Unique per probe. A constant id would be deduplicated by any receiver following
+            # rule 3 (idempotency on delivery_id), so the SECOND test an operator ran would be
+            # answered 2xx and then silently dropped — the worst possible outcome for a button
+            # whose entire job is telling them whether the receiver is alive right now.
+            "delivery_id": f"dlv_apr_test_{new_id('probe')}",
+            "approval": {
+                "id": "apr_test",
+                "label": "Test — no approval is actually waiting",
+                "reason": "Connectivity check from Atlas",
+                "choices": [],
+                "created_at": now_iso(),
+                "age_hours": 0,
+                "level": 1,
+                "threshold_hours": 0,
+            },
+            "run": {"id": "wfr_test", "node_key": "test", "workflow_definition_id": None, "workflow_name": "Test"},
+            "signed_at": now_iso(),
+        }
+        body = json.dumps(body_dict, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        headers = {"Content-Type": "application/json", "X-Atlas-Signature": sign_delivery_body(self.settings.secret_key, body)}
+        try:
+            status = _send(target, body, headers, self.settings.timeout_seconds)
+        except Exception as exc:  # noqa: BLE001 - every transport failure is a legitimate answer here
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        if 200 <= status < 300:
+            return {"ok": True, "status": status}
+        return {
+            "ok": False,
+            "status": status,
+            "reason": f"the receiver answered HTTP {status}; only 2xx counts as delivered (a redirect is not followed)",
+        }
+
     def deliver_run(self, run: dict[str, Any]) -> dict[str, Any]:
         """POST /api/workflow-runs/{id}/deliver: one manual, immediate (re)send. `mode` need not
         be "webhook" — an explicit manual request overrides the adapter's original poll
@@ -409,14 +518,26 @@ class OutboundService:
         target = resolve_outbound_target(delivery["url"], self.settings.allowlist)
         if not target.allowed:
             return self._block(delivery, target.reason)
-        body_dict = {
-            "delivery_id": delivery["id"],
-            "run_id": run["id"],
-            "state": run.get("state"),
-            "correlation_id": delivery.get("correlation_id"),
-            "artifacts": [_artifact_payload(artifact) for artifact in self.db.list_artifacts(run_id=run["id"], limit=1000)],
-            "signed_at": now_iso(),
-        }
+        # A stored payload means this is an EVENT delivery (D2c-2). Its body describes a moment in
+        # time, so it must NOT be rebuilt from the run on a later attempt or a restart reconcile —
+        # that would re-send an overdue reminder wearing a run-completion body. `delivery_id` and
+        # `signed_at` are still stamped per attempt so the signature keeps its meaning. No stored
+        # payload -> the original run-completion body, rebuilt exactly as before.
+        stored = delivery.get("payload") or None
+        body_dict = (
+            {**stored, "delivery_id": delivery["id"], "signed_at": now_iso()}
+            if stored
+            else {
+                "delivery_id": delivery["id"],
+                "run_id": run["id"],
+                "state": run.get("state"),
+                "correlation_id": delivery.get("correlation_id"),
+                "artifacts": [
+                    _artifact_payload(artifact) for artifact in self.db.list_artifacts(run_id=run["id"], limit=1000)
+                ],
+                "signed_at": now_iso(),
+            }
+        )
         body = json.dumps(body_dict, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
         headers = {"Content-Type": "application/json", "X-Atlas-Signature": sign_delivery_body(self.settings.secret_key, body)}
         attempts = delivery["attempts"] + 1
