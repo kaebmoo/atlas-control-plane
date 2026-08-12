@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from .db import Database, now_iso
+from .db import Database, new_id, now_iso
 
 
 @dataclass(frozen=True)
@@ -406,7 +406,11 @@ class OutboundService:
         body_dict = {
             "event": "approval_overdue",
             "test": True,
-            "delivery_id": "dlv_apr_test",
+            # Unique per probe. A constant id would be deduplicated by any receiver following
+            # rule 3 (idempotency on delivery_id), so the SECOND test an operator ran would be
+            # answered 2xx and then silently dropped — the worst possible outcome for a button
+            # whose entire job is telling them whether the receiver is alive right now.
+            "delivery_id": f"dlv_apr_test_{new_id('probe')}",
             "approval": {
                 "id": "apr_test",
                 "label": "Test — no approval is actually waiting",

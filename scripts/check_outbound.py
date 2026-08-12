@@ -503,10 +503,18 @@ def main() -> None:
             probe = sla_sent()[-1]["body"]
             assert probe["test"] is True, "a connectivity probe must be marked so a receiver can ignore it"
             assert probe["event"] == "approval_overdue" and probe["approval"]["id"] == "apr_test"
+            first_probe_id = probe["delivery_id"]
             assert probe["approval"]["age_hours"] == 0
             # It must NOT write a delivery row: the ledger answers "did a real reminder go out",
             # and a probe in it makes that answer worse.
             assert not [row for row in runtime.db.list_deliveries(limit=500) if row["id"] == "dlv_apr_test"]
+
+            # Each probe carries its OWN delivery_id. A constant one would be deduplicated by
+            # any receiver honouring idempotency, so the second test an operator ran would be
+            # answered 2xx and silently dropped — the worst outcome for a button whose whole job
+            # is saying whether the receiver is alive right now.
+            request_json(base_url, "POST", f"/api/workflows/{gate_definition['id']}/test-approval-webhook")
+            assert sla_sent()[-1]["body"]["delivery_id"] != first_probe_id, "probe ids must not repeat"
 
             # A receiver that answers non-2xx is reported as such, not silently swallowed.
             MockReceiverHandler.fail_counts["/reply/sla"] = 1
