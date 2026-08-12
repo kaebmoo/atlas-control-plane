@@ -835,6 +835,24 @@ class AtlasHandler(BaseHTTPRequestHandler):
             self._json({"ok": True, "warnings": warnings})
             return
 
+        if len(parts) == 4 and parts[:2] == ["api", "workflows"] and parts[3] == "test-approval-webhook" and method == "POST":
+            # D2c-2: prove the reminder path end to end without waiting days for a real gate to
+            # go overdue. Resolves the URL exactly as the sweep would — workflow policy first,
+            # then the deployment default — so a green result means the same URL the sweep will
+            # use is reachable, not merely that some URL is.
+            workflow = runtime.db.get_workflow_definition(parts[2])
+            if not workflow:
+                raise FileNotFoundError()
+            policy = workflow.get("policy") or {}
+            url = policy.get("approval_webhook_url") or runtime.config.approval_webhook_url
+            if not url:
+                raise ValueError(
+                    "no approval webhook is configured; set policy.approval_webhook_url on this "
+                    "workflow or ATLAS_APPROVAL_WEBHOOK_URL on the server"
+                )
+            self._json({"test": runtime.outbound.test_approval_webhook(str(url))})
+            return
+
         if len(parts) == 4 and parts[:2] == ["api", "workflows"] and parts[3] == "explain" and method == "POST":
             workflow = runtime.db.get_workflow_definition(parts[2])
             if not workflow:

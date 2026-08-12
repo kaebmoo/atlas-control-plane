@@ -384,6 +384,56 @@ class OutboundService:
             return delivery
         return self._drive_owned(delivery, run)
 
+    def test_approval_webhook(self, url: str) -> dict[str, Any]:
+        """One synthetic, clearly-marked `approval_overdue` POST, sent inline, reported straight
+        back. No delivery row, because there is no run and no approval to hang one on — and a
+        test that littered the ledger would make the ledger a worse answer to "did a real
+        reminder go out?".
+
+        Exists because the alternative way to learn whether anything is listening was to build a
+        workflow with a gate, start a run, wait for the threshold, and read the ledger days
+        later. Every failure mode an operator can actually cause — no secret, host not on the
+        allowlist, nothing listening, TLS wrong, a redirect — surfaces here in one round trip,
+        with Atlas's own words for the reason.
+
+        `test: true` is in the body so a receiver can refuse to page a human at 3am for a
+        connectivity check."""
+        if not self.settings.secret_key:
+            return {"ok": False, "reason": "ATLAS_SECRET_KEY is not configured; refusing to send an unsigned delivery"}
+        target = resolve_outbound_target(url, self.settings.allowlist)
+        if not target.allowed:
+            return {"ok": False, "reason": target.reason}
+        body_dict = {
+            "event": "approval_overdue",
+            "test": True,
+            "delivery_id": "dlv_apr_test",
+            "approval": {
+                "id": "apr_test",
+                "label": "Test — no approval is actually waiting",
+                "reason": "Connectivity check from Atlas",
+                "choices": [],
+                "created_at": now_iso(),
+                "age_hours": 0,
+                "level": 1,
+                "threshold_hours": 0,
+            },
+            "run": {"id": "wfr_test", "node_key": "test", "workflow_definition_id": None, "workflow_name": "Test"},
+            "signed_at": now_iso(),
+        }
+        body = json.dumps(body_dict, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        headers = {"Content-Type": "application/json", "X-Atlas-Signature": sign_delivery_body(self.settings.secret_key, body)}
+        try:
+            status = _send(target, body, headers, self.settings.timeout_seconds)
+        except Exception as exc:  # noqa: BLE001 - every transport failure is a legitimate answer here
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        if 200 <= status < 300:
+            return {"ok": True, "status": status}
+        return {
+            "ok": False,
+            "status": status,
+            "reason": f"the receiver answered HTTP {status}; only 2xx counts as delivered (a redirect is not followed)",
+        }
+
     def deliver_run(self, run: dict[str, Any]) -> dict[str, Any]:
         """POST /api/workflow-runs/{id}/deliver: one manual, immediate (re)send. `mode` need not
         be "webhook" — an explicit manual request overrides the adapter's original poll

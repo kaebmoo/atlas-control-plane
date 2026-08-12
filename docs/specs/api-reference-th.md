@@ -171,6 +171,7 @@ Error ทุกประเภทเป็น JSON รูปแบบเดี�
 | POST | `/api/workflows` | validate และสร้าง definition |
 | GET | `/api/workflow-templates` | built-in templates |
 | POST | `/api/workflows/draft` | AI draft ที่ validate แล้ว |
+| POST | `/api/workflows/{workflow_id}/test-approval-webhook` | ยิง event ทดสอบไปที่ reminder webhook หนึ่งครั้ง |
 | POST | `/api/workflows/suggest-workers` | worker suggestions |
 | GET | `/api/workflows/{workflow_id}` | definition detail |
 | PUT | `/api/workflows/{workflow_id}` | validate และอัปเดต |
@@ -1189,6 +1190,12 @@ approval ของ `human_gate` ที่ยังไม่ถูกตัดส
   "signed_at": "2026-08-12T12:30:00Z"
 }
 ```
+
+`POST /api/workflows/{workflow_id}/test-approval-webhook` ยิง event สังเคราะห์หนึ่งครั้งไปยัง URL
+ที่ workflow นี้จะใช้จริง แล้วตอบ `{"test":{"ok":true,"status":204}}` หรือ
+`{"test":{"ok":false,"reason":"…"}}` ด้วยถ้อยคำของ Atlas เอง มันไม่เขียนแถวใน delivery ledger —
+ledger จะได้ยังตอบคำถาม "การเตือนจริงส่งออกไปหรือยัง" ได้ตรง ๆ — และ body มี `test: true` เพื่อให้
+ผู้รับเลือกที่จะไม่ปลุกใครได้ มีแค่กรณีที่ยังไม่ได้ตั้งค่าเท่านั้นที่เป็น 400
 
 มีตัวอย่าง receiver ที่รันได้จริงอยู่ที่ `poc/approval_reminder_receiver.py` (Python stdlib)
 ครอบทั้งการตรวจลายเซ็น การกัน delivery ซ้ำ และการ routing — แนะนำให้เริ่มจากไฟล์นั้นแทนการอ่าน

@@ -1035,6 +1035,35 @@ paths:
                   explanation: {type: string}
         default: {$ref: '#/components/responses/Error'}
 
+  /api/workflows/{workflow_id}/test-approval-webhook:
+    parameters:
+      - {$ref: '#/components/parameters/WorkflowId'}
+    post:
+      tags: [Workflows]
+      operationId: testApprovalWebhook
+      summary: Send one synthetic approval_overdue event to the configured reminder webhook
+      description: >-
+        Resolves the same URL the overdue sweep would use (policy.approval_webhook_url, then
+        ATLAS_APPROVAL_WEBHOOK_URL), signs a probe body carrying `test: true`, and sends it
+        inline. Writes no delivery row, so the ledger keeps answering "did a real reminder go
+        out". A receiver that refuses is a 200 with `ok: false` and the reason; only a missing
+        configuration is a 400.
+      responses:
+        '200':
+          description: Probe outcome
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  test:
+                    type: object
+                    properties:
+                      ok: {type: boolean}
+                      status: {type: integer}
+                      reason: {type: string}
+        default: {$ref: '#/components/responses/Error'}
+
   /api/workflows/{workflow_id}/repair:
     parameters:
       - {$ref: '#/components/parameters/WorkflowId'}

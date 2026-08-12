@@ -489,6 +489,38 @@ def main() -> None:
             age_approval(silent_approval["id"], 500)
             assert runtime.triggers.sweep_overdue_approvals() == 0
             assert len(sla_sent()) == 2
+
+            # J. The test send. Without it the only way to learn whether a receiver exists is to
+            # build a gate, start a run and wait days — so this must resolve the SAME url the
+            # sweep would (workflow policy first, deployment default second) or a green result
+            # would prove nothing about the real path.
+            sent_before = len(sla_sent())
+            status, tested = request_json(
+                base_url, "POST", f"/api/workflows/{gate_definition['id']}/test-approval-webhook"
+            )
+            assert status == 200 and tested["test"]["ok"] is True, tested
+            assert len(sla_sent()) == sent_before + 1, "the test must actually leave the process"
+            probe = sla_sent()[-1]["body"]
+            assert probe["test"] is True, "a connectivity probe must be marked so a receiver can ignore it"
+            assert probe["event"] == "approval_overdue" and probe["approval"]["id"] == "apr_test"
+            assert probe["approval"]["age_hours"] == 0
+            # It must NOT write a delivery row: the ledger answers "did a real reminder go out",
+            # and a probe in it makes that answer worse.
+            assert not [row for row in runtime.db.list_deliveries(limit=500) if row["id"] == "dlv_apr_test"]
+
+            # A receiver that answers non-2xx is reported as such, not silently swallowed.
+            MockReceiverHandler.fail_counts["/reply/sla"] = 1
+            _, refused = request_json(
+                base_url, "POST", f"/api/workflows/{gate_definition['id']}/test-approval-webhook"
+            )
+            assert refused["test"]["ok"] is False and refused["test"]["status"] == 500, refused
+            assert "only 2xx" in refused["test"]["reason"], refused
+
+            # A workflow with no URL and no server default is a 400 naming both places to set it.
+            status, unconfigured = request_json(
+                base_url, "POST", f"/api/workflows/{silent_definition['id']}/test-approval-webhook"
+            )
+            assert status == 400 and "ATLAS_APPROVAL_WEBHOOK_URL" in unconfigured["error"], unconfigured
         finally:
             runtime.close()  # stop the reaper daemon before the tempdir exits
             server.shutdown()

@@ -176,6 +176,7 @@ Every error uses one JSON shape:
 | POST | `/api/workflows` | Validate and create definition |
 | GET | `/api/workflow-templates` | Built-in templates |
 | POST | `/api/workflows/draft` | Validated AI draft |
+| POST | `/api/workflows/{workflow_id}/test-approval-webhook` | Send one probe to the reminder webhook |
 | POST | `/api/workflows/suggest-workers` | Worker suggestions |
 | GET | `/api/workflows/{workflow_id}` | Definition detail |
 | PUT | `/api/workflows/{workflow_id}` | Validate and update |
@@ -1257,6 +1258,13 @@ Each threshold notifies exactly once, tracked by `approvals.overdue_level`:
   "signed_at": "2026-08-12T12:30:00Z"
 }
 ```
+
+`POST /api/workflows/{workflow_id}/test-approval-webhook` sends one synthetic
+event to the URL this workflow would really use, right now, and answers
+`{"test":{"ok":true,"status":204}}` or `{"test":{"ok":false,"reason":"…"}}` with
+Atlas's own words. It writes no delivery row — the ledger stays an answer to
+"did a real reminder go out" — and the body carries `test: true` so a receiver
+can decline to page anyone. A missing configuration is the only 400.
 
 A runnable reference receiver — signature verification, deduplication, and routing, in
 stdlib Python — ships at `poc/approval_reminder_receiver.py`. Start there rather than from
