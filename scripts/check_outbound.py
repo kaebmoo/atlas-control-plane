@@ -79,7 +79,13 @@ class MockReceiverHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "1000")
             self.end_headers()
             try:
-                for _ in range(50):
+                # 200 writes x 0.06s = 12s of body against a 2s client deadline. The length is
+                # deliberately far past the deadline rather than just past it: the assertion
+                # below separates "drain was bounded" (~2s) from "drain waited out the whole
+                # drip", and those two numbers have to be far apart or the check turns into a
+                # timing race. It costs nothing in the passing case — the client closes at its
+                # deadline and the next write raises straight into the handler below.
+                for _ in range(200):
                     self.wfile.write(b"x")
                     self.wfile.flush()
                     time.sleep(0.06)
@@ -320,10 +326,17 @@ def main() -> None:
             slow_start = time.monotonic()
             run_g = start_run(base_url, definition["id"], f"{receiver_base}/reply/slow", "corr-slow")
             wait_for_run(runtime, run_g)
-            delivery_g = wait_for_delivery(runtime, run_g, "delivered", timeout=6)
+            delivery_g = wait_for_delivery(runtime, run_g, "delivered", timeout=15)
             elapsed = time.monotonic() - slow_start
             assert delivery_g["attempts"] == 1, delivery_g
-            assert elapsed < 2.9, f"delivery took {elapsed:.2f}s — response drain did not respect the deadline"
+            # The window is wide on purpose. `slow_start` is taken before the run is even
+            # created, so this figure carries run start, a mock worker job, and completion —
+            # none of which the drain deadline governs. The receiver drips for 12s, so anything
+            # under that proves the drain stopped early; 8s leaves room for a loaded CI runner
+            # without letting an unbounded drain (12s+) slip past. The previous bound of 2.9s sat
+            # 0.1s below the unbounded case and failed on CI at 2.92s — it was measuring
+            # scheduling noise, not the behaviour.
+            assert elapsed < 8.0, f"delivery took {elapsed:.2f}s — response drain did not respect the deadline"
 
             # H. A receiver that trickles the STATUS LINE / HEADERS (not just the body) slower
             #    than the timeout must still be bounded: the per-recv socket timeout resets on
