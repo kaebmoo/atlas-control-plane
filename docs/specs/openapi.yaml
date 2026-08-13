@@ -2520,6 +2520,12 @@ components:
               label: {type: string}
         selected_choice: {type: [string, 'null']}
         state: {type: string}
+        overdue_level:
+          type: integer
+          default: 0
+          description: >-
+            D2c-2: highest approval_overdue threshold already notified. 0 means no reminder
+            has been sent for this approval yet.
         created_at: {type: string, format: date-time}
         decided_at: {type: [string, 'null'], format: date-time}
         updated_at: {type: string, format: date-time}
@@ -2592,6 +2598,13 @@ components:
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
         delivered_at: {type: [string, 'null'], format: date-time}
+        payload:
+          type: [object, 'null']
+          additionalProperties: true
+          description: >-
+            D2c-2: frozen event body for an event delivery (approval_overdue); null for a
+            run-completion delivery, whose body is rebuilt from the run on every attempt.
+            Carries the `event` discriminator that tells the two kinds of row apart.
       additionalProperties: true
 
     AuditEntry:

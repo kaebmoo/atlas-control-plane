@@ -699,7 +699,7 @@ ATLAS_APPROVAL_WEBHOOK_URL=
 ATLAS_APPROVAL_OVERDUE_HOURS=
 ```
 
-[`.env.example`](.env.example) carries the same list with the reason for each value;
+[`.env.example`](.env.example) carries every name the code reads — more than the list above — with the reason for each;
 copy it to `.env` for local development. **Atlas has no dotenv dependency and never
 reads `.env` by itself** — a shell has to export it first:
 

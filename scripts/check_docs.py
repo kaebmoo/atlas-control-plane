@@ -268,6 +268,43 @@ def check_workflow_examples_validate() -> list[str]:
     return problems
 
 
+def check_openapi_counts() -> list[str]:
+    """The "N paths and M operations" line in both api-reference files must match openapi.yaml.
+
+    It said 62/81 while the file held 63/83 — and the operation count had already been wrong by
+    one before this round, which is the tell: a hand-maintained number nobody recomputes drifts
+    the moment anyone adds a route, and both languages drift together so EN/TH parity hides it.
+    """
+    import re
+
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover - yaml ships with the dev env, not the runtime
+        return []
+
+    spec = yaml.safe_load((ROOT / "docs" / "specs" / "openapi.yaml").read_text(encoding="utf-8"))
+    methods = {"get", "post", "put", "patch", "delete", "head", "options"}
+    paths = len(spec.get("paths") or {})
+    operations = sum(1 for item in (spec.get("paths") or {}).values() for key in item if key in methods)
+
+    problems: list[str] = []
+    for name, pattern in (
+        ("api-reference-en.md", r"defines (\d+) paths and (\d+) operations"),
+        ("api-reference-th.md", r"ระบุ (\d+) paths และ (\d+) operations"),
+    ):
+        text = (ROOT / "docs" / "specs" / name).read_text(encoding="utf-8")
+        match = re.search(pattern, text)
+        if not match:
+            problems.append(f"{name} no longer states the openapi path/operation counts")
+            continue
+        stated = (int(match.group(1)), int(match.group(2)))
+        if stated != (paths, operations):
+            problems.append(
+                f"{name} says {stated[0]} paths and {stated[1]} operations; openapi.yaml has {paths} and {operations}"
+            )
+    return problems
+
+
 def main() -> None:
     tracked = _tracked_files()
     problems = (
@@ -277,6 +314,7 @@ def main() -> None:
         + check_usage_range_doc_precision()
         + check_trigger_interval_schema_parity()
         + check_workflow_examples_validate()
+        + check_openapi_counts()
     )
     if problems:
         print("docs check FAILED:")
