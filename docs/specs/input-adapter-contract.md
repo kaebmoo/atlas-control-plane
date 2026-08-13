@@ -19,7 +19,8 @@ metering are enforced — independent of the channel.
 **Status:** **IA-1 and OB-1 implemented.** IA-1 (envelope + provenance + audit) is verified by
 `scripts/check_input_adapter.py`; OB-1 (the signed return path that consumes `_meta.reply`) is
 verified by `scripts/check_outbound.py`. Both are tracked in
-[Input Adapter & Return Path Plan](../plans/input-adapter-return-path-plan.md).
+[Input Adapter & Return Path Plan](../plans/input-adapter-return-path-plan.md). The
+`approval_overdue` contract-v1 declaration (§7.1) is guarded by `scripts/check_docs.py`.
 
 ## 1. The boundary
 
@@ -178,6 +179,12 @@ in the [API reference](api-reference-en.md); it carries `approval` and `run` obj
 than a top-level `run_id`. A body **without** `event` is the run-completion shape above. A
 receiver that assumes `run_id` exists will mis-route an approval reminder, so branch on `event`
 first and ignore anything unrecognised — Atlas may add further event bodies on this channel.
+
+Event bodies are versioned by their event name, not by a version field.
+`approval_overdue` is **contract v1** — additive-only, declared under
+*approval_overdue contract v1* in the [API reference](api-reference-en.md) — and an
+incompatible revision would arrive as a new event name (`approval_overdue.v2`), never as a
+mutation of v1. Branch-on-`event` receivers are therefore untouched by future versions.
 
 ## 8. Examples
 

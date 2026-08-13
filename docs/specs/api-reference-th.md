@@ -1210,6 +1210,32 @@ routing ซึ่งต้องใช้ผังองค์กรที่ At
 เกณฑ์เป็นชั่วโมงตามเวลาจริง ให้ตั้งเผื่อวันหยุด (เช่น `72,168`) แล้วให้ผู้รับตัดสินจังหวะ
 ส่งจริงเอง
 
+### สัญญา approval_overdue รุ่น 1 (contract v1)
+
+body ด้านบนคือสัญญาที่ประกาศแล้ว ไม่ใช่รายละเอียดภายในของระบบ receiver ที่เขียนวันนี้
+จะยังทำงานได้ต่อไป เพราะ v1 สัญญาไว้ว่า:
+
+- **รายการ field ตรึงไว้ที่ v1**: `event`, `delivery_id`,
+  `approval{id, label, reason, choices, created_at, age_hours, level, threshold_hours}`,
+  `run{id, node_key, workflow_definition_id, workflow_name}`, `signed_at` — และ
+  `test: true` เฉพาะการยิงทดสอบสังเคราะห์เท่านั้น
+- **การเปลี่ยนแปลงเป็นแบบเพิ่มเท่านั้น (additive-only)** field ใหม่อาจปรากฏได้ทุกระดับ
+  แต่ field เดิมจะไม่เปลี่ยนชื่อ ชนิด หรือความหมาย — parse เฉพาะที่รู้จัก และข้ามที่ไม่รู้จัก
+- **breaking change จะมาเป็น event ชื่อใหม่** — `approval_overdue.v2` บนช่องทางที่
+  เซ็นแบบเดียวกัน — ไม่ใช่การแก้ v1 และตั้งใจไม่ใส่ version field ใน payload:
+  ชื่อ `event` นั่นแหละคือ version ตัว receiver v1 ที่แยกงานด้วย `event` แล้วข้าม
+  event ที่ไม่รู้จัก (ดู [input-adapter-contract.md](input-adapter-contract.md) §7.1)
+  จะไม่ถูกกระทบจาก v2 ในอนาคตโดยโครงสร้าง
+- **กติกาฝั่ง wire เป็นส่วนหนึ่งของสัญญา**: ลายเซ็น HMAC-SHA256 ใน
+  `X-Atlas-Signature: sha256=<hex>` คำนวณจาก bytes ที่ส่งจริงบน wire; ผู้รับตอบ 2xx
+  ให้เร็วแล้วค่อยแจ้งเตือนทีหลัง; `delivery_id` (`dlv_apr_<approval_id>_l<level>`)
+  คงที่ทุกครั้งที่ retry delivery เดิม ผู้รับจึง dedupe ด้วยค่านี้; Atlas retry สูงสุด
+  `ATLAS_OUTBOUND_MAX_ATTEMPTS` ครั้งแล้ว dead-letter เป็น `failed`; ส่วน routing
+  เป็นงานของผู้รับเสมอ
+
+คำประกาศเดียวกันในรูปแบบ machine-readable — schema ชื่อ `ApprovalOverdueEvent`
+พร้อมตัวอย่าง — อยู่ใต้ `webhooks:` ใน [openapi.yaml](openapi.yaml)
+
 ## 15. OpenAPI 3.1
 
 [openapi.yaml](openapi.yaml) ระบุ 63 paths และ 83 operations พร้อม security schemes,
