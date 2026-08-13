@@ -15,6 +15,10 @@ Mutation targets (break the code -> this file goes red):
 - drop the files_pushed detail branch in the event render -> the assertion fails.
 - window the run timeline back to the FIRST 14 events -> the slice assertions fail.
 - drop the stream-close artifact refresh in openJobStream -> the call-count assertion fails.
+- drop the viewer scope-gate on the deliveries fetch -> the Promise.resolve assertion fails.
+- let auditors click Retry (remove the .delivery-retry role gate) -> the gate assertion fails.
+- count something other than failed rows in the deliveries badge -> the badge assertion fails.
+- drop #deliveryList from markLoadFailed -> the first-load-failure assertion fails.
 """
 from __future__ import annotations
 
@@ -97,9 +101,38 @@ need(".alert-warn::before" not in CSS, "the shared .alert-warn class must not ha
 need("#workflowRecoveryWarning::before" in CSS, "the recovery banner lost its own label")
 need("#workflowDefinitionWarning::before" in CSS, "the ignored-settings banner has no label of its own")
 
+# --- Deliveries view: the outbound ledger (reminders + return path) is an ops surface -----
+need('data-view="deliveries"' in HTML, "Deliveries nav button missing")
+need('id="view-deliveries"' in HTML, "Deliveries section missing")
+need('id="deliveryList"' in HTML, "Deliveries list container missing")
+need('data-badge="deliveries"' in HTML, "Deliveries nav badge missing")
+need('class="nav-badge attn" data-badge="deliveries"' in HTML,
+     "the deliveries badge must use the attention (attn) treatment — a failed reminder means nobody was chased")
+need('deliveries: ["admin", "operator", "auditor"]' in JS,
+     "VIEW_ROLES must gate deliveries to the roles holding deliveries.read (viewer excluded)")
+need('"/api/deliveries?limit=' in JS, "loadAll does not fetch the deliveries ledger")
+need("Promise.resolve({ deliveries: [] })" in JS,
+     "a viewer must not issue a 403-bound deliveries request (scope-gate the fetch)")
+# Pin the badge's own filter expression — a bare `status === "failed"` also matches the
+# per-row Retry condition in renderDeliveries, which let a count-everything badge slip once.
+need('setNavBadge("deliveries", state.deliveries.filter' in JS
+     and 'delivery.status === "failed").length)' in JS,
+     "the deliveries badge must count failed (dead-lettered) rows")
+need("/api/deliveries/${encodeURIComponent(" in JS, "retry must POST the deliveries retry route with an escaped id")
+need('".delivery-retry"' in JS and "!operator" in JS,
+     "auditors can read deliveries but must not retry (workflows.run) — gate the button")
+# The selector-list fragment, not a bare "#deliveryList" — $("#deliveryList") in the render
+# path also matches that, which let a dropped markLoadFailed entry slip once.
+need('"#auditList", "#deliveryList"' in JS, "markLoadFailed must cover the deliveries list")
+need('"deliveryId"' in JS, "preserveListFocus must restore focus onto a rebuilt Retry button")
+need("payload?.event" in JS, "the KIND column must come from the server payload's event discriminator")
+need(".status.delivered" in CSS and ".status.blocked" in CSS,
+     "delivered/blocked need their own chip styling (delivered is not 'succeeded')")
+
 # --- existing anchors must not regress (careless rewrite guard) ---------------------------
 need('id="usageBudgetUnits"' in HTML, "existing Usage marker regressed")
 need('id="workflowRecoveryWarning"' in HTML, "existing run-detail alert marker regressed")
+need('id="auditList"' in HTML, "existing Audit list marker regressed")
 
 if problems:
     print("check_dashboard_surfaces FAILED:")

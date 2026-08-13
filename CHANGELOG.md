@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Deliveries view in the embedded dashboard** (admin/operator/auditor): the
+  outbound ledger — approval reminders and run-completion webhooks — with
+  status filter chips, an attention nav badge counting `failed` (dead-lettered)
+  rows, and a per-row Retry on failed deliveries (operator/admin; auditors
+  read-only). `delivered`/`blocked` gained their own status-chip styling, and
+  the new markers are gate-enforced in `scripts/check_dashboard_surfaces.py`.
 - **`notify/` — the Atlas Notify sidecar**, a deployable receiver for
   `approval_overdue` deliveries: raw-byte HMAC verification, durable SQLite
   dedup (a restart mid-retry no longer re-notifies), SMTP + Telegram channels

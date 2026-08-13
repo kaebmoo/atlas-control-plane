@@ -176,8 +176,9 @@ class Handler(BaseHTTPRequestHandler):
         expected = "sha256=" + hmac.new(self.secret_key.encode("utf-8"), raw, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(signature, expected):
             # 401 is deliberate: this is not a transient failure, and Atlas retrying will not fix
-            # a key mismatch. The delivery dead-letters as `failed` and shows up on the
-            # Deliveries page, which is the signal an operator can actually act on.
+            # a key mismatch. The delivery dead-letters as `failed` and shows up in the
+            # dashboard's Deliveries view (failed badge + Retry), which is the signal an
+            # operator can actually act on.
             LOGGER.warning("rejected an unsigned or wrongly-signed delivery")
             self._respond(HTTPStatus.UNAUTHORIZED)
             return
