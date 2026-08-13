@@ -1231,8 +1231,8 @@ inbound Atlas credential is required on the receiving side.
 Configure the destination and thresholds globally with
 `ATLAS_APPROVAL_WEBHOOK_URL` and `ATLAS_APPROVAL_OVERDUE_HOURS` (comma-separated,
 e.g. `48,120`), and override either per workflow with `policy.approval_webhook_url`
-and `policy.approval_overdue_hours` (a non-empty ascending list of positive
-integers) — useful when several departments share one Atlas. **With no URL
+and `policy.approval_overdue_hours` (a non-empty, ascending, duplicate-free list of
+positive integers) — useful when several departments share one Atlas. **With no URL
 configured, the sweep is inert and nothing is sent.** The URL is validated against
 `ATLAS_OUTBOUND_ALLOWLIST` at send time like any other delivery, so a workflow
 author can only address hosts the operator already allows. The workflow

@@ -466,7 +466,7 @@ instead of continuing.
 | `max_jobs` | Max jobs per run |
 | `max_iterations` | Max total iterations |
 | `max_attempts_per_node` | Max executions of any one node |
-| `max_minutes` | Overall wall-clock limit, **excluding** time parked at a `human_gate` (an idle gate consumes no compute, so waiting for a person never counts against it) |
+| `max_minutes` | Overall wall-clock limit, **excluding** time a run spends waiting on a pending approval — a `human_gate` node or a `requires_human_after_iterations` pause. A waiting run consumes no compute, so a person's thinking time never counts against it; the credit is measured per approval from when it was raised |
 | `requires_human_after_iterations` | Require one human approval once this many jobs have started |
 | `max_budget_units` | Total budget; an abstract unit, **not** money or tokens |
 | `approval_webhook_url` | Where overdue-approval reminders are POSTed; overrides `ATLAS_APPROVAL_WEBHOOK_URL`. Still subject to the outbound allowlist |
@@ -545,6 +545,15 @@ gate can be decided **once**.
 Approval state literals: `pending` → `approved` | `rejected` | `chosen` (a
 choice-gate decision; the picked id is stored in `selected_choice`) |
 `cancelled` (set on any still-`pending` approval when the run is cancelled).
+
+A still-`pending` approval ages. Each threshold in `policy.approval_overdue_hours`
+(or the deployment default `ATLAS_APPROVAL_OVERDUE_HOURS`) fires exactly one signed
+`approval_overdue` webhook, tracked on the approval row by `overdue_level` so a
+second scheduler tick cannot re-notify. The position in the hours list is the
+escalation level carried in the delivery, and Atlas states the fact rather than
+choosing a recipient — who to tell needs an org chart Atlas does not have. Waiting
+does not consume the run's `max_minutes`, and a gate still waits indefinitely: a
+reminder chases a person, it does not expire the gate.
 
 ---
 

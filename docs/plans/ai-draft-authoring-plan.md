@@ -9,6 +9,13 @@
 > per milestone, commit เมื่อ gate เขียว (ไม่ push), เอกสาร EN/TH ตามโค้ดทุก milestone.
 > คู่กับชุด prompt สั่งงาน: [../prompts/ai-draft-authoring-spin-prompts.md](../prompts/ai-draft-authoring-spin-prompts.md).
 
+> **Status 2026-08-12.** **D1–D4 shipped** and verified stage by stage against the code;
+> `src/components/atlas/workflow-ai-draft-dialog.tsx` and `workflow-ai-assists.tsx` are live, so
+> §1's "No frontend has any UI for these" describes the state this plan started from, not the
+> state today. **D5 (`/revise`) and D6 (chat-refine) remain backlog** and still need an explicit
+> go-ahead — see §4.1. D2's follow-on hardening moved to
+> [AI Draft Contract Hardening](ai-draft-contract-hardening-plan.md), which is closed.
+
 This plan takes the existing, API-only AI-draft capability to a usable product
 feature. It spans TWO repos — `atlas-control-plane` (backend hardening) and
 `flow-designer` (all new UI) — and lives here because Atlas is the project hub;

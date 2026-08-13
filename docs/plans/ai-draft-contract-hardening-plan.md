@@ -321,12 +321,13 @@ D2b-3  fence-tolerant _json_from_text                       (atlas)   ← indepe
 D2b-4  ONE live retest with the purchase prompt             (atlas)   ← needs 1–3 + restart
 D2b-5  friendly error headline + technical details          (flow-designer)
 
-D2c-1  exclude gate-wait from max_minutes                   (atlas)   ┐ §8, PROPOSED —
-D2c-2  age pending approvals -> outbound delivery           (atlas)   ┘ needs a go-ahead
+D2c-1  exclude gate-wait from max_minutes                   (atlas)   ┐ §8, SHIPPED
+D2c-2  age pending approvals -> outbound delivery           (atlas)   ┘ 2026-08-12
 ```
 
-D2c is listed for context only. It is not part of this plan's gate, must not be
-folded into a D2b commit, and does not block D2b-4's live retest.
+D2c was listed for context only when this plan was written; it was approved and
+shipped on 2026-08-12 (§8.5). It was still kept out of the D2b commits and did not
+block D2b-4's live retest.
 
 | Stage | Definition of Done | Check |
 |---|---|---|

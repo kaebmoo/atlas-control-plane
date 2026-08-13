@@ -2153,7 +2153,10 @@ def _builder_context(runtime: AtlasRuntime) -> dict[str, Any]:
             }
             for trigger_type in sorted(WORKFLOW_TRIGGER_TYPES)
         },
-        "trigger_item": {"type": "manual", "name": "Employee submits a purchase request", "enabled": False},
+        # `config` is present even though it is empty: workflow-trigger.schema.json requires all four
+        # of name/type/enabled/config on every variant, and workflow-ai-draft.schema.json $refs it,
+        # so an example missing it would be an example the published contract rejects.
+        "trigger_item": {"type": "manual", "name": "Employee submits a purchase request", "enabled": False, "config": {}},
         "trigger_rules": [
             "triggers is a list of OBJECTS, never strings; describing a start condition in prose inside the array is the single most common way this request fails",
             "a trigger item uses only these keys: type, name, config, enabled",

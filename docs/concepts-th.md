@@ -443,7 +443,7 @@ policy กำหนดขอบเขตของ run เมื่อ guard ท�
 | `max_jobs` | จำนวน job สูงสุดต่อ run |
 | `max_iterations` | จำนวนรอบรวมสูงสุด |
 | `max_attempts_per_node` | จำนวนครั้งสูงสุดต่อ node |
-| `max_minutes` | เวลารวมสูงสุด (นาที) **ไม่นับ** เวลาที่ค้างรออยู่ที่ `human_gate` (gate ที่รออยู่ไม่กิน compute เวลารอคนจึงไม่ถูกหักจากโควตานี้) |
+| `max_minutes` | เวลารวมสูงสุด (นาที) **ไม่นับ** เวลาที่ run รอ approval ที่ยังค้าง — ทั้ง `human_gate` และการหยุดจาก `requires_human_after_iterations` run ที่รออยู่ไม่กิน compute เวลาคิดของคนจึงไม่ถูกหักจากโควตานี้ โดยนับเครดิตรายการต่อ approval จากตอนที่มันถูกสร้าง |
 | `requires_human_after_iterations` | บังคับอนุมัติหนึ่งครั้งเมื่อ job เริ่มครบจำนวนนี้ |
 | `max_budget_units` | budget รวม; เป็นหน่วยนามธรรม **ไม่ใช่** เงินหรือ token |
 | `approval_webhook_url` | ปลายทางที่ส่งการเตือน approval ค้าง; override `ATLAS_APPROVAL_WEBHOOK_URL` และยังถูก outbound allowlist คุมอยู่ |
@@ -522,6 +522,13 @@ node `human_gate` คือจุดที่ workflow หยุดรอกา�
 สถานะ approval: `pending` → `approved` | `rejected` | `chosen` (จุดตัดสินใจแบบมีตัวเลือก;
 id ที่เลือกเก็บไว้ที่ `selected_choice`) | `cancelled` (ตั้งให้ approval ที่ยังค้างสถานะ
 `pending` ทุกตัวเมื่อ run ถูกยกเลิก)
+
+approval ที่ยัง `pending` จะถูกนับอายุ ทุกขั้นใน `policy.approval_overdue_hours` (หรือค่า
+default ของ deployment `ATLAS_APPROVAL_OVERDUE_HOURS`) จะยิง webhook `approval_overdue` ที่
+เซ็นแล้วขั้นละหนึ่งครั้ง ติดตามด้วย `overdue_level` บนแถว approval เพื่อไม่ให้ tick ถัดไปยิงซ้ำ
+ตำแหน่งใน list คือระดับ escalation ที่ส่งไปกับ delivery และ Atlas บอกแค่ข้อเท็จจริง ไม่ได้เลือก
+ผู้รับให้ — การเลือกว่าจะแจ้งใครต้องใช้ผังองค์กรที่ Atlas ไม่มี เวลาที่รอไม่ถูกหักจาก
+`max_minutes` ของ run และ gate ยังรอได้ไม่จำกัด: การเตือนเป็นการตามคน ไม่ใช่การหมดอายุ gate
 
 ---
 

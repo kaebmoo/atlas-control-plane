@@ -28,6 +28,9 @@ Atlas currently supports:
 - Authenticated encryption for worker tokens when `ATLAS_SECRET_KEY` is set.
 - Idempotent per-job and per-workflow-run usage metering, admin/auditor JSON/CSV
   usage export, and HMAC-signed files for air-gapped transfer.
+- Approval SLA: a pending human approval ages in the scheduler tick and emits a
+  signed `approval_overdue` webhook at each configured escalation threshold; time
+  spent waiting at a gate does not count against `policy.max_minutes`.
 - Multiple thClaws workers, one per machine or runtime.
 - Workspace mapping per worker.
 - Worker polling and capability snapshots.
@@ -635,6 +638,7 @@ Internal event triggers are fired by Atlas and cannot be fired manually.
 - `POST /api/workflows/{id}/explain`
 - `POST /api/workflows/{id}/repair`
 - `POST /api/workflows/{id}/suggest-triggers`
+- `POST /api/workflows/{id}/test-approval-webhook` (one synthetic `approval_overdue` reminder to the resolved webhook, instead of waiting days for a real one)
 - `GET /api/workflow-templates`
 - `GET /api/packs`
 - `POST /api/packs/import`

@@ -1165,8 +1165,7 @@ approval ของ `human_gate` ที่ยังไม่ถูกตัดส
 
 ตั้งปลายทางและเกณฑ์แบบรวมด้วย `ATLAS_APPROVAL_WEBHOOK_URL` และ
 `ATLAS_APPROVAL_OVERDUE_HOURS` (คั่นด้วยจุลภาค เช่น `48,120`) และ override ราย workflow
-ได้ด้วย `policy.approval_webhook_url` กับ `policy.approval_overdue_hours` (list ของ
-จำนวนเต็มบวก เรียงจากน้อยไปมาก ห้ามซ้ำ) — เหมาะกับกรณีหลายแผนกใช้ Atlas ตัวเดียวกัน
+ได้ด้วย `policy.approval_webhook_url` กับ `policy.approval_overdue_hours` (list ของจำนวนเต็มบวก ห้ามว่าง เรียงจากน้อยไปมาก และห้ามซ้ำ) — เหมาะกับกรณีหลายแผนกใช้ Atlas ตัวเดียวกัน
 **ถ้าไม่ได้ตั้ง URL ไว้เลย การกวาดจะไม่ทำงานและไม่ส่งอะไรทั้งสิ้น** URL ถูกตรวจกับ
 `ATLAS_OUTBOUND_ALLOWLIST` ตอนส่งเหมือน delivery อื่นทุกตัว คนเขียน workflow จึงชี้ได้
 เฉพาะ host ที่ operator อนุญาตไว้แล้ว และระบบอ่าน policy ของ definition ปัจจุบัน ไม่ใช่
