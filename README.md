@@ -722,9 +722,11 @@ reminders; each workflow may override both through `policy.approval_webhook_url`
 The URL is subject to `ATLAS_OUTBOUND_ALLOWLIST` like every other delivery, and it must
 point at a receiver you run — Atlas only POSTs a signed body, it sends no email or chat
 ([`poc/approval_reminder_receiver.py`](poc/approval_reminder_receiver.py) is a runnable
-reference). The POSTed body is a declared **contract v1** — additive-only, with any
-breaking change arriving as a new event name — so a receiver written today keeps
-working (see [docs/specs/api-reference-en.md](docs/specs/api-reference-en.md) §14).
+reference, and [`notify/`](notify/README.md) is the deployable sidecar with durable
+dedup + SMTP/Telegram channels). The POSTed body is a declared **contract v1** —
+additive-only, with any breaking change arriving as a new event name — so a receiver
+written today keeps working (see
+[docs/specs/api-reference-en.md](docs/specs/api-reference-en.md) §14).
 
 `ATLAS_REQUEST_LOG=true` emits one JSON line per request to stderr (method, path,
 status, client, duration); it leaves response bodies unchanged and is off by default.
