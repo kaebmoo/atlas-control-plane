@@ -357,6 +357,18 @@
         "file_handoff": {
           "type": "boolean",
           "description": "T9b: opt-in enabling edge push_files (off by default)"
+        },
+        "approval_webhook_url": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "D2c-2: where Atlas POSTs an approval_overdue event for this workflow, overriding ATLAS_APPROVAL_WEBHOOK_URL; re-checked against ATLAS_OUTBOUND_ALLOWLIST at send time"
+        },
+        "approval_overdue_hours": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1},
+          "description": "D2c-2: ascending, unique hours after which a still-pending approval notifies; the index is the escalation level in the delivery body, so [72, 168] means level 1 at 72h and level 2 at 168h"
         }
       }
     }

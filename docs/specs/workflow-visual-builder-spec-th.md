@@ -627,13 +627,15 @@ Artifact reference ไม่สร้าง execution dependency อัตโน
 | `max_jobs` | 1–100 | จำนวน worker/manager jobs สูงสุด |
 | `max_iterations` | 1–100 | runtime ปัจจุบันนับ worker/manager jobs ที่เริ่ม |
 | `max_attempts_per_node` | 1–25 | จำนวน attempt สูงสุดต่อ node |
-| `max_minutes` | 1–1440 | เวลารวมของ run |
+| `max_minutes` | 1–1440 | เวลารวมของ run ไม่นับเวลาที่ค้างรออยู่ที่ `human_gate` |
 | `requires_human_after_iterations` | 1–100 | หยุดขออนุมัติหนึ่งครั้งเมื่อ jobs_started ถึงค่า |
 | `max_budget_units` | 1–1,000,000 | budget นามธรรม ไม่ใช่เงินหรือ token |
 | `allowed_worker_ids` | string[] | allowlist worker |
 | `allowed_workspace_ids` | string[] | allowlist workspace |
 | `stop_on_first_failure` | boolean | true = หยุดเมื่อ branch แรก fail |
 | `file_handoff` | boolean | เปิดใช้ edge `push_files` (T9b); ปิดโดย default |
+| `approval_webhook_url` | string หรือ null | D2c-2: ปลายทางที่ Atlas POST event `approval_overdue` ของ workflow นี้; override `ATLAS_APPROVAL_WEBHOOK_URL` และยังถูก outbound allowlist คุม |
+| `approval_overdue_hours` | integer[] | D2c-2: ชั่วโมงเรียงจากน้อยไปมากห้ามซ้ำ ที่จะเตือนเมื่อ approval ยังค้าง ตำแหน่งใน list คือระดับ escalation เช่น `[72, 168]` = level 1 ที่ 72 ชม. และ level 2 ที่ 168 ชม. |
 
 ค่าแนะนำสำหรับ workflow ใหม่:
 
@@ -878,6 +880,7 @@ policy สูงเกินความจำเป็น แต่ห้าม
 | Explain | `POST /api/workflows/{id}/explain` |
 | Repair | `POST /api/workflows/{id}/repair` |
 | Suggest triggers | `POST /api/workflows/{id}/suggest-triggers` |
+| ทดสอบ webhook เตือน approval | `POST /api/workflows/{id}/test-approval-webhook` |
 | สร้าง trigger | `POST /api/workflow-triggers` |
 | Run | `POST /api/workflow-runs` |
 
@@ -1011,7 +1014,7 @@ live-reference validation ก่อน Save/Run
 
 ### AI
 
-- AI output ที่มี Markdown fence, invent ID หรือ enum ผิดถูก reject
+- AI output ที่ invent ID หรือ enum ผิดถูก reject ส่วนคำตอบที่ห่อด้วย Markdown fence ชั้นเดียวจะถูกแกะและ parse ให้ (prose ที่ไม่มี fence ยังล้มเหมือนเดิม)
 - AI draft/repair ไม่ Save อัตโนมัติ
 - deterministic validator เป็น final authority
 - ผู้ใช้เห็น diff และ warnings ก่อน Apply

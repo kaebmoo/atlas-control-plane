@@ -653,13 +653,15 @@ the correct join.
 | `max_jobs` | 1–100 | maximum worker/manager jobs |
 | `max_iterations` | 1–100 | current runtime counts started worker/manager jobs |
 | `max_attempts_per_node` | 1–25 | maximum attempts per node |
-| `max_minutes` | 1–1440 | total run duration |
+| `max_minutes` | 1–1440 | maximum run duration, excluding time parked at a `human_gate` |
 | `requires_human_after_iterations` | 1–100 | request one approval when jobs_started reaches the value |
 | `max_budget_units` | 1–1,000,000 | abstract budget, not money or tokens |
 | `allowed_worker_ids` | string[] | worker allowlist |
 | `allowed_workspace_ids` | string[] | workspace allowlist |
 | `stop_on_first_failure` | boolean | true = stop after the first failed branch |
 | `file_handoff` | boolean | opt-in enabling edge `push_files` (T9b); off by default |
+| `approval_webhook_url` | string or null | D2c-2: where Atlas POSTs an `approval_overdue` event for this workflow; overrides `ATLAS_APPROVAL_WEBHOOK_URL` and is still subject to the outbound allowlist |
+| `approval_overdue_hours` | integer[] | D2c-2: ascending, unique hours after which a still-pending approval notifies; the position is the escalation level, so `[72, 168]` means level 1 at 72h and level 2 at 168h |
 
 Recommended defaults for a new workflow:
 
@@ -912,6 +914,7 @@ must not replace deterministic validation.
 | Explain | `POST /api/workflows/{id}/explain` |
 | Repair | `POST /api/workflows/{id}/repair` |
 | Suggest triggers | `POST /api/workflows/{id}/suggest-triggers` |
+| Test the approval reminder webhook | `POST /api/workflows/{id}/test-approval-webhook` |
 | Create trigger | `POST /api/workflow-triggers` |
 | Run | `POST /api/workflow-runs` |
 
@@ -1048,7 +1051,7 @@ worker for every role. Live-reference validation must pass before Save/Run.
 
 ### AI
 
-- AI output with Markdown fences, invented IDs, or invalid enums is rejected.
+- AI output with invented IDs or invalid enums is rejected; a reply wrapped in a single Markdown fence is unwrapped and parsed, while unfenced prose still fails.
 - AI draft/repair never saves automatically.
 - The deterministic validator remains final authority.
 - Users see a diff and warnings before Apply.

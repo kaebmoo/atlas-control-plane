@@ -2153,7 +2153,10 @@ def _builder_context(runtime: AtlasRuntime) -> dict[str, Any]:
             }
             for trigger_type in sorted(WORKFLOW_TRIGGER_TYPES)
         },
-        "trigger_item": {"type": "manual", "name": "Employee submits a purchase request", "enabled": False},
+        # `config` is present even though it is empty: workflow-trigger.schema.json requires all four
+        # of name/type/enabled/config on every variant, and workflow-ai-draft.schema.json $refs it,
+        # so an example missing it would be an example the published contract rejects.
+        "trigger_item": {"type": "manual", "name": "Employee submits a purchase request", "enabled": False, "config": {}},
         "trigger_rules": [
             "triggers is a list of OBJECTS, never strings; describing a start condition in prose inside the array is the single most common way this request fails",
             "a trigger item uses only these keys: type, name, config, enabled",
@@ -2171,7 +2174,7 @@ def _builder_context(runtime: AtlasRuntime) -> dict[str, Any]:
             "actions are NOT a vocabulary: sending an email, calling an API, checking a vendor, classifying a value are all worker nodes. node_types is closed; what a worker DOES is not. Pick role from available_roles",
             "if a required capability matches no role in available_roles, do not call it unsupported — add a warnings entry naming the worker role that would need to exist, e.g. 'no worker with email capability is registered; add one with role notifier'",
             "no numeric comparison condition exists. To branch on an amount, add a worker node that classifies the value into a named bucket artifact (e.g. approval_tier = le_50k | le_200k | gt_200k), then branch with artifact_equals or artifact_in on that artifact",
-            "no timer, deadline, reminder, or escalation construct exists, and no worker can substitute for one. Put every time-based requirement in warnings, always",
+            "the GRAPH has no timer, deadline, reminder or escalation node, condition or trigger, and no worker can substitute for one — but a time-based rule ON A HUMAN GATE is policy, not topology: set policy.approval_overdue_hours to ascending hours (e.g. [72, 168], where the position is the escalation level) and Atlas notifies once per step. Any other time-based requirement goes in warnings",
             "Atlas already audits every decision (who, when, outcome, reason) — never model audit logging",
             "return only the seven top-level keys; never add interface, inputs, or any other key",
             "when part of the request cannot be modeled, still return a valid draft for the part that can, and list EACH unmodeled requirement as its own warnings entry — a partial proposal a human reviews beats a refusal",

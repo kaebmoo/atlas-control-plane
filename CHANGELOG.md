@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Approval SLA reminders. A pending human approval ages in the scheduler tick and
+  emits a signed `approval_overdue` webhook once per configured threshold
+  (`policy.approval_webhook_url` / `policy.approval_overdue_hours`, defaulting to
+  `ATLAS_APPROVAL_WEBHOOK_URL` / `ATLAS_APPROVAL_OVERDUE_HOURS`). The position in
+  the hours list is the escalation level. Migration 017 adds
+  `approvals.overdue_level` and `deliveries.payload`.
+- `POST /api/workflows/{id}/test-approval-webhook` sends one synthetic reminder to
+  the URL the sweep would really use, writing no delivery row, so a wrong receiver
+  surfaces in a second rather than at the first real threshold days later.
+- `poc/approval_reminder_receiver.py`, a runnable stdlib reference receiver —
+  Atlas only POSTs, so the half that turns a delivery into a message to a person
+  has to be built, and nothing said so.
+- The AI builder context gained a per-type trigger contract, a `dsl_boundary`
+  block, and exported vocabulary constants locked to the validator by a
+  set-equality check.
+
+### Fixed
+
+- **Time parked at a human gate no longer counts against `policy.max_minutes`.**
+  It was wall clock from `started_at`, so an approval answered later than
+  `max_minutes` (default 30 minutes) was recorded `approved` and then the run
+  failed — the node that approval authorized never dispatched, and the approver
+  saw their decision accepted and discarded.
+- `SIGTERM` now runs the same shutdown as Ctrl+C. It previously terminated the
+  process outright, skipping every `finally`, which is the signal
+  `systemctl stop` sends — so the deployed shutdown path was the ungraceful one.
+- A model reply wrapped in a Markdown fence is parsed instead of costing a paid
+  retry, and non-object items in a draft's `triggers` are dropped with a warning
+  quoting each rather than failing the whole draft.
+
 - Workflow status is now execution policy, enforced at every start path by one
   shared guard (`ensure_workflow_runnable`): `draft` allows explicit test runs
   only, `active` allows test and production, `disabled` blocks every run.

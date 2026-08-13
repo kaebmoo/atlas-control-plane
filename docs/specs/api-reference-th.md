@@ -719,7 +719,7 @@ role ที่โมเดลคิดขึ้นเองจะถูก deter
 การส่งอีเมล เรียก API หรือจัดกลุ่มค่า ล้วนเป็น `worker` node ดังนั้นการที่ทำไม่ได้
 คือ "ไม่มี worker ที่มีความสามารถนั้นใน roster" ไม่ใช่ข้อจำกัดของ Atlas นอกจากนี้ยัง
 บอกวิธีแตกสาขาตามตัวเลข (ให้ worker จัดค่าเป็น bucket artifact แล้วใช้
-`artifact_equals` / `artifact_in`), บอกว่าไม่มี timer/reminder/escalation และให้ใส่
+`artifact_equals` / `artifact_in`), บอกว่า GRAPH ไม่มี node/condition/trigger สำหรับ timer/reminder/escalation — ส่วนกฎเชิงเวลาบน human gate เป็นเรื่องของ policy ไม่ใช่โครงสร้างกราฟ และแม็ปไปที่ `policy.approval_overdue_hours` (ดูหัวข้อการเตือน approval ที่ค้าง) — และให้ใส่
 สิ่งที่โมเดลไม่ได้ลงใน `warnings` พร้อมคืน draft ส่วนที่เหลือตามปกติ
 
 คำตอบของโมเดลสองรูปแบบจะถูก normalize แทนการเสีย retry: คำตอบที่ห่อด้วย
@@ -1148,8 +1148,9 @@ allowlist หรือเป็น private address จะถูกบันท�
 `POST /api/deliveries/{delivery_id}/retry` ให้ delivery ที่ `failed` หรือ
 `blocked` ลองใหม่แบบมีขอบเขตอีก 1 ครั้ง (ตรวจ allowlist ปัจจุบันซ้ำ);
 `POST /api/workflow-runs/{run_id}/deliver` ส่งซ้ำโดยใช้
-`_meta.reply.callback_url` ของ run เอง ไม่ว่า `mode` เดิมจะเป็นอะไร ทั้งสอง
-route ต้องการให้ run เสร็จสิ้นแล้วเท่านั้น
+`_meta.reply.callback_url` ของ run เอง ไม่ว่า `mode` เดิมจะเป็นอะไร `POST /api/workflow-runs/{run_id}/deliver` ต้องการให้ run เสร็จสิ้นแล้ว ส่วน
+`POST /api/deliveries/{delivery_id}/retry` ไม่ต้อง — การเตือน `approval_overdue` เป็นของ run
+ที่ยัง `waiting_for_human` อยู่โดยนิยาม
 
 ถ้า `_meta.reply` ที่ persist แล้วไม่มีหรือ `mode: "none"` adapter จะ poll
 `GET /api/workflow-runs/{run_id}` จนถึงสถานะ terminal แล้วอ่าน
@@ -1164,8 +1165,7 @@ approval ของ `human_gate` ที่ยังไม่ถูกตัดส
 
 ตั้งปลายทางและเกณฑ์แบบรวมด้วย `ATLAS_APPROVAL_WEBHOOK_URL` และ
 `ATLAS_APPROVAL_OVERDUE_HOURS` (คั่นด้วยจุลภาค เช่น `48,120`) และ override ราย workflow
-ได้ด้วย `policy.approval_webhook_url` กับ `policy.approval_overdue_hours` (list ของ
-จำนวนเต็มบวก เรียงจากน้อยไปมาก ห้ามซ้ำ) — เหมาะกับกรณีหลายแผนกใช้ Atlas ตัวเดียวกัน
+ได้ด้วย `policy.approval_webhook_url` กับ `policy.approval_overdue_hours` (list ของจำนวนเต็มบวก ห้ามว่าง เรียงจากน้อยไปมาก และห้ามซ้ำ) — เหมาะกับกรณีหลายแผนกใช้ Atlas ตัวเดียวกัน
 **ถ้าไม่ได้ตั้ง URL ไว้เลย การกวาดจะไม่ทำงานและไม่ส่งอะไรทั้งสิ้น** URL ถูกตรวจกับ
 `ATLAS_OUTBOUND_ALLOWLIST` ตอนส่งเหมือน delivery อื่นทุกตัว คนเขียน workflow จึงชี้ได้
 เฉพาะ host ที่ operator อนุญาตไว้แล้ว และระบบอ่าน policy ของ definition ปัจจุบัน ไม่ใช่
@@ -1195,7 +1195,8 @@ approval ของ `human_gate` ที่ยังไม่ถูกตัดส
 ที่ workflow นี้จะใช้จริง แล้วตอบ `{"test":{"ok":true,"status":204}}` หรือ
 `{"test":{"ok":false,"reason":"…"}}` ด้วยถ้อยคำของ Atlas เอง มันไม่เขียนแถวใน delivery ledger —
 ledger จะได้ยังตอบคำถาม "การเตือนจริงส่งออกไปหรือยัง" ได้ตรง ๆ — และ body มี `test: true` เพื่อให้
-ผู้รับเลือกที่จะไม่ปลุกใครได้ มีแค่กรณีที่ยังไม่ได้ตั้งค่าเท่านั้นที่เป็น 400
+ผู้รับเลือกที่จะไม่ปลุกใครได้ มีแค่กรณีที่ยังไม่ได้ตั้ง URL เท่านั้นที่เป็น 400 ส่วนความล้มเหลวอื่นทั้งหมด — รวมถึงไม่มี
+`ATLAS_SECRET_KEY` และ host ที่ไม่อยู่ใน allowlist — เป็น 200 พร้อม `ok: false` และเหตุผล
 
 มีตัวอย่าง receiver ที่รันได้จริงอยู่ที่ `poc/approval_reminder_receiver.py` (Python stdlib)
 ครอบทั้งการตรวจลายเซ็น การกัน delivery ซ้ำ และการ routing — แนะนำให้เริ่มจากไฟล์นั้นแทนการอ่าน
@@ -1211,7 +1212,7 @@ routing ซึ่งต้องใช้ผังองค์กรที่ At
 
 ## 15. OpenAPI 3.1
 
-[openapi.yaml](openapi.yaml) ระบุ 62 paths และ 81 operations พร้อม security schemes,
+[openapi.yaml](openapi.yaml) ระบุ 63 paths และ 83 operations พร้อม security schemes,
 parameters, request bodies, response wrappers และ schema references ใช้กับ Swagger UI,
 Redoc, code generator หรือ contract tests ได้
 

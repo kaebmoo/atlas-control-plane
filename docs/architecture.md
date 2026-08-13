@@ -73,8 +73,11 @@ This keeps manual override available while letting Atlas auto-route when the cal
 - `audit_log`: operator and system actions.
 - `usage_events`: append-only, idempotent per-job/per-run usage records; the
   Atlas instance is the tenant, so the table has no `tenant_id`.
-- `deliveries`: append-only outbound-delivery ledger for OB-1 webhook callbacks
-  (attempts, status, retry bookkeeping).
+- `deliveries`: append-only outbound-delivery ledger for signed webhooks (attempts,
+  status, retry bookkeeping). It holds two kinds of row: a run-completion callback,
+  whose body is rebuilt from the run on every attempt, and an `approval_overdue`
+  reminder (D2c-2), whose body is frozen in `payload` at creation because it
+  describes a moment in time. `payload.event` is the only discriminator.
 
 ## Workflow Execution
 

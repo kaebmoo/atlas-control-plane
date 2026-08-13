@@ -761,7 +761,7 @@ sending an email, calling an API or classifying a value are all `worker` nodes,
 so a missing capability is a roster gap (add a worker with that role) rather
 than an Atlas limitation. It also states how to branch on a number (a worker
 classifies the value into a bucket artifact, then `artifact_equals` /
-`artifact_in` branch on it), that no timer/reminder/escalation construct exists,
+`artifact_in` branch on it), that the GRAPH has no timer/reminder/escalation node, condition or trigger — while a time-based rule on a human gate is policy, not topology, and maps to `policy.approval_overdue_hours` (see Approval SLA reminders) —
 and that anything unmodellable belongs in `warnings` with the rest of the draft
 still returned.
 
@@ -1215,7 +1215,7 @@ stable across every retry of the same delivery so a receiver can dedupe.
 delivery one more bounded attempt (re-validating the callback against the
 current allowlist); `POST /api/workflow-runs/{run_id}/deliver` (re)sends using
 the run's own `_meta.reply.callback_url` regardless of the original `mode`.
-Both routes require the run to have already completed.
+`POST /api/workflow-runs/{run_id}/deliver` requires the run to have already completed. `POST /api/deliveries/{delivery_id}/retry` does not — an `approval_overdue` reminder belongs to a run that is still `waiting_for_human` by definition.
 
 If the effective persisted `_meta.reply` is absent or `mode: "none"`, the adapter instead polls
 `GET /api/workflow-runs/{run_id}` until terminal, then reads
@@ -1231,8 +1231,8 @@ inbound Atlas credential is required on the receiving side.
 Configure the destination and thresholds globally with
 `ATLAS_APPROVAL_WEBHOOK_URL` and `ATLAS_APPROVAL_OVERDUE_HOURS` (comma-separated,
 e.g. `48,120`), and override either per workflow with `policy.approval_webhook_url`
-and `policy.approval_overdue_hours` (a non-empty ascending list of positive
-integers) — useful when several departments share one Atlas. **With no URL
+and `policy.approval_overdue_hours` (a non-empty, ascending, duplicate-free list of
+positive integers) — useful when several departments share one Atlas. **With no URL
 configured, the sweep is inert and nothing is sent.** The URL is validated against
 `ATLAS_OUTBOUND_ALLOWLIST` at send time like any other delivery, so a workflow
 author can only address hosts the operator already allows. The workflow
@@ -1264,7 +1264,7 @@ event to the URL this workflow would really use, right now, and answers
 `{"test":{"ok":true,"status":204}}` or `{"test":{"ok":false,"reason":"…"}}` with
 Atlas's own words. It writes no delivery row — the ledger stays an answer to
 "did a real reminder go out" — and the body carries `test: true` so a receiver
-can decline to page anyone. A missing configuration is the only 400.
+can decline to page anyone. An unconfigured webhook URL is the only 400; every other failure — including a missing `ATLAS_SECRET_KEY` and an off-allowlist host — is a 200 with `ok: false` carrying the reason.
 
 A runnable reference receiver — signature verification, deduplication, and routing, in
 stdlib Python — ships at `poc/approval_reminder_receiver.py`. Start there rather than from
@@ -1281,7 +1281,7 @@ decide the exact moment to send.
 
 ## 15. OpenAPI 3.1
 
-[openapi.yaml](openapi.yaml) defines 62 paths and 81 operations, including
+[openapi.yaml](openapi.yaml) defines 63 paths and 83 operations, including
 security schemes, parameters, request bodies, response wrappers, and schema
 references. It can drive Swagger UI, Redoc, code generation, or contract tests.
 

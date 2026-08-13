@@ -225,6 +225,86 @@ def check_trigger_interval_schema_parity() -> list[str]:
     return problems
 
 
+def check_workflow_examples_validate() -> list[str]:
+    """Every graph in docs/workflow-examples.md must be one Atlas would actually accept.
+
+    Until now nothing checked them, so the file's JSON was prose that happened to look like a
+    contract — an example carrying a condition type or policy key the validator rejects would
+    have sat there indefinitely, and copying it is the first thing a reader does. Each fenced
+    JSON object carrying start/nodes/edges is run through the real `validate_workflow_graph`,
+    paired with the next fenced object if that one looks like a policy (so the examples that
+    need `max_iterations` to legalise a cycle are judged the way Atlas judges them).
+    """
+    import re
+
+    from atlas.workflows import validate_workflow_graph, validate_workflow_policy
+
+    path = ROOT / "docs" / "workflow-examples.md"
+    if not path.exists():
+        return [f"{path.name} is missing"]
+    blocks: list[dict] = []
+    for raw in re.findall(r"```json\n(.*?)```", path.read_text(encoding="utf-8"), re.S):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return [f"workflow-examples.md has a json block that does not parse: {exc}"]
+        blocks.append(parsed if isinstance(parsed, dict) else {})
+
+    problems: list[str] = []
+    graphs = 0
+    for index, block in enumerate(blocks):
+        if not {"start", "nodes", "edges"} <= set(block):
+            continue
+        graphs += 1
+        following = blocks[index + 1] if index + 1 < len(blocks) else {}
+        policy = following if following and not {"start", "nodes"} & set(following) else {}
+        try:
+            validate_workflow_policy(policy)
+            validate_workflow_graph(block, policy)
+        except ValueError as exc:
+            problems.append(f"workflow-examples.md graph starting at '{block.get('start')}' is invalid: {exc}")
+    if graphs == 0:
+        problems.append("workflow-examples.md has no graph examples — the check would pass vacuously")
+    return problems
+
+
+def check_openapi_counts() -> list[str]:
+    """The "N paths and M operations" line in both api-reference files must match openapi.yaml.
+
+    It said 62/81 while the file held 63/83 — and the operation count had already been wrong by
+    one before this round, which is the tell: a hand-maintained number nobody recomputes drifts
+    the moment anyone adds a route, and both languages drift together so EN/TH parity hides it.
+    """
+    import re
+
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover - yaml ships with the dev env, not the runtime
+        return []
+
+    spec = yaml.safe_load((ROOT / "docs" / "specs" / "openapi.yaml").read_text(encoding="utf-8"))
+    methods = {"get", "post", "put", "patch", "delete", "head", "options"}
+    paths = len(spec.get("paths") or {})
+    operations = sum(1 for item in (spec.get("paths") or {}).values() for key in item if key in methods)
+
+    problems: list[str] = []
+    for name, pattern in (
+        ("api-reference-en.md", r"defines (\d+) paths and (\d+) operations"),
+        ("api-reference-th.md", r"ระบุ (\d+) paths และ (\d+) operations"),
+    ):
+        text = (ROOT / "docs" / "specs" / name).read_text(encoding="utf-8")
+        match = re.search(pattern, text)
+        if not match:
+            problems.append(f"{name} no longer states the openapi path/operation counts")
+            continue
+        stated = (int(match.group(1)), int(match.group(2)))
+        if stated != (paths, operations):
+            problems.append(
+                f"{name} says {stated[0]} paths and {stated[1]} operations; openapi.yaml has {paths} and {operations}"
+            )
+    return problems
+
+
 def main() -> None:
     tracked = _tracked_files()
     problems = (
@@ -233,6 +313,8 @@ def main() -> None:
         + check_artifact_classification_contract()
         + check_usage_range_doc_precision()
         + check_trigger_interval_schema_parity()
+        + check_workflow_examples_validate()
+        + check_openapi_counts()
     )
     if problems:
         print("docs check FAILED:")

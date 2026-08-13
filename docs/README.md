@@ -70,6 +70,9 @@
   reverse-proxy TLS/gzip/request-size, request logging, config reference
 - [Backup & Restore](ops/backup-restore.md) — online `.backup`, restore runbook,
   single-writer caveat
+- [Approval reminder receiver](../poc/approval_reminder_receiver.py) — ตัวอย่างที่รันได้จริง
+  (Python stdlib ไฟล์เดียว) สำหรับรับ webhook `approval_overdue` ที่เซ็นแล้ว: ตรวจลายเซ็นจาก raw
+  bytes, ตอบ 2xx ก่อนค่อยแจ้งเตือน, กันซ้ำด้วย `delivery_id`, และ routing ตาม `node_key`/`level`
 - [Atlas Fleet](../fleet/README.md) — multi-instance registry + `atlas-fleet` CLI
   (provision / list / health / usage-pull); separate component, no tenant logic in core
 
@@ -134,6 +137,10 @@
   workflow → คนรีวิว" จาก API-only ไปเป็นฟีเจอร์จริง: D1 commit hardening → D2 role
   grounding → D3 ปุ่ม Draft with AI ใน flow-designer → D4 editor assists; D5 `/revise`
   + D6 chat refine เป็น backlog; บันทึกผล field test 3 รอบ + DoD ต่อ stage
+- [AI Draft Contract Hardening Plan](plans/ai-draft-contract-hardening-plan.md) — ปิดคลาส
+  "builder เดา shape เอง" ให้จบ: D2b-1 trigger contract + `dsl_boundary`, D2b-2 normalizer,
+  D2b-3 รับ fenced JSON, D2b-5 error UX; และ §8 การเตือน approval ที่ค้าง (D2c-1 ไม่นับเวลารอ
+  ที่ gate ใน `max_minutes`, D2c-2 sweep → outbound delivery) — ปิดแล้ว 2026-08-12
 
 ## Prompt files
 
@@ -153,6 +160,8 @@
 - [AI Draft Authoring — Spin Prompts](prompts/ai-draft-authoring-spin-prompts.md) —
   prompt ต่อ stage สำหรับ D1→D4 (สอง repo: Atlas + flow-designer) พร้อม driver;
   D5/D6 ต้องให้คนยืนยันก่อนรัน
+- [AI Draft Contract Hardening — Spin Prompts](prompts/ai-draft-contract-hardening-spin-prompts.md)
+  — prompt ต่อ stage สำหรับ D2b-1→D2b-5 พร้อมวินัยเรื่อง live test ที่เสียเงินจริง
 
 ## โครงสร้าง
 

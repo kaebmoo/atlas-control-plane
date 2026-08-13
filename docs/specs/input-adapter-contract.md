@@ -169,6 +169,16 @@ effective reply is absent or `mode: "none"`, the adapter instead **polls**
 retries, failure isolation, `deliveries` table + API) are in the
 [plan](../plans/input-adapter-return-path-plan.md) §OB-1.
 
+### 7.1 Body discrimination
+
+The `X-Atlas-Signature` channel now carries more than one body shape. Every signed body has
+`delivery_id` and `signed_at`. A body with an **`event`** key is an event body — today only
+`event: "approval_overdue"` (D2c-2), whose fields are documented under *Approval SLA reminders*
+in the [API reference](api-reference-en.md); it carries `approval` and `run` objects rather
+than a top-level `run_id`. A body **without** `event` is the run-completion shape above. A
+receiver that assumes `run_id` exists will mis-route an approval reminder, so branch on `event`
+first and ignore anything unrecognised — Atlas may add further event bodies on this channel.
+
 ## 8. Examples
 
 ### 8.1 LINE OA (fronted by n8n, webhook trigger, push reply)
