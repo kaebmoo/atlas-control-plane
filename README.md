@@ -2,9 +2,9 @@
 
 Atlas is a standalone control plane for coordinating many `thclaws --serve`
 workers. It ships a minimal browser ops console (fleet, live jobs, workflow-run
-monitoring, audit, usage, accounts). Ad-hoc job submission with routing/handoff
-is API-only; workflow authoring, approvals, triggers, and deliveries are done
-through [flow-designer](https://github.com/kaebmoo/flow-designer), the full
+monitoring, audit, deliveries, usage, accounts). Ad-hoc job submission with
+routing/handoff is API-only; workflow authoring, approvals, and triggers are
+done through [flow-designer](https://github.com/kaebmoo/flow-designer), the full
 operator frontend built on Atlas's API, or directly through the REST API.
 
 It is intentionally separate from thClaws. Atlas does not patch, fork, or depend

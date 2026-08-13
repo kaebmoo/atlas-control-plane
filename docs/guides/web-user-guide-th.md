@@ -8,7 +8,7 @@ run, ดู audit/usage และจัดการบัญชีผู้ใ�
 > path ของ workspace จึงต้องมีอยู่บนเครื่อง worker ไม่ใช่เครื่องที่เปิด Atlas
 
 > **ขอบเขต** — UI ที่ฝังมาตั้งใจให้มินิมอล การสร้าง/แก้ไข workflow, การตัดสิน
-> approval และการจัดการ triggers/deliveries ทำผ่าน
+> approval และการจัดการ triggers ทำผ่าน
 > **[flow-designer](https://github.com/kaebmoo/flow-designer)** — frontend
 > เต็มรูปแบบสำหรับ Atlas — ดู
 > [คู่มือใช้งานผ่านเว็บของ flow-designer](https://github.com/kaebmoo/flow-designer/blob/main/docs/guides/web-user-guide-th.md)
@@ -352,7 +352,17 @@ dashboard โดยตรง — ทางเลือกบนเบราว�
 | run ไม่เริ่ม | ตรวจ workflow และ run input ผ่าน API |
 | ปุ่มทำต่อกดไม่ได้ | ทำต่อใช้กับ `paused`; สถานะกู้คืนใช้ปุ่มกู้คืนงานที่ค้าง |
 
-สำหรับการสร้าง/แก้ไข workflow, การตัดสิน approval, triggers และ deliveries ดู
+## การส่งออก (Deliveries)
+
+หน้า **Deliveries** (admin, operator, auditor) แสดง 50 รายการล่าสุดของการ POST
+ขาออกที่เซ็นแล้ว — การเตือน approval (`dlv_apr_*`, KIND `approval_overdue`) และ
+webhook แจ้งจบ run (KIND `run_completion`) — พร้อมสถานะ: `pending`, `delivered`,
+`blocked` (allowlist หรือ secret ไม่ครบ ระบบจึงไม่ยอมส่ง — ต้องแก้ config) หรือ
+`failed` (ลองครบทุกครั้งแล้ว — การเตือนนั้นส่งไม่ถึงคน) ตัวเลขบน nav นับแถว
+`failed` และแถว failed มีปุ่ม **Retry** (operator/admin; ลองส่งใหม่หนึ่งครั้งโดย
+ตรวจ allowlist ปัจจุบัน) ส่วน auditor อ่านได้แต่กด Retry ไม่ได้
+
+สำหรับการสร้าง/แก้ไข workflow, การตัดสิน approval และ triggers ดู
 [คู่มือใช้งานผ่านเว็บของ flow-designer](https://github.com/kaebmoo/flow-designer/blob/main/docs/guides/web-user-guide-th.md)
 ส่วนสิ่งที่เข้าถึงได้เฉพาะผ่าน API ในตอนนี้ (สั่งงานเดี่ยวแบบ ad-hoc พร้อม
 handoff, อัปโหลดไฟล์เข้า run, solution pack, draft/explain/repair และ

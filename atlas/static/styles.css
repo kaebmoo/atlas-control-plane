@@ -260,6 +260,11 @@ body.is-loading .loading-bar { opacity: 1; animation: nt-load 1.1s var(--ease) i
 .status.failed, .status.recovery-required, .status.rejected, .status.error { background: rgba(225,82,62,.14); color: var(--err-ink); }
 .status.failed::before, .status.recovery-required::before, .status.rejected::before, .status.error::before { background: var(--st-err); }
 .status.dot-only { padding: 0; gap: 0; background: none !important; }
+/* Delivery statuses: delivered = success, blocked = the allowlist/secret refused to send
+   (operator-attention amber, like cancel-requested); pending keeps the neutral queued chip. */
+.status.delivered { background: rgba(46,158,107,.14); color: var(--ok-ink); }
+.status.delivered::before { background: var(--st-ok); }
+.status.blocked { background: rgba(232,167,0,.18); color: var(--warn-ink); }
 
 .chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip-row:empty { display: none; }
@@ -500,6 +505,16 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
 .audit-row:hover { background: var(--hov); }
 .audit-time { color: var(--faint); font-family: var(--mono); font-size: 15px; }
 .audit-action { font-family: var(--mono); font-size: 15.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.delivery-table { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-card); box-shadow: var(--shadow); overflow: hidden; }
+.delivery-head, .delivery-row { display: grid; grid-template-columns: 88px minmax(150px, 220px) 140px 120px 90px 1fr; gap: 14px; align-items: center; padding: 12px 22px; }
+.delivery-head { border-bottom: 1px solid var(--line); font-size: 14px; font-weight: 700; letter-spacing: .1em; color: var(--faint); }
+.delivery-row { border-bottom: 1px solid var(--line2); font-size: 16px; }
+.delivery-row:hover { background: var(--hov); }
+.delivery-id, .delivery-kind { font-family: var(--mono); font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.delivery-attempts { font-family: var(--mono); font-size: 15px; color: var(--mut); }
+.delivery-detail { display: flex; align-items: center; gap: 10px; justify-content: space-between; min-width: 0; }
+.delivery-detail-text { color: var(--mut); font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .audit-action.success { color: var(--ok-ink); } .audit-action.danger { color: var(--err-ink); } .audit-action.brand { color: var(--warn-ink); } .audit-action.grey { color: var(--ink); }
 .audit-target { color: var(--mut); font-family: var(--mono); font-size: 15.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .audit-detail { color: var(--mut); font-size: 15.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -669,6 +684,13 @@ button.workflow-run-item:hover { border-color: var(--faint); background: var(--h
   .mon-runs, .jobs-list-card { max-height: none; }
   .audit-head, .audit-row { grid-template-columns: 80px 1fr 90px; }
   .audit-head span:nth-child(3), .audit-head span:nth-child(4), .audit-row > span:nth-child(3), .audit-row > span:nth-child(4) { display: none; }
+  /* Keep TIME, DELIVERY, STATUS and DETAIL (the Retry button lives there — a failed
+     reminder must be retryable from a phone); drop KIND and ATTEMPTS. Auto-sized chip and
+     button columns: fixed widths starved the 1fr id column to 0px on a 375px viewport. */
+  .delivery-head, .delivery-row { grid-template-columns: 64px minmax(0, 1fr) auto auto; gap: 10px; padding: 12px 14px; }
+  .delivery-head span:nth-child(3), .delivery-head span:nth-child(5),
+  .delivery-row > span:nth-child(3), .delivery-row > span:nth-child(5) { display: none; }
+  .delivery-detail-text { display: none; }
   .ws-head, .ws-row { grid-template-columns: 1fr 1fr; }
   .ws-head span:nth-child(3), .ws-head span:nth-child(4), .ws-row .dir, .ws-row > span:nth-child(4) { display: none; }
   .ue-head, .ue-row { grid-template-columns: 1fr 1fr 90px; }
