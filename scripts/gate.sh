@@ -10,6 +10,7 @@ python3 -m py_compile \
   atlas/router.py atlas/workflow_templates.py atlas/usage.py atlas/auth.py \
   atlas/admin.py atlas/packs.py atlas/byok.py atlas/outbound.py atlas/workflow_interface.py \
   fleet/fleet.py fleet/cdr.py fleet/__main__.py fleet/check_fleet.py \
+  notify/notify.py notify/__main__.py notify/check_notify.py \
   scripts/check_workflows.py scripts/check_workflow_api.py scripts/check_workflow_interface.py scripts/check_usage.py \
   scripts/check_auth.py scripts/check_migrations.py scripts/check_packs.py \
   scripts/check_cdr.py scripts/check_byok_helper.py scripts/check_silo.py \
@@ -55,5 +56,6 @@ python3 scripts/check_job_artifacts.py    # T9a: frozen Job Artifacts — valida
 python3 scripts/check_file_handoff.py   # T9b: /v1/inputs file handoff — two workers, policy gate, ack validation, caps
 python3 scripts/check_dashboard_surfaces.py  # T1/T3/T9a/T9b web surfaces: usage tokens+cost, job collect/async, builder handoff
 python3 scripts/check_headless.py     # headless API/UI split: ATLAS_SERVE_UI, CORS allowlist, API_BASE wiring, dev UI server
+python3 notify/check_notify.py        # notify sidecar: raw-byte HMAC, durable dedup, routing walk-down, channel fan-out isolation
 
 echo "=== completion gate GREEN ==="
