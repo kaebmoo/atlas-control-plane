@@ -305,6 +305,46 @@ def check_openapi_counts() -> list[str]:
     return problems
 
 
+def _heading_levels(markdown: str) -> list[str]:
+    """Heading-level sequence ('##', '###', …) with fenced code blocks stripped first,
+    so a `# comment` inside a ```bash fence is not mistaken for a heading."""
+    return re.findall(r"(?m)^(#{1,6})(?=\s)", re.sub(r"```.*?```", "", markdown, flags=re.S))
+
+
+def check_approval_overdue_contract() -> list[str]:
+    """The approval_overdue contract-v1 declaration must not silently vanish.
+
+    The webhook body is a declared contract (additive-only; a breaking change ships as a
+    NEW event name, approval_overdue.v2), and the declaration lives in four places: both
+    api-reference files, the openapi `webhooks:` section, and input-adapter-contract §7.1.
+    A refactor that drops any copy would quietly demote the contract back to prose. Also
+    pins EN/TH heading-level parity, which the twin contract subsections rely on.
+    """
+    en = (DOCS / "specs" / "api-reference-en.md").read_text(encoding="utf-8")
+    th = (DOCS / "specs" / "api-reference-th.md").read_text(encoding="utf-8")
+    problems: list[str] = []
+    for label, text, needles in (
+        ("api-reference-en.md", en, ("approval_overdue.v2", "dlv_apr_")),
+        ("api-reference-th.md", th, ("approval_overdue.v2", "dlv_apr_")),
+        # \nwebhooks:\n pins the TOP-LEVEL key: a bare "webhooks:" also matches the
+        # prose in info.description, which let a deleted section slip through once.
+        ("openapi.yaml", (DOCS / "specs" / "openapi.yaml").read_text(encoding="utf-8"),
+         ("\nwebhooks:\n", "approvalOverdue:", "ApprovalOverdueEvent:")),
+        ("input-adapter-contract.md", (DOCS / "specs" / "input-adapter-contract.md").read_text(encoding="utf-8"),
+         ("approval_overdue.v2",)),
+    ):
+        for needle in needles:
+            if needle not in text:
+                problems.append(f"{label} lost the approval_overdue contract-v1 marker {needle!r}")
+    en_levels, th_levels = _heading_levels(en), _heading_levels(th)
+    if en_levels != th_levels:
+        problems.append(
+            f"api-reference EN/TH heading-level sequences diverge "
+            f"(EN {len(en_levels)} headings, TH {len(th_levels)})"
+        )
+    return problems
+
+
 def main() -> None:
     tracked = _tracked_files()
     problems = (
@@ -315,6 +355,7 @@ def main() -> None:
         + check_trigger_interval_schema_parity()
         + check_workflow_examples_validate()
         + check_openapi_counts()
+        + check_approval_overdue_contract()
     )
     if problems:
         print("docs check FAILED:")

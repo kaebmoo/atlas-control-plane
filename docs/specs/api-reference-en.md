@@ -1279,6 +1279,35 @@ and "two business days" is a calendar, not an age. Thresholds are wall-clock
 hours; pick values with a margin for weekends (e.g. `72,168`) and let the receiver
 decide the exact moment to send.
 
+### approval_overdue contract v1
+
+The body above is a declared contract, not an implementation detail. A receiver
+written against it today keeps working, because v1 promises:
+
+- **The field inventory is frozen at v1**: `event`, `delivery_id`,
+  `approval{id, label, reason, choices, created_at, age_hours, level, threshold_hours}`,
+  `run{id, node_key, workflow_definition_id, workflow_name}`, `signed_at` — plus
+  `test: true` on synthetic probe sends only.
+- **Changes are additive-only.** New fields may appear at any level; existing
+  fields never change name, type, or meaning. Parse what you know, ignore what
+  you don't.
+- **A breaking change ships as a new event name** — `approval_overdue.v2` on the
+  same signed channel — never as a mutation of v1. There is deliberately no
+  version field in the payload: the `event` name *is* the version. A v1 receiver
+  that branches on `event` and ignores unrecognised events (see
+  [input-adapter-contract.md](input-adapter-contract.md) §7.1) is untouched by a
+  future v2 by construction.
+- **The wire rules are part of the contract**: the HMAC-SHA256 signature in
+  `X-Atlas-Signature: sha256=<hex>` is computed over the exact bytes on the wire;
+  a receiver answers 2xx fast and notifies after; `delivery_id`
+  (`dlv_apr_<approval_id>_l<level>`) is deterministic and stable across every
+  retry of the same delivery, so the receiver deduplicates on it; Atlas retries
+  up to `ATLAS_OUTBOUND_MAX_ATTEMPTS` then dead-letters the row as `failed`;
+  routing stays the receiver's job.
+
+The same declaration in machine shape — a named `ApprovalOverdueEvent` schema
+with an example — lives under `webhooks:` in [openapi.yaml](openapi.yaml).
+
 ## 15. OpenAPI 3.1
 
 [openapi.yaml](openapi.yaml) defines 63 paths and 83 operations, including

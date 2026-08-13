@@ -141,6 +141,10 @@
   "builder เดา shape เอง" ให้จบ: D2b-1 trigger contract + `dsl_boundary`, D2b-2 normalizer,
   D2b-3 รับ fenced JSON, D2b-5 error UX; และ §8 การเตือน approval ที่ค้าง (D2c-1 ไม่นับเวลารอ
   ที่ gate ใน `max_minutes`, D2c-2 sweep → outbound delivery) — ปิดแล้ว 2026-08-12
+- [Atlas Notify Plan](plans/atlas-notify-plan.md) — ยกระดับ POC receiver เป็น `notify/`
+  sidecar ที่ operate ได้จริง (SQLite dedup + SMTP + Telegram + JSON routes); artifact
+  เดียวใช้ทั้ง managed และ BYO; รายการที่ตั้งใจเลื่อน (LINE, calendar, routing UI)
+  อยู่ในตาราง Deferred ของแผนนี้
 
 ## Prompt files
 
@@ -188,7 +192,8 @@ docs/
 │   ├── nt-aiaas-business-plan.md        (internal, not committed)
 │   ├── ga-completion-plan.md
 │   ├── input-adapter-return-path-plan.md
-│   └── ai-draft-authoring-plan.md
+│   ├── ai-draft-authoring-plan.md
+│   └── atlas-notify-plan.md
 ├── prompts/
 │   ├── workflow-engine-spin-prompts.md
 │   ├── sovereign-platform-spin-prompts.md
