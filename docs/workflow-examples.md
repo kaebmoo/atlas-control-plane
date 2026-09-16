@@ -935,6 +935,11 @@ Verify the signature over the **raw request bytes** — `json.loads` then
 most common way a receiver rejects every legitimate delivery.
 
 Whether a reminder was sent, and whether it arrived, is on `GET /api/deliveries`
-(`delivered` / `failed` / `blocked`), filtered in the UI by event type. A `failed`
+(`delivered` / `failed` / `blocked`) — reminder rows are the ones whose id starts
+with `dlv_apr_` and whose `payload.event` is `approval_overdue`. A `failed`
 `dlv_apr_*` row is worth an alert: it is the one signal that a human was supposed
 to be chased and was not.
+
+The body is **contract v1** — additive-only, and a breaking change would arrive
+as a new event name (`approval_overdue.v2`), never as a change to these fields.
+See the API reference §14 for the declaration.

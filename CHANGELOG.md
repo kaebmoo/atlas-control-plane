@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `approval_overdue` webhook body is now a **declared contract v1**:
+  additive-only fields, and a breaking change ships as a new event name
+  (`approval_overdue.v2`), never as a mutation. Declared in the API reference
+  §14 (EN/TH), `input-adapter-contract.md` §7.1, and machine-readably as a
+  `webhooks:` section + `ApprovalOverdueEvent` schema in `openapi.yaml`
+  (bumped to 1.4.0); `scripts/check_docs.py` now fails if any copy of the
+  declaration vanishes, and pins EN/TH heading-level parity.
+- `docs/plans/atlas-notify-plan.md` — the plan for promoting the POC receiver
+  into a deployable `notify/` sidecar (SQLite dedup + SMTP + Telegram), with
+  the deliberately deferred items (LINE, calendars, routing UI) recorded.
 - Approval SLA reminders. A pending human approval ages in the scheduler tick and
   emits a signed `approval_overdue` webhook once per configured threshold
   (`policy.approval_webhook_url` / `policy.approval_overdue_hours`, defaulting to
