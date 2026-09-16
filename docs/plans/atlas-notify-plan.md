@@ -6,7 +6,9 @@
 > (managed, รันข้าง silo ของลูกค้า) และแบบลูกค้ารันเอง (BYO) ต่างกันแค่ใครเป็นคน operate
 > Atlas core ไม่ต้องแก้อะไรเลย
 
-**Status:** Planned — contract v1 declared (this PR); the `notify/` sidecar is the next PR.
+**Status:** Implemented — contract v1 declared (PR #61); the `notify/` sidecar shipped in
+the follow-up PR (`notify/check_notify.py` in the gate, 9 mutation targets in its
+docstring). The table below stays the record of what was deliberately deferred.
 
 ## Why
 

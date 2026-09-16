@@ -73,6 +73,9 @@
 - [Approval reminder receiver](../poc/approval_reminder_receiver.py) — ตัวอย่างที่รันได้จริง
   (Python stdlib ไฟล์เดียว) สำหรับรับ webhook `approval_overdue` ที่เซ็นแล้ว: ตรวจลายเซ็นจาก raw
   bytes, ตอบ 2xx ก่อนค่อยแจ้งเตือน, กันซ้ำด้วย `delivery_id`, และ routing ตาม `node_key`/`level`
+- [Atlas Notify](../notify/README.md) — receiver ฉบับใช้งานจริง (sidecar แยกจาก core):
+  dedup ถาวรด้วย SQLite, ส่ง SMTP + Telegram, routing จากไฟล์ config JSON; artifact เดียว
+  ใช้ทั้งแบบ NT ดูแลให้และลูกค้ารันเอง
 - [Atlas Fleet](../fleet/README.md) — multi-instance registry + `atlas-fleet` CLI
   (provision / list / health / usage-pull); separate component, no tenant logic in core
 

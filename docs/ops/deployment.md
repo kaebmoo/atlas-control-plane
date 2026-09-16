@@ -61,6 +61,41 @@ scheduler is stopped, the callback reaper is stopped, the listening socket is cl
 the process exits 0 after printing `Atlas stopped.`. A run interrupted mid-flight is
 recovered by the reconcile pass on the next start, so a stop is safe at any moment.
 
+### Atlas Notify sidecar (approval reminders → email/Telegram)
+
+Atlas only POSTs a signed `approval_overdue` body; turning it into a message a human sees
+is the receiver's job. [`notify/`](../../notify/README.md) is the deployable receiver —
+durable SQLite dedup, SMTP + Telegram channels, routing from a JSON config. Run it next
+to Atlas (managed) or hand the same artifact to the customer's own network (BYO):
+
+```bash
+export ATLAS_SECRET_KEY="the same value Atlas signs with"   # + SMTP/Telegram secrets, see notify/README.md
+python3 -m notify --config /etc/atlas/notify.json --port 9100
+```
+
+A minimal unit, same `EnvironmentFile` discipline as Atlas itself:
+
+```ini
+[Unit]
+Description=Atlas Notify sidecar
+After=network.target
+
+[Service]
+User=atlas
+WorkingDirectory=/opt/atlas
+EnvironmentFile=/etc/atlas/notify.env
+ExecStart=/usr/bin/python3 -m notify --config /etc/atlas/notify.json --port 9100
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then point `ATLAS_APPROVAL_WEBHOOK_URL` at it, allowlist the host in
+`ATLAS_OUTBOUND_ALLOWLIST`, and fire `POST /api/workflows/{id}/test-approval-webhook`
+once — the probe carries `test: true`, so this receiver acknowledges it without paging
+anyone.
+
 
 ## 2. Reverse proxy (TLS, gzip, request size, and SSE)
 

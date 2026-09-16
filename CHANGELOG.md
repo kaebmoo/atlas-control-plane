@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`notify/` — the Atlas Notify sidecar**, a deployable receiver for
+  `approval_overdue` deliveries: raw-byte HMAC verification, durable SQLite
+  dedup (a restart mid-retry no longer re-notifies), SMTP + Telegram channels
+  fanning out independently per target, and routing from a JSON config file
+  (`node_key` × `level`, walk-down + fallback). Secrets live only in the
+  environment — the sidecar refuses a config containing password/token keys —
+  and the composed email subject is newline-collapsed at the header boundary
+  (header-injection guard). One artifact for both managed and BYO operation;
+  `notify/check_notify.py` joins the gate with 9 declared mutation targets.
 - The `approval_overdue` webhook body is now a **declared contract v1**:
   additive-only fields, and a breaking change ships as a new event name
   (`approval_overdue.v2`), never as a mutation. Declared in the API reference

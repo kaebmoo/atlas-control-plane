@@ -7,6 +7,10 @@ It has no email, no LINE, no chat integration, and no idea who anyone in your or
 Run it, put its URL in the workflow's `approval_webhook_url` (or `ATLAS_APPROVAL_WEBHOOK_URL`),
 and replace `notify()` with your real channel.
 
+This file stays the didactic contract reference. The deployable receiver — durable SQLite
+dedup, real SMTP + Telegram channels, routing from a JSON config — ships at `notify/`
+(see notify/README.md); run that in production, read this to understand the wire.
+
     export ATLAS_SECRET_KEY="the same value Atlas signs with"
     python3 poc/approval_reminder_receiver.py --port 9000
 
@@ -69,8 +73,7 @@ LOGGER = logging.getLogger("approval-receiver")
 
 # Rule 3. A dict in memory is enough for a reference; a real receiver should persist this, or a
 # restart mid-retry re-notifies. Bounded so a long-lived process cannot grow without limit.
-# ponytail: in-memory set with a size cap; swap for the store you already run if you need it to
-# survive a restart.
+# The durable version of this set lives in notify/notify.py (Store: SQLite INSERT OR IGNORE).
 _SEEN_LIMIT = 10_000
 _seen: dict[str, None] = {}
 _seen_lock = threading.Lock()
