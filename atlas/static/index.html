@@ -91,6 +91,11 @@
             <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/><path d="M9 13h6M9 17h4"/></svg></span>
             <span class="nav-label">Audit <span class="th" lang="th">ตรวจสอบ</span></span>
           </button>
+          <button class="nav-item" type="button" data-view="deliveries">
+            <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg></span>
+            <span class="nav-label">Deliveries <span class="th" lang="th">การส่งออก</span></span>
+            <span class="nav-badge attn" data-badge="deliveries" hidden></span>
+          </button>
           <button class="nav-item" type="button" data-view="usage">
             <span class="nav-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></span>
             <span class="nav-label">Usage <span class="th" lang="th">การใช้งาน</span></span>
@@ -331,6 +336,26 @@
                 <div id="auditList"><div class="empty">Loading… · <span lang="th">กำลังโหลด</span></div></div>
               </div>
               <button id="auditMoreBtn" class="secondary-btn audit-more" type="button" hidden>Load older entries · <span lang="th">โหลดเพิ่ม</span></button>
+            </div>
+          </section>
+
+          <!-- ========================= DELIVERIES ========================= -->
+          <section class="view" id="view-deliveries" data-view="deliveries" tabindex="-1">
+            <div class="view-wrap deliveries">
+              <div class="audit-filters">
+                <button class="audit-chip is-active" type="button" data-delivery-filter="all">All · <span lang="th">ทั้งหมด</span></button>
+                <button class="audit-chip" type="button" data-delivery-filter="pending">pending</button>
+                <button class="audit-chip" type="button" data-delivery-filter="delivered">delivered</button>
+                <button class="audit-chip" type="button" data-delivery-filter="failed">failed</button>
+                <button class="audit-chip" type="button" data-delivery-filter="blocked">blocked</button>
+                <span class="audit-note">A failed <code>dlv_apr_*</code> row means a reminder never reached a person <span lang="th">· แถว failed คือการเตือนที่ส่งไม่ถึงคน</span></span>
+              </div>
+              <div class="delivery-table" role="group" aria-label="Outbound deliveries — time, delivery, kind, status, attempts, detail">
+                <div class="delivery-head">
+                  <span>TIME</span><span>DELIVERY</span><span>KIND</span><span>STATUS</span><span>ATTEMPTS</span><span>DETAIL</span>
+                </div>
+                <div id="deliveryList"><div class="empty">Loading… · <span lang="th">กำลังโหลด</span></div></div>
+              </div>
             </div>
           </section>
 

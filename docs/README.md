@@ -8,8 +8,8 @@
 ## คู่มือสำหรับผู้ใช้งาน
 
 - [คู่มือใช้งาน Atlas ผ่านเว็บ (ภาษาไทย)](guides/web-user-guide-th.md) — เริ่มระบบ,
-  Fleet, Jobs, Monitor, Audit, Usage, Accounts และการแก้ปัญหา (เฉพาะ ops console
-  ที่ฝังมากับ Atlas)
+  Fleet, Jobs, Monitor, Audit, Deliveries, Usage, Accounts และการแก้ปัญหา (เฉพาะ
+  ops console ที่ฝังมากับ Atlas)
 - [คู่มือใช้งานผ่านเว็บ (English)](guides/web-user-guide-en.md) — คู่มือฉบับภาษาอังกฤษ
 - [คู่มือใช้งานผ่านเว็บของ flow-designer (ไทย/English)](https://github.com/kaebmoo/flow-designer/blob/main/docs/guides/web-user-guide-th.md) —
   frontend เต็มรูปแบบ: สร้าง/แก้ไข workflow, approvals, triggers, deliveries และ

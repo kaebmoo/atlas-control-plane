@@ -7,6 +7,8 @@ const state = {
   workflows: [],
   workflowRuns: [],
   approvals: [],
+  deliveries: [],
+  deliveryFilter: "all",
   selectedJobId: null,
   selectedWorkflowRunId: null,
   workflowRunDetail: null,
@@ -130,7 +132,7 @@ function toast(message) {
   toastTimer = setTimeout(() => node.classList.remove("visible"), 2600);
 }
 
-const VIEWS = ["overview", "monitor", "jobs", "audit", "usage", "fleet", "accounts"];
+const VIEWS = ["overview", "monitor", "jobs", "audit", "deliveries", "usage", "fleet", "accounts"];
 // Page subtitles are English-only: the title row already pairs EN + Thai, and the subtitle
 // must survive narrow topbars. Thai supplements live in the body copy with lang="th".
 const VIEW_META = {
@@ -139,6 +141,7 @@ const VIEW_META = {
   jobs:      ["งาน", "Jobs", "Live output stream and job history"],
   fleet:     ["ฟลีต", "Fleet", "Manage workers and workspaces"],
   audit:     ["ตรวจสอบ", "Audit", "Last 30 actions on the control plane"],
+  deliveries: ["การส่งออก", "Deliveries", "Signed outbound deliveries and approval reminders"],
   usage:     ["การใช้งาน", "Usage", "Workflow runs, jobs and budget units over time"],
   accounts:  ["บัญชี", "Accounts", "Manage users, roles and API tokens"],
 };
@@ -147,6 +150,7 @@ const VIEW_META = {
 // nav visibility/kick-out, so a hash deep-link can never reach a view the nav hides.
 const VIEW_ROLES = {
   audit: ["admin", "auditor"],
+  deliveries: ["admin", "operator", "auditor"],
   usage: ["admin", "auditor"],
   accounts: ["admin"],
 };
@@ -181,7 +185,7 @@ function showView(view) {
   }
 }
 
-const NAV_BADGE_LABELS = { approvals: "pending approvals", jobs: "active jobs", workers: "workers" };
+const NAV_BADGE_LABELS = { approvals: "pending approvals", jobs: "active jobs", workers: "workers", deliveries: "failed deliveries" };
 
 function setNavBadge(name, count) {
   const badge = document.querySelector(`.nav-badge[data-badge="${name}"]`);
@@ -195,6 +199,9 @@ function renderNavBadges() {
   setNavBadge("approvals", state.approvals.length);
   setNavBadge("jobs", state.jobs.filter((job) => ["queued", "running", "cancel_requested"].includes(job.state)).length);
   setNavBadge("workers", state.workers.length);
+  // failed = dead-lettered: a reminder or return-path POST that gave up. Counted within the
+  // fetched window (latest 50) — same honesty as the audit list's own window.
+  setNavBadge("deliveries", state.deliveries.filter((delivery) => delivery.status === "failed").length);
 }
 
 function tagsToText(tags) {
@@ -217,7 +224,10 @@ async function loadAll() {
   state.currentUser = me.user;
   hideLogin();
   const canReadAudit = ["admin", "auditor"].includes(state.currentUser?.role);
-  const [workers, workspaces, jobs, workflows, workflowRuns, approvals, audit] = await Promise.all([
+  // deliveries.read is held by admin/operator/auditor — a viewer never issues the request
+  // (same no-403-poll pattern as audit below).
+  const canReadDeliveries = ["admin", "operator", "auditor"].includes(state.currentUser?.role);
+  const [workers, workspaces, jobs, workflows, workflowRuns, approvals, audit, deliveries] = await Promise.all([
     api("/api/workers"),
     api("/api/workspaces"),
     api("/api/jobs"),
@@ -225,6 +235,7 @@ async function loadAll() {
     api("/api/workflow-runs"),
     api("/api/approvals?state=pending"),
     canReadAudit ? api(`/api/audit?limit=${state.auditLimit}`) : Promise.resolve({ audit: [] }),
+    canReadDeliveries ? api("/api/deliveries?limit=50") : Promise.resolve({ deliveries: [] }),
   ]);
   state.workers = workers.workers || [];
   state.workspaces = workspaces.workspaces || [];
@@ -233,6 +244,7 @@ async function loadAll() {
   state.workflowRuns = workflowRuns.runs || [];
   state.approvals = approvals.approvals || [];
   state.audit = audit.audit || [];
+  state.deliveries = deliveries.deliveries || [];
   if (state.selectedWorkflowRunId && state.workflowRuns.some((run) => run.id === state.selectedWorkflowRunId)) {
     await loadWorkflowRunDetail(state.selectedWorkflowRunId);
   }
@@ -248,7 +260,7 @@ function preserveListFocus(renderFn) {
   const active = document.activeElement;
   let marker = null;
   if (active && active.dataset) {
-    for (const key of ["jobId", "runId", "workerId", "workspaceId", "userId", "tokenId", "approvalId", "navJob", "navRun"]) {
+    for (const key of ["jobId", "runId", "workerId", "workspaceId", "userId", "tokenId", "approvalId", "deliveryId", "navJob", "navRun"]) {
       if (active.dataset[key]) { marker = { key, value: active.dataset[key], className: active.className }; break; }
     }
   }
@@ -284,7 +296,7 @@ function setStale(error) {
 // First-load failure: lists otherwise sit on "Loading…" forever, indistinguishable from slow.
 // Only replaces containers still showing an .empty placeholder — stale real data is left alone.
 function markLoadFailed() {
-  for (const selector of ["#overviewJobs", "#jobList", "#workerList", "#workspaceList", "#auditList", "#workflowRunList", "#userList", "#tokenList"]) {
+  for (const selector of ["#overviewJobs", "#jobList", "#workerList", "#workspaceList", "#auditList", "#deliveryList", "#workflowRunList", "#userList", "#tokenList"]) {
     const node = document.querySelector(selector);
     if (node && node.querySelector(".empty")) {
       node.innerHTML = '<div class="empty">Could not load — check the connection, then Retry above · <span lang="th">โหลดไม่สำเร็จ</span></div>';
@@ -325,6 +337,7 @@ function render() {
   renderJobs();
   renderWorkflowRuns();
   renderAudit();
+  renderDeliveries();
   renderIdentity();
   applyRoleGate();
   // Last: keep the selected job's header/cancel/cursor in sync on every poll, after
@@ -381,6 +394,8 @@ function applyRoleGate() {
   }
   for (const node of document.querySelectorAll(".edit-worker, .delete-worker, .edit-workspace, .delete-workspace, .sync-mode-select")) node.disabled = !admin;
   for (const node of document.querySelectorAll(".poll-worker")) node.disabled = !operator;
+  // Auditors can SEE deliveries (deliveries.read) but retry is a write (workflows.run).
+  for (const node of document.querySelectorAll(".delivery-retry")) node.disabled = !operator;
 }
 
 async function login(event) {
@@ -903,6 +918,42 @@ function renderAudit() {
       <span class="audit-detail">${escapeHtml(details)}</span>
       <span class="audit-actor"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>${escapeHtml(entry.actor || "system")}</span>
     </${nav ? "button" : "div"}>`;
+  }).join("");
+}
+
+function renderDeliveries() {
+  const list = $("#deliveryList");
+  if (!list) return;
+  const filter = state.deliveryFilter || "all";
+  for (const chip of document.querySelectorAll(".audit-chip[data-delivery-filter]")) {
+    chip.classList.toggle("is-active", chip.dataset.deliveryFilter === filter);
+  }
+  let rows = state.deliveries;
+  if (filter !== "all") rows = rows.filter((delivery) => delivery.status === filter);
+  if (selectionInside(list)) return;
+  if (!rows.length) {
+    list.innerHTML = '<div class="empty">No deliveries yet — Atlas records one row per signed outbound POST · <span lang="th">ยังไม่มีรายการ</span></div>';
+    return;
+  }
+  const operator = ["admin", "operator"].includes(state.currentUser?.role);
+  list.innerHTML = rows.map((delivery) => {
+    // payload arrives already JSON-decoded and only an event delivery carries one
+    // (contract v1) — a null payload is the run-completion shape.
+    const kind = delivery.payload?.event || "run_completion";
+    const status = delivery.status || "unknown";
+    const detail = delivery.last_error || delivery.url || "";
+    const retry = status === "failed"
+      ? `<button class="delivery-retry secondary-btn btn-sm" type="button" data-delivery-id="${escapeHtml(delivery.id)}"${operator ? "" : " disabled"}>Retry</button>`
+      : "";
+    return `
+    <div class="delivery-row">
+      <span class="audit-time">${escapeHtml(formatTime(delivery.created_at))}</span>
+      <span class="delivery-id" title="${escapeHtml(delivery.id)}">${escapeHtml(delivery.id)}</span>
+      <span class="delivery-kind">${escapeHtml(kind)}</span>
+      <span><span class="status ${statusClass(status)}">${escapeHtml(statusLabel(status))}</span></span>
+      <span class="delivery-attempts">${escapeHtml(String(delivery.attempts ?? 0))}/${escapeHtml(String(delivery.max_attempts ?? 0))}</span>
+      <span class="delivery-detail"><span class="delivery-detail-text" title="${escapeHtml(detail)}">${escapeHtml(detail)}</span>${retry}</span>
+    </div>`;
   }).join("");
 }
 
@@ -1851,10 +1902,28 @@ for (const button of document.querySelectorAll(".nav-item")) {
 for (const chip of document.querySelectorAll(".audit-chip[data-audit-filter]")) {
   chip.addEventListener("click", () => {
     state.auditFilter = chip.dataset.auditFilter;
-    for (const other of document.querySelectorAll(".audit-chip")) other.classList.toggle("is-active", other === chip);
+    // Scoped to the audit group: the Deliveries view reuses .audit-chip styling with its own
+    // data-delivery-filter chips, and those manage their own is-active in renderDeliveries.
+    for (const other of document.querySelectorAll(".audit-chip[data-audit-filter]")) other.classList.toggle("is-active", other === chip);
     renderAudit();
   });
 }
+for (const chip of document.querySelectorAll(".audit-chip[data-delivery-filter]")) {
+  chip.addEventListener("click", () => {
+    state.deliveryFilter = chip.dataset.deliveryFilter;
+    renderDeliveries();
+  });
+}
+// Deliveries retry: one bounded re-attempt server-side (202) — disable the button while in
+// flight, then reload so the row shows the outcome. Auditors have the button disabled.
+document.getElementById("deliveryList")?.addEventListener("click", (event) => {
+  const button = event.target.closest("button.delivery-retry[data-delivery-id]");
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  api(`/api/deliveries/${encodeURIComponent(button.dataset.deliveryId)}/retry`, { method: "POST" })
+    .then(() => { toast("Retry queued · จะลองส่งใหม่"); return loadAll(); })
+    .catch((error) => { toast(error.message); button.disabled = false; loadAll().catch(() => undefined); });
+});
 // Audit cross-nav: a routable row jumps to its target view and selects the resource there.
 document.getElementById("auditList")?.addEventListener("click", (event) => {
   const row = event.target.closest(".audit-row[data-nav-view]");

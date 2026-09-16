@@ -2,9 +2,9 @@
 
 Atlas is a standalone control plane for coordinating many `thclaws --serve`
 workers. It ships a minimal browser ops console (fleet, live jobs, workflow-run
-monitoring, audit, usage, accounts). Ad-hoc job submission with routing/handoff
-is API-only; workflow authoring, approvals, triggers, and deliveries are done
-through [flow-designer](https://github.com/kaebmoo/flow-designer), the full
+monitoring, audit, deliveries, usage, accounts). Ad-hoc job submission with
+routing/handoff is API-only; workflow authoring, approvals, and triggers are
+done through [flow-designer](https://github.com/kaebmoo/flow-designer), the full
 operator frontend built on Atlas's API, or directly through the REST API.
 
 It is intentionally separate from thClaws. Atlas does not patch, fork, or depend
@@ -704,8 +704,9 @@ ATLAS_APPROVAL_OVERDUE_HOURS=
 ```
 
 [`.env.example`](.env.example) carries every name the code reads — more than the list above — with the reason for each;
-copy it to `.env` for local development. **Atlas has no dotenv dependency and never
-reads `.env` by itself** — a shell has to export it first:
+copy it to `.env` for local development. The `scripts/run.sh` development launcher
+loads that repo-local file and exports its values before starting Atlas. A direct
+`python3 -m atlas` invocation still requires the shell export shown below:
 
 ```bash
 set -a; source .env; set +a

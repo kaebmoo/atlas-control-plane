@@ -8,7 +8,7 @@ reviewing audit/usage, and managing accounts.
 > must therefore exist on the worker machine, not necessarily on the Atlas host.
 
 > **Scope.** The embedded UI is deliberately minimal. Building and editing
-> workflows, deciding approvals, and managing triggers and deliveries are done
+> workflows, deciding approvals, and managing triggers are done
 > through **[flow-designer](https://github.com/kaebmoo/flow-designer)** — the
 > full operator frontend for Atlas; see its
 > [Web User Guide](https://github.com/kaebmoo/flow-designer/blob/main/docs/guides/web-user-guide-en.md) —
@@ -350,7 +350,18 @@ Token cards show creation time and provide confirmed **Revoke**.
 | Run does not start | Validate the workflow and run input via the API |
 | Resume is disabled | Resume is for `paused`; use Retry interrupted for recovery |
 
-For workflow authoring, approvals, triggers, and deliveries, see
+## Deliveries
+
+The **Deliveries** view (admin, operator, auditor) lists the last 50 signed
+outbound POSTs — approval reminders (`dlv_apr_*`, KIND `approval_overdue`) and
+run-completion webhooks (KIND `run_completion`) — with their status: `pending`,
+`delivered`, `blocked` (the outbound allowlist or a missing secret refused to
+send; fix the config), or `failed` (all attempts exhausted — that reminder never
+reached a person). The nav badge counts `failed` rows, and each failed row has a
+**Retry** button (operator/admin; one bounded re-attempt against the current
+allowlist). Auditors can read the ledger but not retry.
+
+For workflow authoring, approvals, and triggers, see
 [flow-designer's Web User Guide](https://github.com/kaebmoo/flow-designer/blob/main/docs/guides/web-user-guide-en.md).
 For everything reachable only through the API today (ad-hoc jobs with handoff,
 run file uploads, solution packs, draft/explain/repair, and worker/trigger
