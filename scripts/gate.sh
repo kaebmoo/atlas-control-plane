@@ -16,6 +16,7 @@ python3 -m py_compile \
   scripts/check_cdr.py scripts/check_byok_helper.py scripts/check_silo.py \
   scripts/check_jobs.py scripts/check_backup.py scripts/check_audit_fixes.py \
   scripts/check_docs.py scripts/check_stress.py scripts/check_fuzz.py \
+  scripts/check_run_env.py \
   scripts/check_ui_ux.py scripts/check_input_adapter.py scripts/check_outbound.py \
   scripts/check_observability.py scripts/check_permit_poc.py scripts/check_booth_poc.py scripts/check_event_views.py \
   scripts/check_lib.py scripts/check_async_jobs.py scripts/check_worker_state.py \
@@ -41,6 +42,7 @@ python3 scripts/check_silo.py         # M9 silo invariant
 python3 scripts/check_backup.py       # backup includes the upload store
 python3 scripts/check_audit_fixes.py  # terminal-state races, run snapshot, trigger/limit guards
 python3 scripts/check_docs.py         # docs-drift: README links + route coverage
+python3 scripts/check_run_env.py      # local launcher exports repo-local .env values
 python3 scripts/check_ui_ux.py        # dashboard UX: job sync, mobile drawer, modal focus
 python3 scripts/check_event_views.py  # T2: tool/skill timeline builder, name escaping, dispatch
 python3 scripts/check_worker_state.py # T4: sync_mode gate, busy probe, advisory router tie-break

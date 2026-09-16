@@ -704,8 +704,9 @@ ATLAS_APPROVAL_OVERDUE_HOURS=
 ```
 
 [`.env.example`](.env.example) carries every name the code reads — more than the list above — with the reason for each;
-copy it to `.env` for local development. **Atlas has no dotenv dependency and never
-reads `.env` by itself** — a shell has to export it first:
+copy it to `.env` for local development. The `scripts/run.sh` development launcher
+loads that repo-local file and exports its values before starting Atlas. A direct
+`python3 -m atlas` invocation still requires the shell export shown below:
 
 ```bash
 set -a; source .env; set +a
